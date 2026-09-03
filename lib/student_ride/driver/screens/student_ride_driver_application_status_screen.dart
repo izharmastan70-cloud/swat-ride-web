@@ -1,0 +1,311 @@
+﻿import 'package:flutter/material.dart';
+
+import '../../models/student_ride_driver_application_model.dart';
+import '../../services/student_ride_driver_application_service.dart';
+import 'student_ride_driver_registration_screen.dart';
+import 'student_ride_driver_dashboard_screen.dart';
+
+class StudentRideDriverApplicationStatusScreen extends StatelessWidget {
+  StudentRideDriverApplicationStatusScreen({
+    super.key,
+    StudentRideDriverApplicationService? service,
+  }) : _service = service ?? StudentRideDriverApplicationService();
+
+  final StudentRideDriverApplicationService _service;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Student Ride Driver')),
+      body: StreamBuilder<StudentRideDriverApplicationModel?>(
+        stream: _service.watchMyApplication(),
+        builder: (context, snapshot) {
+          if (snapshot.connectionState == ConnectionState.waiting) {
+            return const Center(child: CircularProgressIndicator());
+          }
+
+          if (snapshot.hasError) {
+            return _MessageView(
+              icon: Icons.cloud_off_rounded,
+              title: 'Unable to load application',
+              message: snapshot.error.toString(),
+              buttonLabel: 'Close',
+              onPressed: () => Navigator.maybePop(context),
+            );
+          }
+
+          final application = snapshot.data;
+          if (application == null) {
+            return _MessageView(
+              icon: Icons.school_rounded,
+              title: 'Become a Student Ride Driver',
+              message:
+                  'Submit a separate application for safe monthly school transport.',
+              buttonLabel: 'Start Registration',
+              onPressed: () => Navigator.push(
+                context,
+                MaterialPageRoute<void>(
+                  builder: (_) =>
+                      const StudentRideDriverRegistrationScreen(),
+                ),
+              ),
+            );
+          }
+
+          return _ApplicationDetails(application: application);
+        },
+      ),
+    );
+  }
+}
+
+class _ApplicationDetails extends StatelessWidget {
+  const _ApplicationDetails({required this.application});
+
+  final StudentRideDriverApplicationModel application;
+
+  @override
+  Widget build(BuildContext context) {
+    final presentation = _presentation(application.status);
+
+    return ListView(
+      padding: const EdgeInsets.all(16),
+      children: [
+        Card(
+          color: presentation.color.withValues(alpha: 0.12),
+          child: Padding(
+            padding: const EdgeInsets.all(20),
+            child: Column(
+              children: [
+                Icon(presentation.icon, size: 56, color: presentation.color),
+                const SizedBox(height: 12),
+                Text(
+                  presentation.title,
+                  textAlign: TextAlign.center,
+                  style: Theme.of(context).textTheme.headlineSmall?.copyWith(
+                        fontWeight: FontWeight.w800,
+                      ),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  presentation.message,
+                  textAlign: TextAlign.center,
+                ),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(height: 16),
+        _section(context, 'Application'),
+        _detail('Application ID', application.id),
+        _detail('Applicant', application.fullName),
+        _detail('Phone', application.phoneNumber),
+        _detail('City', application.city),
+        _detail(
+          'Submitted',
+          _formatDate(application.submittedAt),
+        ),
+        _section(context, 'Vehicle and availability'),
+        _detail(
+          'Vehicle',
+          '${application.vehicleMake} ${application.vehicleModel}'.trim(),
+        ),
+        _detail(
+          'Registration',
+          application.vehicleRegistrationNumber,
+        ),
+        _detail('Capacity', '${application.seatingCapacity} students'),
+        _detail('Morning shift', application.morningAvailable ? 'Yes' : 'No'),
+        _detail(
+          'Afternoon shift',
+          application.afternoonAvailable ? 'Yes' : 'No',
+        ),
+        if (application.rejectionReason.trim().isNotEmpty) ...[
+          _section(context, 'Admin decision'),
+          Card(
+            color: Theme.of(context).colorScheme.errorContainer,
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Text(application.rejectionReason),
+            ),
+          ),
+        ],
+        if (application.adminNotes.trim().isNotEmpty) ...[
+          _section(context, 'Admin note'),
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Text(application.adminNotes),
+            ),
+          ),
+        ],
+        if (application.status ==
+            StudentRideDriverApplicationStatus.approved) ...[
+          const SizedBox(height: 20),
+          FilledButton.icon(
+            onPressed: () => Navigator.pushReplacement(
+              context,
+              MaterialPageRoute<void>(
+                builder: (_) =>
+                    const StudentRideDriverDashboardScreen(),
+              ),
+            ),
+            icon: const Icon(Icons.dashboard_rounded),
+            label: const Text('Open Driver Dashboard'),
+          ),
+        ],
+        if (application.status ==
+            StudentRideDriverApplicationStatus.rejected) ...[
+          const SizedBox(height: 20),
+          OutlinedButton.icon(
+            onPressed: () => Navigator.push(
+              context,
+              MaterialPageRoute<void>(
+                builder: (_) => const StudentRideDriverRegistrationScreen(),
+              ),
+            ),
+            icon: const Icon(Icons.edit_document),
+            label: const Text('Update and Resubmit'),
+          ),
+        ],
+        const SizedBox(height: 32),
+      ],
+    );
+  }
+
+  Widget _section(BuildContext context, String title) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 12, bottom: 8),
+      child: Text(
+        title,
+        style: Theme.of(context).textTheme.titleMedium?.copyWith(
+              fontWeight: FontWeight.w700,
+            ),
+      ),
+    );
+  }
+
+  Widget _detail(String label, String value) {
+    return Card(
+      margin: const EdgeInsets.only(bottom: 8),
+      child: ListTile(
+        title: Text(label),
+        subtitle: Text(value.trim().isEmpty ? 'Not provided' : value),
+      ),
+    );
+  }
+
+  String _formatDate(DateTime? value) {
+    if (value == null) return 'Processing';
+    final day = value.day.toString().padLeft(2, '0');
+    final month = value.month.toString().padLeft(2, '0');
+    return '$day/$month/${value.year}';
+  }
+
+  _StatusPresentation _presentation(
+    StudentRideDriverApplicationStatus status,
+  ) {
+    switch (status) {
+      case StudentRideDriverApplicationStatus.draft:
+        return const _StatusPresentation(
+          Icons.edit_note_rounded,
+          Colors.blueGrey,
+          'Application Draft',
+          'Complete and submit your Student Ride Driver application.',
+        );
+      case StudentRideDriverApplicationStatus.submitted:
+        return const _StatusPresentation(
+          Icons.hourglass_top_rounded,
+          Colors.orange,
+          'Application Submitted',
+          'Your application is waiting for admin review.',
+        );
+      case StudentRideDriverApplicationStatus.underReview:
+        return const _StatusPresentation(
+          Icons.manage_search_rounded,
+          Colors.blue,
+          'Under Review',
+          'Admin is checking your identity, vehicle and safety documents.',
+        );
+      case StudentRideDriverApplicationStatus.approved:
+        return const _StatusPresentation(
+          Icons.verified_rounded,
+          Colors.green,
+          'Approved',
+          'You are approved for Student Ride route assignments.',
+        );
+      case StudentRideDriverApplicationStatus.rejected:
+        return const _StatusPresentation(
+          Icons.cancel_rounded,
+          Colors.red,
+          'Application Rejected',
+          'Review the admin reason, correct your information and resubmit.',
+        );
+      case StudentRideDriverApplicationStatus.suspended:
+        return const _StatusPresentation(
+          Icons.block_rounded,
+          Colors.deepOrange,
+          'Student Ride Access Suspended',
+          'Route access is paused. Contact SWAT RIDE support or admin.',
+        );
+    }
+  }
+}
+
+class _MessageView extends StatelessWidget {
+  const _MessageView({
+    required this.icon,
+    required this.title,
+    required this.message,
+    required this.buttonLabel,
+    required this.onPressed,
+  });
+
+  final IconData icon;
+  final String title;
+  final String message;
+  final String buttonLabel;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(icon, size: 72),
+            const SizedBox(height: 20),
+            Text(
+              title,
+              textAlign: TextAlign.center,
+              style: Theme.of(context).textTheme.headlineSmall?.copyWith(
+                    fontWeight: FontWeight.w800,
+                  ),
+            ),
+            const SizedBox(height: 10),
+            Text(message, textAlign: TextAlign.center),
+            const SizedBox(height: 24),
+            FilledButton(onPressed: onPressed, child: Text(buttonLabel)),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _StatusPresentation {
+  const _StatusPresentation(
+    this.icon,
+    this.color,
+    this.title,
+    this.message,
+  );
+
+  final IconData icon;
+  final Color color;
+  final String title;
+  final String message;
+}
+

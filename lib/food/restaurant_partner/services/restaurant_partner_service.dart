@@ -1,0 +1,945 @@
+// lib/food/restaurant_partner/services/restaurant_partner_service.dart
+// =============================================================
+// SWAT RIDE - FOOD DELIVERY
+// Restaurant Partner Firestore Service
+//
+// Scope:
+// - Submit restaurant partner applications
+// - Watch application status
+// - Update partner profile
+// - Admin approve, reject, suspend, restore
+// - Create and connect the customer-facing RestaurantModel
+//
+// Firebase Storage remains bypassed for now.
+// Document/image fields may temporarily contain local paths.
+// =============================================================
+
+import 'package:cloud_firestore/cloud_firestore.dart';
+
+import '../../models/restaurant_model.dart';
+import '../../services/restaurant_service.dart';
+import '../models/restaurant_partner_model.dart';
+
+class RestaurantPartnerService {
+  RestaurantPartnerService({
+    FirebaseFirestore? firestore,
+    RestaurantService? restaurantService,
+  })  : _firestore = firestore ?? FirebaseFirestore.instance,
+        _restaurantService =
+            restaurantService ?? RestaurantService();
+
+  final FirebaseFirestore _firestore;
+  final RestaurantService _restaurantService;
+
+  static const String partnersCollection =
+      'food_restaurant_partners';
+
+  CollectionReference<Map<String, dynamic>>
+      get _partnersRef =>
+          _firestore.collection(partnersCollection);
+
+  // ===========================================================
+  // CREATE / SUBMIT APPLICATION
+  // ===========================================================
+
+  Future<String> submitApplication(
+    RestaurantPartnerModel partner,
+  ) async {
+    if (partner.userId.trim().isEmpty) {
+      throw const RestaurantPartnerServiceException(
+        message: 'User ID is required.',
+      );
+    }
+
+    if (partner.ownerName.trim().isEmpty) {
+      throw const RestaurantPartnerServiceException(
+        message: 'Owner name is required.',
+      );
+    }
+
+    if (partner.restaurantName.trim().isEmpty) {
+      throw const RestaurantPartnerServiceException(
+        message: 'Restaurant name is required.',
+      );
+    }
+
+    try {
+      final DocumentReference<Map<String, dynamic>> document =
+          partner.partnerId.trim().isEmpty
+              ? _partnersRef.doc()
+              : _partnersRef.doc(partner.partnerId);
+
+      final DateTime now = DateTime.now();
+
+      final RestaurantPartnerModel data =
+          partner.copyWith(
+        partnerId: document.id,
+        applicationStatus:
+            RestaurantPartnerApplicationStatus.pending,
+        isApproved: false,
+        isRejected: false,
+        isBlocked: false,
+        isActive: false,
+        rejectionReason: '',
+        suspensionReason: '',
+        updatedAt: now,
+      );
+
+      await document.set(
+        data.toMap(),
+        SetOptions(merge: true),
+      );
+
+      return document.id;
+    } on FirebaseException catch (error) {
+      throw RestaurantPartnerServiceException(
+        message: _firebaseMessage(error),
+        code: error.code,
+      );
+    } catch (error) {
+      throw RestaurantPartnerServiceException(
+        message:
+            'Unable to submit restaurant application: $error',
+      );
+    }
+  }
+
+  // ===========================================================
+  // GET / WATCH PARTNER
+  // ===========================================================
+
+  Future<RestaurantPartnerModel?> getPartnerById(
+    String partnerId,
+  ) async {
+    if (partnerId.trim().isEmpty) {
+      return null;
+    }
+
+    try {
+      final DocumentSnapshot<Map<String, dynamic>> snapshot =
+          await _partnersRef.doc(partnerId).get();
+
+      if (!snapshot.exists || snapshot.data() == null) {
+        return null;
+      }
+
+      return _partnerFromSnapshot(snapshot);
+    } on FirebaseException catch (error) {
+      throw RestaurantPartnerServiceException(
+        message: _firebaseMessage(error),
+        code: error.code,
+      );
+    }
+  }
+
+  Stream<RestaurantPartnerModel?> watchPartnerById(
+    String partnerId,
+  ) {
+    if (partnerId.trim().isEmpty) {
+      return Stream<RestaurantPartnerModel?>.value(null);
+    }
+
+    return _partnersRef
+        .doc(partnerId)
+        .snapshots()
+        .map(
+      (DocumentSnapshot<Map<String, dynamic>> snapshot) {
+        if (!snapshot.exists || snapshot.data() == null) {
+          return null;
+        }
+
+        return _partnerFromSnapshot(snapshot);
+      },
+    );
+  }
+
+  Future<RestaurantPartnerModel?> getPartnerByUserId(
+    String userId,
+  ) async {
+    if (userId.trim().isEmpty) {
+      return null;
+    }
+
+    try {
+      final QuerySnapshot<Map<String, dynamic>> snapshot =
+          await _partnersRef
+              .where('userId', isEqualTo: userId)
+              .limit(1)
+              .get();
+
+      if (snapshot.docs.isEmpty) {
+        return null;
+      }
+
+      return _partnerFromSnapshot(snapshot.docs.first);
+    } on FirebaseException catch (error) {
+      throw RestaurantPartnerServiceException(
+        message: _firebaseMessage(error),
+        code: error.code,
+      );
+    }
+  }
+
+  Stream<RestaurantPartnerModel?> watchPartnerByUserId(
+    String userId,
+  ) {
+    if (userId.trim().isEmpty) {
+      return Stream<RestaurantPartnerModel?>.value(null);
+    }
+
+    return _partnersRef
+        .where('userId', isEqualTo: userId)
+        .limit(1)
+        .snapshots()
+        .map(
+      (QuerySnapshot<Map<String, dynamic>> snapshot) {
+        if (snapshot.docs.isEmpty) {
+          return null;
+        }
+
+        return _partnerFromSnapshot(
+          snapshot.docs.first,
+        );
+      },
+    );
+  }
+
+  // ===========================================================
+  // ADMIN APPLICATION LISTS
+  // ===========================================================
+
+  Stream<List<RestaurantPartnerModel>>
+      watchPendingApplications({
+    int limit = 100,
+  }) {
+    return _partnersRef
+        .where(
+          'applicationStatus',
+          isEqualTo:
+              RestaurantPartnerApplicationStatus.pending.value,
+        )
+        .limit(limit)
+        .snapshots()
+        .map(_partnerListFromQuery);
+  }
+
+  Stream<List<RestaurantPartnerModel>>
+      watchAllApplications({
+    int limit = 200,
+  }) {
+    return _partnersRef
+        .limit(limit)
+        .snapshots()
+        .map(_partnerListFromQuery);
+  }
+
+  // ===========================================================
+  // UPDATE PROFILE
+  // ===========================================================
+
+  Future<void> updatePartner(
+    RestaurantPartnerModel partner,
+  ) async {
+    if (partner.partnerId.trim().isEmpty) {
+      throw const RestaurantPartnerServiceException(
+        message: 'Partner ID is required.',
+      );
+    }
+
+    try {
+      await _partnersRef.doc(partner.partnerId).set(
+            partner
+                .copyWith(updatedAt: DateTime.now())
+                .toMap(),
+            SetOptions(merge: true),
+          );
+
+      if (partner.restaurantId.trim().isNotEmpty &&
+          partner.isApproved) {
+        await _syncRestaurantProfile(partner);
+      }
+    } on FirebaseException catch (error) {
+      throw RestaurantPartnerServiceException(
+        message: _firebaseMessage(error),
+        code: error.code,
+      );
+    } catch (error) {
+      throw RestaurantPartnerServiceException(
+        message:
+            'Unable to update restaurant partner: $error',
+      );
+    }
+  }
+
+  Future<void> updatePartnerFields({
+    required String partnerId,
+    required Map<String, dynamic> fields,
+  }) async {
+    if (partnerId.trim().isEmpty) {
+      throw const RestaurantPartnerServiceException(
+        message: 'Partner ID is required.',
+      );
+    }
+
+    try {
+      await _partnersRef.doc(partnerId).update(
+        <String, dynamic>{
+          ...fields,
+          'updatedAt':
+              DateTime.now().toIso8601String(),
+        },
+      );
+    } on FirebaseException catch (error) {
+      throw RestaurantPartnerServiceException(
+        message: _firebaseMessage(error),
+        code: error.code,
+      );
+    }
+  }
+
+  // ===========================================================
+  // ADMIN APPROVAL
+  // ===========================================================
+
+  Future<String> approvePartner(
+    String partnerId, {
+    double commissionPercentage = 15,
+    required String reviewedBy,
+    String adminNote = '',
+  }) async {
+    final String reviewerId = reviewedBy.trim();
+    if (reviewerId.isEmpty) {
+      throw const RestaurantPartnerServiceException(
+        message: 'Authenticated Food Admin is required.',
+      );
+    }
+
+    final RestaurantPartnerModel? partner =
+        await getPartnerById(partnerId);
+
+    if (partner == null) {
+      throw const RestaurantPartnerServiceException(
+        message:
+            'Restaurant partner application was not found.',
+      );
+    }
+
+    final double safeCommission =
+        commissionPercentage.clamp(0, 100).toDouble();
+
+    final DateTime now = DateTime.now();
+
+    String restaurantId =
+        partner.restaurantId.trim();
+
+    if (restaurantId.isEmpty) {
+      final RestaurantModel restaurant =
+          _restaurantFromPartner(
+        partner,
+        commissionPercentage: safeCommission,
+        approvedAt: now,
+      );
+
+      restaurantId =
+          await _restaurantService.createRestaurant(
+        restaurant,
+      );
+    } else {
+      final RestaurantModel? currentRestaurant =
+          await _restaurantService.getRestaurantById(
+        restaurantId,
+      );
+
+      if (currentRestaurant == null) {
+        final RestaurantModel restaurant =
+            _restaurantFromPartner(
+          partner.copyWith(
+            restaurantId: restaurantId,
+          ),
+          commissionPercentage: safeCommission,
+          approvedAt: now,
+        );
+
+        restaurantId =
+            await _restaurantService.createRestaurant(
+          restaurant,
+        );
+      } else {
+        await _restaurantService.updateRestaurant(
+          currentRestaurant.copyWith(
+            ownerId: partner.userId,
+            name: partner.restaurantName,
+            description: partner.description,
+            phoneNumber: partner.phoneNumber,
+            email: partner.email,
+            logoUrl: partner.logoImagePath,
+            coverImageUrl:
+                partner.coverImagePath,
+            address: partner.address,
+            city: partner.city,
+            area: partner.area,
+            landmark: partner.landmark,
+            latitude: partner.latitude,
+            longitude: partner.longitude,
+            categories: partner.categories,
+            foodTypes: partner.foodTypes,
+            deliveryFee: partner.deliveryFee,
+            minimumOrderAmount:
+                partner.minimumOrderAmount,
+            maximumDeliveryDistanceKm:
+                partner.deliveryRadiusKm,
+            openingTime: partner.openingTime,
+            closingTime: partner.closingTime,
+            openDays: partner.openDays,
+            commissionPercentage:
+                safeCommission,
+            acceptsCash: partner.acceptsCash,
+            acceptsWallet:
+                partner.acceptsWallet,
+            acceptsJazzCash:
+                partner.acceptsJazzCash,
+            acceptsEasypaisa:
+                partner.acceptsEasypaisa,
+            approvalStatus:
+                RestaurantApprovalStatus.approved,
+            isApproved: true,
+            isActive: true,
+            isSuspended: false,
+            isOpen: true,
+            isTemporarilyClosed: false,
+            rejectionReason: '',
+            suspensionReason: '',
+            approvedAt: now,
+            updatedAt: now,
+          ),
+        );
+      }
+    }
+
+    await updatePartnerFields(
+      partnerId: partnerId,
+      fields: <String, dynamic>{
+        'restaurantId': restaurantId,
+        'applicationStatus':
+            RestaurantPartnerApplicationStatus
+                .approved
+                .value,
+        'isApproved': true,
+        'isRejected': false,
+        'isBlocked': false,
+        'isActive': true,
+        'rejectionReason': '',
+        'suspensionReason': '',
+        'commissionPercentage':
+            safeCommission,
+        'approvedAt': now.toIso8601String(),
+        'adminNote': adminNote.trim(),
+        'reviewedBy': reviewerId,
+        'reviewedAt': FieldValue.serverTimestamp(),
+      },
+    );
+
+    return restaurantId;
+  }
+
+  Future<void> rejectPartner({
+    required String partnerId,
+    required String reason,
+    required String reviewedBy,
+  }) async {
+    final String reviewerId = reviewedBy.trim();
+    if (reviewerId.isEmpty) {
+      throw const RestaurantPartnerServiceException(
+        message: 'Authenticated Food Admin is required.',
+      );
+    }
+
+    if (reason.trim().isEmpty) {
+      throw const RestaurantPartnerServiceException(
+        message: 'Rejection reason is required.',
+      );
+    }
+
+    await updatePartnerFields(
+      partnerId: partnerId,
+      fields: <String, dynamic>{
+        'applicationStatus':
+            RestaurantPartnerApplicationStatus.rejected.value,
+        'isApproved': false,
+        'isRejected': true,
+        'isActive': false,
+        'rejectionReason': reason.trim(),
+        'adminNote': reason.trim(),
+        'reviewedBy': reviewerId,
+        'reviewedAt': FieldValue.serverTimestamp(),
+      },
+    );
+  }
+
+  Future<void> requestApplicationCorrection({
+    required String partnerId,
+    required String correctionNote,
+    required String reviewedBy,
+  }) async {
+    final String note = correctionNote.trim();
+    final String reviewerId = reviewedBy.trim();
+
+    if (note.isEmpty) {
+      throw const RestaurantPartnerServiceException(
+        message: 'Correction instructions are required.',
+      );
+    }
+
+    if (reviewerId.isEmpty) {
+      throw const RestaurantPartnerServiceException(
+        message: 'Authenticated Food Admin is required.',
+      );
+    }
+
+    await updatePartnerFields(
+      partnerId: partnerId,
+      fields: <String, dynamic>{
+        'applicationStatus':
+            RestaurantPartnerApplicationStatus.underReview.value,
+        'isApproved': false,
+        'isRejected': false,
+        'isActive': false,
+        'rejectionReason': '',
+        'adminNote': note,
+        'reviewedBy': reviewerId,
+        'reviewedAt': FieldValue.serverTimestamp(),
+      },
+    );
+  }
+
+  Future<void> resetApplicationForReview({
+    required String partnerId,
+    required String reviewedBy,
+    String adminNote = 'Application reset for review.',
+  }) async {
+    final String reviewerId = reviewedBy.trim();
+    if (reviewerId.isEmpty) {
+      throw const RestaurantPartnerServiceException(
+        message: 'Authenticated Food Admin is required.',
+      );
+    }
+
+    await updatePartnerFields(
+      partnerId: partnerId,
+      fields: <String, dynamic>{
+        'applicationStatus':
+            RestaurantPartnerApplicationStatus.pending.value,
+        'isApproved': false,
+        'isRejected': false,
+        'isBlocked': false,
+        'isActive': false,
+        'rejectionReason': '',
+        'suspensionReason': '',
+        'adminNote': adminNote.trim(),
+        'reviewedBy': reviewerId,
+        'reviewedAt': FieldValue.serverTimestamp(),
+      },
+    );
+  }
+  Future<void> suspendPartner({
+    required String partnerId,
+    required String reason,
+    required String reviewedBy,
+  }) async {
+    final String reviewerId = reviewedBy.trim();
+    if (reviewerId.isEmpty) {
+      throw const RestaurantPartnerServiceException(
+        message: 'Authenticated Food Admin is required.',
+      );
+    }
+
+    final RestaurantPartnerModel? partner =
+        await getPartnerById(partnerId);
+
+    if (partner == null) {
+      throw const RestaurantPartnerServiceException(
+        message: 'Restaurant partner was not found.',
+      );
+    }
+
+    await updatePartnerFields(
+      partnerId: partnerId,
+      fields: <String, dynamic>{
+        'applicationStatus':
+            RestaurantPartnerApplicationStatus.suspended.value,
+        'isBlocked': true,
+        'isActive': false,
+        'suspensionReason': reason.trim(),
+        'adminNote': reason.trim(),
+        'reviewedBy': reviewerId,
+        'reviewedAt': FieldValue.serverTimestamp(),
+      },
+    );
+
+    if (partner.restaurantId.trim().isNotEmpty) {
+      await _restaurantService.suspendRestaurant(
+        restaurantId: partner.restaurantId,
+        reason: reason,
+      );
+    }
+  }
+
+  Future<void> restorePartner(
+    String partnerId, {
+    required String reviewedBy,
+    String adminNote = 'Restaurant access restored.',
+  }) async {
+    final String reviewerId = reviewedBy.trim();
+    if (reviewerId.isEmpty) {
+      throw const RestaurantPartnerServiceException(
+        message: 'Authenticated Food Admin is required.',
+      );
+    }
+
+    final RestaurantPartnerModel? partner =
+        await getPartnerById(partnerId);
+
+    if (partner == null) {
+      throw const RestaurantPartnerServiceException(
+        message: 'Restaurant partner was not found.',
+      );
+    }
+
+    await updatePartnerFields(
+      partnerId: partnerId,
+      fields: <String, dynamic>{
+        'applicationStatus':
+            RestaurantPartnerApplicationStatus.approved.value,
+        'isApproved': true,
+        'isRejected': false,
+        'isBlocked': false,
+        'isActive': true,
+        'suspensionReason': '',
+        'adminNote': adminNote.trim(),
+        'reviewedBy': reviewerId,
+        'reviewedAt': FieldValue.serverTimestamp(),
+      },
+    );
+
+    if (partner.restaurantId.trim().isNotEmpty) {
+      await _restaurantService.restoreRestaurant(
+        partner.restaurantId,
+      );
+    }
+  }
+
+  // ===========================================================
+  // PARTNER BUSINESS CONTROLS
+  // ===========================================================
+
+  Future<void> setRestaurantOpenStatus({
+    required String partnerId,
+    required bool isOpen,
+  }) async {
+    final RestaurantPartnerModel? partner =
+        await getPartnerById(partnerId);
+
+    if (partner == null ||
+        partner.restaurantId.trim().isEmpty) {
+      throw const RestaurantPartnerServiceException(
+        message:
+            'Approved restaurant record is not available.',
+      );
+    }
+
+    await _restaurantService.setRestaurantOpenStatus(
+      restaurantId: partner.restaurantId,
+      isOpen: isOpen,
+    );
+  }
+
+  Future<void> setTemporaryClosure({
+    required String partnerId,
+    required bool isClosed,
+    String reason = '',
+  }) async {
+    final RestaurantPartnerModel? partner =
+        await getPartnerById(partnerId);
+
+    if (partner == null ||
+        partner.restaurantId.trim().isEmpty) {
+      throw const RestaurantPartnerServiceException(
+        message:
+            'Approved restaurant record is not available.',
+      );
+    }
+
+    await _restaurantService.setTemporaryClosure(
+      restaurantId: partner.restaurantId,
+      isClosed: isClosed,
+      reason: reason,
+    );
+  }
+
+  Future<void> updateCommission({
+    required String partnerId,
+    required double commissionPercentage,
+  }) async {
+    final RestaurantPartnerModel? partner =
+        await getPartnerById(partnerId);
+
+    if (partner == null) {
+      throw const RestaurantPartnerServiceException(
+        message: 'Restaurant partner was not found.',
+      );
+    }
+
+    final double safeCommission =
+        commissionPercentage.clamp(0, 100).toDouble();
+
+    await updatePartnerFields(
+      partnerId: partnerId,
+      fields: <String, dynamic>{
+        'commissionPercentage': safeCommission,
+      },
+    );
+
+    if (partner.restaurantId.trim().isNotEmpty) {
+      await _restaurantService.updateCommission(
+        restaurantId: partner.restaurantId,
+        commissionPercentage: safeCommission,
+      );
+    }
+  }
+
+  // ===========================================================
+  // DELETE
+  // ===========================================================
+
+  Future<void> deletePartner(
+    String partnerId,
+  ) async {
+    if (partnerId.trim().isEmpty) {
+      throw const RestaurantPartnerServiceException(
+        message: 'Partner ID is required.',
+      );
+    }
+
+    try {
+      await _partnersRef.doc(partnerId).delete();
+    } on FirebaseException catch (error) {
+      throw RestaurantPartnerServiceException(
+        message: _firebaseMessage(error),
+        code: error.code,
+      );
+    }
+  }
+
+  // ===========================================================
+  // RESTAURANT SYNCHRONIZATION
+  // ===========================================================
+
+  Future<void> _syncRestaurantProfile(
+    RestaurantPartnerModel partner,
+  ) async {
+    final RestaurantModel? current =
+        await _restaurantService.getRestaurantById(
+      partner.restaurantId,
+    );
+
+    if (current == null) {
+      return;
+    }
+
+    await _restaurantService.updateRestaurant(
+      current.copyWith(
+        ownerId: partner.userId,
+        name: partner.restaurantName,
+        description: partner.description,
+        phoneNumber: partner.phoneNumber,
+        email: partner.email,
+        logoUrl: partner.logoImagePath,
+        coverImageUrl: partner.coverImagePath,
+        address: partner.address,
+        city: partner.city,
+        area: partner.area,
+        landmark: partner.landmark,
+        latitude: partner.latitude,
+        longitude: partner.longitude,
+        categories: partner.categories,
+        foodTypes: partner.foodTypes,
+        deliveryFee: partner.deliveryFee,
+        minimumOrderAmount:
+            partner.minimumOrderAmount,
+        maximumDeliveryDistanceKm:
+            partner.deliveryRadiusKm,
+        openingTime: partner.openingTime,
+        closingTime: partner.closingTime,
+        openDays: partner.openDays,
+        commissionPercentage:
+            partner.commissionPercentage,
+        acceptsCash: partner.acceptsCash,
+        acceptsWallet: partner.acceptsWallet,
+        acceptsJazzCash: partner.acceptsJazzCash,
+        acceptsEasypaisa: partner.acceptsEasypaisa,
+        updatedAt: DateTime.now(),
+      ),
+    );
+  }
+
+  RestaurantModel _restaurantFromPartner(
+    RestaurantPartnerModel partner, {
+    required double commissionPercentage,
+    required DateTime approvedAt,
+  }) {
+    final DateTime now = DateTime.now();
+
+    return RestaurantModel(
+      id: partner.restaurantId,
+      ownerId: partner.userId,
+      name: partner.restaurantName,
+      description: partner.description,
+      phoneNumber: partner.phoneNumber,
+      email: partner.email,
+      logoUrl: partner.logoImagePath,
+      coverImageUrl: partner.coverImagePath,
+      originalMenuImageUrls:
+          List<String>.from(
+        partner.galleryImagePaths,
+      ),
+      address: partner.address,
+      city: partner.city,
+      area: partner.area,
+      landmark: partner.landmark,
+      latitude: partner.latitude,
+      longitude: partner.longitude,
+      categories: partner.categories,
+      foodTypes: partner.foodTypes,
+      rating: 0,
+      totalReviews: 0,
+      totalOrders: 0,
+      deliveryFee: partner.deliveryFee,
+      minimumOrderAmount:
+          partner.minimumOrderAmount,
+      minimumDeliveryTimeMinutes: 20,
+      maximumDeliveryTimeMinutes: 45,
+      maximumDeliveryDistanceKm:
+          partner.deliveryRadiusKm,
+      isFreeDeliveryAvailable:
+          partner.deliveryFee <= 0,
+      openingTime: partner.openingTime,
+      closingTime: partner.closingTime,
+      openDays: partner.openDays,
+      isOpen: true,
+      isBusy: false,
+      isTemporarilyClosed: false,
+      temporaryClosingReason: '',
+      approvalStatus:
+          RestaurantApprovalStatus.approved,
+      isApproved: true,
+      isActive: true,
+      isSuspended: false,
+      rejectionReason: '',
+      suspensionReason: '',
+      isFeatured: false,
+      isPopular: false,
+      isSponsored: false,
+      discountPercentage: 0,
+      discountTitle: '',
+      commissionPercentage:
+          commissionPercentage,
+      acceptsCash: partner.acceptsCash,
+      acceptsWallet: partner.acceptsWallet,
+      acceptsJazzCash: partner.acceptsJazzCash,
+      acceptsEasypaisa: partner.acceptsEasypaisa,
+      autoAcceptOrders: false,
+      defaultPreparationTimeMinutes: 25,
+      hasOriginalMenuImages:
+          partner.galleryImagePaths.isNotEmpty,
+      hasDigitalMenu: false,
+      menuVerifiedByOwner: false,
+      menuApprovedByAdmin: false,
+      menuLastUpdatedAt: null,
+      ownerCnicFrontUrl: partner.cnicFrontPath,
+      ownerCnicBackUrl: partner.cnicBackPath,
+      restaurantFrontImageUrl:
+          partner.coverImagePath,
+      restaurantLicenseUrl:
+          partner.restaurantLicensePath,
+      createdAt: now,
+      updatedAt: now,
+      approvedAt: approvedAt,
+    );
+  }
+
+  // ===========================================================
+  // MAPPERS
+  // ===========================================================
+
+  RestaurantPartnerModel _partnerFromSnapshot(
+    DocumentSnapshot<Map<String, dynamic>> snapshot,
+  ) {
+    final Map<String, dynamic> data =
+        Map<String, dynamic>.from(
+      snapshot.data() ?? const <String, dynamic>{},
+    );
+
+    data['partnerId'] = snapshot.id;
+
+    return RestaurantPartnerModel.fromMap(data);
+  }
+
+  List<RestaurantPartnerModel> _partnerListFromQuery(
+    QuerySnapshot<Map<String, dynamic>> snapshot,
+  ) {
+    final List<RestaurantPartnerModel> partners =
+        snapshot.docs
+            .map(_partnerFromSnapshot)
+            .toList();
+
+    partners.sort(
+      (
+        RestaurantPartnerModel first,
+        RestaurantPartnerModel second,
+      ) =>
+          second.createdAt.compareTo(first.createdAt),
+    );
+
+    return partners;
+  }
+
+  String _firebaseMessage(
+    FirebaseException error,
+  ) {
+    switch (error.code) {
+      case 'permission-denied':
+        return 'You do not have permission to perform this restaurant partner action.';
+      case 'unavailable':
+        return 'Firebase is temporarily unavailable. Please try again.';
+      case 'not-found':
+        return 'Restaurant partner record was not found.';
+      case 'already-exists':
+        return 'This restaurant partner record already exists.';
+      case 'failed-precondition':
+        return 'Firebase requires an index or another condition before this action can run.';
+      default:
+        return error.message ??
+            'A Firebase error occurred (${error.code}).';
+    }
+  }
+}
+
+class RestaurantPartnerServiceException
+    implements Exception {
+  const RestaurantPartnerServiceException({
+    required this.message,
+    this.code = '',
+  });
+
+  final String message;
+  final String code;
+
+  @override
+  String toString() {
+    if (code.trim().isEmpty) {
+      return message;
+    }
+
+    return 'RestaurantPartnerServiceException($code): $message';
+  }
+}

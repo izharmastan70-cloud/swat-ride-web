@@ -1,0 +1,667 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
+
+import '../models/complaint_model.dart';
+import '../models/feedback_model.dart';
+import 'feedback_service.dart';
+
+class ComplaintService {
+  static const String complaintsCollectionName = 'feedback_complaints';
+  static const String safetyQueueCollectionName =
+      'feedback_safety_escalation_queue';
+  static const String auditCollectionName = 'feedback_complaint_audit_logs';
+
+  final FirebaseFirestore _firestore;
+
+  ComplaintService({FirebaseFirestore? firestore})
+    : _firestore = firestore ?? FirebaseFirestore.instance;
+
+  CollectionReference<Map<String, dynamic>> get _complaints =>
+      _firestore.collection(complaintsCollectionName);
+
+  CollectionReference<Map<String, dynamic>> get _safetyQueue =>
+      _firestore.collection(safetyQueueCollectionName);
+
+  CollectionReference<Map<String, dynamic>> get _auditLogs =>
+      _firestore.collection(auditCollectionName);
+
+  DocumentReference<Map<String, dynamic>> get _settingsDocument => _firestore
+      .collection(FeedbackService.settingsCollectionName)
+      .doc(FeedbackService.settingsDocumentId);
+
+  Future<bool> isComplaintModuleEnabled() async {
+    final snapshot = await _settingsDocument.get();
+    final data = snapshot.data();
+
+    if (!snapshot.exists || data == null) {
+      return true;
+    }
+
+    final value = data['complaintModuleEnabled'];
+    return value is bool ? value : true;
+  }
+
+  Stream<bool> watchComplaintModuleEnabled() {
+    return _settingsDocument.snapshots().map((snapshot) {
+      final data = snapshot.data();
+
+      if (!snapshot.exists || data == null) {
+        return true;
+      }
+
+      final value = data['complaintModuleEnabled'];
+      return value is bool ? value : true;
+    });
+  }
+
+  Future<String> createComplaint({required ComplaintModel complaint}) async {
+    if (!(await isComplaintModuleEnabled())) {
+      throw const FeedbackOperationException(
+        'complaints-disabled',
+        'The complaint module is currently disabled.',
+      );
+    }
+
+    final now = DateTime.now();
+    final complaintReference = complaint.id.trim().isEmpty
+        ? _complaints.doc()
+        : _complaints.doc(complaint.id.trim());
+
+    final ticketId = complaint.ticketId.trim().isEmpty
+        ? ComplaintModel.generateTicketId(
+            serviceType: complaint.serviceType,
+            time: now,
+            suffix: complaintReference.id.length >= 4
+                ? complaintReference.id.substring(0, 4)
+                : complaintReference.id,
+          )
+        : complaint.ticketId.trim().toUpperCase();
+
+    final safetyRequired =
+        complaint.category.requiresSafetyEscalation ||
+        complaint.safetyEscalationRequired;
+
+    final initialHistory = ComplaintStatusHistory(
+      status: ComplaintStatus.open,
+      changedBy: complaint.reporterId.trim(),
+      actorType: ComplaintActorType.customer,
+      note: 'Complaint submitted.',
+      changedAt: now,
+    );
+
+    final prepared = complaint
+        .copyWith(
+          id: complaintReference.id,
+          ticketId: ticketId,
+          priority: complaint.priority,
+          status: ComplaintStatus.open,
+          safetyEscalationRequired: safetyRequired,
+          safetyEscalationSent: false,
+          createdAt: now,
+          updatedAt: now,
+          statusHistory: <ComplaintStatusHistory>[
+            ...complaint.statusHistory,
+            if (complaint.statusHistory.isEmpty) initialHistory,
+          ],
+        )
+        .normalized();
+
+    await _firestore.runTransaction((transaction) async {
+      final existingComplaint = await transaction.get(complaintReference);
+
+      if (existingComplaint.exists) {
+        throw const FeedbackOperationException(
+          'complaint-id-exists',
+          'This complaint identifier is already in use.',
+        );
+      }
+
+      // Ticket IDs include the Firestore document suffix; a global
+      // pre-read is intentionally avoided to preserve complaint privacy.
+
+      transaction.set(complaintReference, prepared.toMap());
+
+      if (safetyRequired) {
+        final safetyReference = _safetyQueue.doc(complaintReference.id);
+
+        transaction.set(safetyReference, <String, dynamic>{
+          'id': safetyReference.id,
+          'complaintId': complaintReference.id,
+          'ticketId': prepared.ticketId,
+          'serviceType': prepared.serviceType.value,
+          'sourceId': prepared.sourceId,
+          'reporterId': prepared.reporterId,
+          'targetType': prepared.targetType.value,
+          'targetId': prepared.targetId,
+          'category': prepared.category.value,
+          'priority': prepared.priority.value,
+          'status': 'pending',
+          'createdAt': Timestamp.fromDate(now),
+          'processedAt': null,
+          'safetyCaseId': '',
+        });
+      }
+
+      final auditReference = _auditLogs.doc();
+
+      transaction.set(auditReference, <String, dynamic>{
+        'id': auditReference.id,
+        'complaintId': complaintReference.id,
+        'ticketId': prepared.ticketId,
+        'action': 'complaint_created',
+        'actorId': prepared.reporterId,
+        'actorType': ComplaintActorType.customer.value,
+        'oldStatus': null,
+        'newStatus': ComplaintStatus.open.value,
+        'reason': prepared.description,
+        'createdAt': Timestamp.fromDate(now),
+      });
+    });
+
+    return complaintReference.id;
+  }
+
+  Future<ComplaintModel?> getComplaintById(String complaintId) async {
+    final cleanComplaintId = complaintId.trim();
+
+    if (cleanComplaintId.isEmpty) {
+      return null;
+    }
+
+    final snapshot = await _complaints.doc(cleanComplaintId).get();
+    final data = snapshot.data();
+
+    if (!snapshot.exists || data == null) {
+      return null;
+    }
+
+    return ComplaintModel.fromMap(data, documentId: snapshot.id);
+  }
+
+  Future<ComplaintModel?> getComplaintByTicketId(String ticketId) async {
+    final cleanTicketId = ticketId.trim().toUpperCase();
+
+    if (cleanTicketId.isEmpty) {
+      return null;
+    }
+
+    final snapshot = await _complaints
+        .where('ticketId', isEqualTo: cleanTicketId)
+        .limit(1)
+        .get();
+
+    if (snapshot.docs.isEmpty) {
+      return null;
+    }
+
+    final document = snapshot.docs.first;
+
+    return ComplaintModel.fromMap(document.data(), documentId: document.id);
+  }
+
+  Stream<ComplaintModel?> watchComplaintById(String complaintId) {
+    final cleanComplaintId = complaintId.trim();
+
+    if (cleanComplaintId.isEmpty) {
+      return Stream<ComplaintModel?>.value(null);
+    }
+
+    return _complaints.doc(cleanComplaintId).snapshots().map((snapshot) {
+      final data = snapshot.data();
+
+      if (!snapshot.exists || data == null) {
+        return null;
+      }
+
+      return ComplaintModel.fromMap(data, documentId: snapshot.id);
+    });
+  }
+
+  Stream<List<ComplaintModel>> watchMyComplaints({
+    required String reporterId,
+    FeedbackServiceType? serviceType,
+    int limit = 50,
+  }) {
+    final cleanReporterId = reporterId.trim();
+
+    if (cleanReporterId.isEmpty) {
+      return Stream<List<ComplaintModel>>.value(const <ComplaintModel>[]);
+    }
+
+    Query<Map<String, dynamic>> query = _complaints.where(
+      'reporterId',
+      isEqualTo: cleanReporterId,
+    );
+
+    if (serviceType != null) {
+      query = query.where('serviceType', isEqualTo: serviceType.value);
+    }
+
+    return query
+        .orderBy('createdAt', descending: true)
+        .limit(_safeLimit(limit))
+        .snapshots()
+        .map(_complaintListFromSnapshot);
+  }
+
+  Stream<List<ComplaintModel>> watchTargetComplaints({
+    required String targetId,
+    FeedbackServiceType? serviceType,
+    ComplaintStatus? status,
+    int limit = 50,
+  }) {
+    final cleanTargetId = targetId.trim();
+
+    if (cleanTargetId.isEmpty) {
+      return Stream<List<ComplaintModel>>.value(const <ComplaintModel>[]);
+    }
+
+    Query<Map<String, dynamic>> query = _complaints.where(
+      'targetId',
+      isEqualTo: cleanTargetId,
+    );
+
+    if (serviceType != null) {
+      query = query.where('serviceType', isEqualTo: serviceType.value);
+    }
+
+    if (status != null) {
+      query = query.where('status', isEqualTo: status.value);
+    }
+
+    return query
+        .orderBy('createdAt', descending: true)
+        .limit(_safeLimit(limit))
+        .snapshots()
+        .map(_complaintListFromSnapshot);
+  }
+
+  Future<void> assignComplaint({
+    required String complaintId,
+    required String adminId,
+    required String adminName,
+    String note = '',
+  }) async {
+    final cleanComplaintId = complaintId.trim();
+    final cleanAdminId = adminId.trim();
+
+    if (cleanComplaintId.isEmpty || cleanAdminId.isEmpty) {
+      throw const FeedbackOperationException(
+        'invalid-assignment',
+        'Complaint ID and admin ID are required.',
+      );
+    }
+
+    final reference = _complaints.doc(cleanComplaintId);
+    final now = DateTime.now();
+
+    await _firestore.runTransaction((transaction) async {
+      final snapshot = await transaction.get(reference);
+      final data = snapshot.data();
+
+      if (!snapshot.exists || data == null) {
+        throw const FeedbackOperationException(
+          'complaint-not-found',
+          'Complaint was not found.',
+        );
+      }
+
+      final current = ComplaintModel.fromMap(
+        data,
+        documentId: snapshot.id,
+      ).normalized();
+
+      if (current.isFinal) {
+        throw const FeedbackOperationException(
+          'complaint-final',
+          'A closed or rejected complaint cannot be assigned.',
+        );
+      }
+
+      var updated = current.copyWith(
+        assignedAdminId: cleanAdminId,
+        assignedAdminName: adminName.trim(),
+        assignedAt: now,
+        updatedAt: now,
+      );
+
+      if (current.status == ComplaintStatus.open) {
+        updated = updated.transitionTo(
+          nextStatus: ComplaintStatus.inReview,
+          changedBy: cleanAdminId,
+          actorType: ComplaintActorType.admin,
+          note: note.trim().isEmpty
+              ? 'Complaint assigned for review.'
+              : note.trim(),
+          changedAt: now,
+        );
+      } else {
+        updated = updated.normalized();
+      }
+
+      transaction.set(reference, updated.toMap());
+
+      _writeAuditInTransaction(
+        transaction: transaction,
+        complaint: current,
+        action: 'complaint_assigned',
+        actorId: cleanAdminId,
+        actorType: ComplaintActorType.admin,
+        oldStatus: current.status,
+        newStatus: updated.status,
+        reason: note.trim(),
+        time: now,
+      );
+    });
+  }
+
+  Future<void> updateStatus({
+    required String complaintId,
+    required ComplaintStatus nextStatus,
+    required String changedBy,
+    required ComplaintActorType actorType,
+    String note = '',
+    String resolution = '',
+    String resolutionCode = '',
+  }) async {
+    final cleanComplaintId = complaintId.trim();
+    final cleanChangedBy = changedBy.trim();
+
+    if (cleanComplaintId.isEmpty || cleanChangedBy.isEmpty) {
+      throw const FeedbackOperationException(
+        'invalid-status-update',
+        'Complaint ID and status changer ID are required.',
+      );
+    }
+
+    final reference = _complaints.doc(cleanComplaintId);
+    final now = DateTime.now();
+
+    await _firestore.runTransaction((transaction) async {
+      final snapshot = await transaction.get(reference);
+      final data = snapshot.data();
+
+      if (!snapshot.exists || data == null) {
+        throw const FeedbackOperationException(
+          'complaint-not-found',
+          'Complaint was not found.',
+        );
+      }
+
+      final current = ComplaintModel.fromMap(
+        data,
+        documentId: snapshot.id,
+      ).normalized();
+
+      final updated = current.transitionTo(
+        nextStatus: nextStatus,
+        changedBy: cleanChangedBy,
+        actorType: actorType,
+        note: note,
+        resolution: resolution,
+        resolutionCode: resolutionCode,
+        changedAt: now,
+      );
+
+      transaction.set(reference, updated.toMap());
+
+      _writeAuditInTransaction(
+        transaction: transaction,
+        complaint: current,
+        action: 'status_changed',
+        actorId: cleanChangedBy,
+        actorType: actorType,
+        oldStatus: current.status,
+        newStatus: nextStatus,
+        reason: note.trim(),
+        time: now,
+      );
+    });
+  }
+
+  Future<void> markSafetyEscalated({
+    required String complaintId,
+    required String safetyCaseId,
+    required String processedBy,
+  }) async {
+    final cleanComplaintId = complaintId.trim();
+    final cleanSafetyCaseId = safetyCaseId.trim();
+    final cleanProcessedBy = processedBy.trim();
+
+    if (cleanComplaintId.isEmpty ||
+        cleanSafetyCaseId.isEmpty ||
+        cleanProcessedBy.isEmpty) {
+      throw const FeedbackOperationException(
+        'invalid-safety-escalation',
+        'Complaint, safety case and processor IDs are required.',
+      );
+    }
+
+    final complaintReference = _complaints.doc(cleanComplaintId);
+    final queueReference = _safetyQueue.doc(cleanComplaintId);
+    final now = DateTime.now();
+
+    await _firestore.runTransaction((transaction) async {
+      final complaintSnapshot = await transaction.get(complaintReference);
+      final data = complaintSnapshot.data();
+
+      if (!complaintSnapshot.exists || data == null) {
+        throw const FeedbackOperationException(
+          'complaint-not-found',
+          'Complaint was not found.',
+        );
+      }
+
+      final current = ComplaintModel.fromMap(
+        data,
+        documentId: complaintSnapshot.id,
+      ).normalized();
+
+      if (!current.isSafetyComplaint) {
+        throw const FeedbackOperationException(
+          'not-safety-complaint',
+          'This complaint does not require safety escalation.',
+        );
+      }
+
+      final updated = current
+          .copyWith(
+            safetyEscalationSent: true,
+            safetyCaseId: cleanSafetyCaseId,
+            safetyEscalatedAt: now,
+            updatedAt: now,
+          )
+          .normalized();
+
+      transaction.set(complaintReference, updated.toMap());
+
+      transaction.set(queueReference, <String, dynamic>{
+        'complaintId': cleanComplaintId,
+        'ticketId': current.ticketId,
+        'status': 'processed',
+        'safetyCaseId': cleanSafetyCaseId,
+        'processedBy': cleanProcessedBy,
+        'processedAt': Timestamp.fromDate(now),
+      }, SetOptions(merge: true));
+
+      _writeAuditInTransaction(
+        transaction: transaction,
+        complaint: current,
+        action: 'safety_escalated',
+        actorId: cleanProcessedBy,
+        actorType: ComplaintActorType.admin,
+        oldStatus: current.status,
+        newStatus: current.status,
+        reason: 'Safety case: $cleanSafetyCaseId',
+        time: now,
+      );
+    });
+  }
+
+  Future<void> addEvidenceUrls({
+    required String complaintId,
+    required String reporterId,
+    required List<String> evidenceUrls,
+  }) async {
+    final cleanComplaintId = complaintId.trim();
+    final cleanReporterId = reporterId.trim();
+    final cleanEvidence = evidenceUrls
+        .map((url) => url.trim())
+        .where((url) => url.isNotEmpty)
+        .toSet()
+        .toList(growable: false);
+
+    if (cleanComplaintId.isEmpty ||
+        cleanReporterId.isEmpty ||
+        cleanEvidence.isEmpty) {
+      throw const FeedbackOperationException(
+        'invalid-evidence',
+        'Complaint ID, reporter ID and evidence are required.',
+      );
+    }
+
+    final reference = _complaints.doc(cleanComplaintId);
+    final now = DateTime.now();
+
+    await _firestore.runTransaction((transaction) async {
+      final snapshot = await transaction.get(reference);
+      final data = snapshot.data();
+
+      if (!snapshot.exists || data == null) {
+        throw const FeedbackOperationException(
+          'complaint-not-found',
+          'Complaint was not found.',
+        );
+      }
+
+      final current = ComplaintModel.fromMap(
+        data,
+        documentId: snapshot.id,
+      ).normalized();
+
+      if (current.reporterId != cleanReporterId) {
+        throw const FeedbackOperationException(
+          'permission-denied',
+          'Only the complaint reporter can add evidence.',
+        );
+      }
+
+      if (current.isFinal) {
+        throw const FeedbackOperationException(
+          'complaint-final',
+          'Evidence cannot be added to a closed complaint.',
+        );
+      }
+
+      final combinedEvidence = <String>{
+        ...current.evidenceUrls,
+        ...cleanEvidence,
+      }.toList(growable: false);
+
+      if (combinedEvidence.length > ComplaintModel.maximumEvidenceCount) {
+        throw const FeedbackOperationException(
+          'evidence-limit',
+          'A maximum of 10 evidence attachments is allowed.',
+        );
+      }
+
+      final updated = current
+          .copyWith(evidenceUrls: combinedEvidence, updatedAt: now)
+          .normalized();
+
+      transaction.set(reference, updated.toMap());
+
+      _writeAuditInTransaction(
+        transaction: transaction,
+        complaint: current,
+        action: 'evidence_added',
+        actorId: cleanReporterId,
+        actorType: ComplaintActorType.customer,
+        oldStatus: current.status,
+        newStatus: current.status,
+        reason: '${cleanEvidence.length} evidence item(s) added.',
+        time: now,
+      );
+    });
+  }
+
+  Stream<List<ComplaintModel>> watchPendingSafetyEscalations({int limit = 50}) {
+    return _safetyQueue
+        .where('status', isEqualTo: 'pending')
+        .orderBy('createdAt')
+        .limit(_safeLimit(limit))
+        .snapshots()
+        .asyncMap((snapshot) async {
+          if (snapshot.docs.isEmpty) {
+            return const <ComplaintModel>[];
+          }
+
+          final complaintIds = snapshot.docs
+              .map((document) => document.id)
+              .toList(growable: false);
+
+          final complaints = <ComplaintModel>[];
+
+          for (var start = 0; start < complaintIds.length; start += 10) {
+            final end = (start + 10 < complaintIds.length)
+                ? start + 10
+                : complaintIds.length;
+
+            final group = complaintIds.sublist(start, end);
+
+            final complaintSnapshot = await _complaints
+                .where(FieldPath.documentId, whereIn: group)
+                .get();
+
+            complaints.addAll(_complaintListFromSnapshot(complaintSnapshot));
+          }
+
+          complaints.sort(
+            (first, second) => first.createdAt.compareTo(second.createdAt),
+          );
+
+          return complaints;
+        });
+  }
+
+  List<ComplaintModel> _complaintListFromSnapshot(
+    QuerySnapshot<Map<String, dynamic>> snapshot,
+  ) {
+    return snapshot.docs
+        .map(
+          (document) =>
+              ComplaintModel.fromMap(document.data(), documentId: document.id),
+        )
+        .toList(growable: false);
+  }
+
+  void _writeAuditInTransaction({
+    required Transaction transaction,
+    required ComplaintModel complaint,
+    required String action,
+    required String actorId,
+    required ComplaintActorType actorType,
+    required ComplaintStatus oldStatus,
+    required ComplaintStatus newStatus,
+    required String reason,
+    required DateTime time,
+  }) {
+    final auditReference = _auditLogs.doc();
+
+    transaction.set(auditReference, <String, dynamic>{
+      'id': auditReference.id,
+      'complaintId': complaint.id,
+      'ticketId': complaint.ticketId,
+      'action': action,
+      'actorId': actorId,
+      'actorType': actorType.value,
+      'oldStatus': oldStatus.value,
+      'newStatus': newStatus.value,
+      'reason': reason,
+      'createdAt': Timestamp.fromDate(time),
+    });
+  }
+
+  int _safeLimit(int value) {
+    return value.clamp(1, 100);
+  }
+}

@@ -1,0 +1,155 @@
+import '../models/agent_call_ride_booking_execution_contract.dart';
+
+abstract class AgentCallRideBookingExecutionAdapter {
+  Future<AgentCallRideBookingExecutionResult> prepareForTrustedBackend({
+    required AgentCallRideBookingExecutionRequest request,
+    required DateTime now,
+  });
+}
+
+/// Phase 49 Step 1B safe adapter boundary.
+///
+/// It validates whether a Call Ride Booking request is ready to be handed to
+/// a future trusted backend booking executor. It performs no Ride write.
+///
+/// Real booking execution remains intentionally disconnected until:
+/// - a dedicated Call Ride Booking action is registered and permission-gated;
+/// - trusted caller/contact identity binding is implemented;
+/// - exactly-once idempotency reservation is backed by trusted storage;
+/// - real production route/fare verification is available;
+/// - the backend executor can create a ride on behalf of a caller without
+///   pretending that the caller is the currently logged-in Flutter user.
+class AgentCallRideBookingAuthorizedAdapter
+    implements AgentCallRideBookingExecutionAdapter {
+  const AgentCallRideBookingAuthorizedAdapter();
+
+  @override
+  Future<AgentCallRideBookingExecutionResult> prepareForTrustedBackend({
+    required AgentCallRideBookingExecutionRequest request,
+    required DateTime now,
+  }) async {
+    request.validate();
+
+    if (!request.authorization.baseAuthorityAllowed) {
+      return _blocked(
+        request: request,
+        code: 'CALL_BOOKING_AUTHORIZATION_BLOCKED',
+        now: now,
+      );
+    }
+
+    if (!request.customerExplicitlyConfirmed) {
+      return _blocked(
+        request: request,
+        code: 'CUSTOMER_CONFIRMATION_REQUIRED',
+        now: now,
+      );
+    }
+
+    if (!request.fareVerification.rideServiceAvailable) {
+      return _blocked(
+        request: request,
+        code: 'RIDE_SERVICE_UNAVAILABLE',
+        now: now,
+      );
+    }
+
+    if (!request.fareVerification.driverAvailable) {
+      return _blocked(
+        request: request,
+        code: 'NO_MATCHING_DRIVER_AVAILABLE',
+        now: now,
+      );
+    }
+
+    if (!request.fareVerification.isFreshAt(now)) {
+      return _blocked(
+        request: request,
+        code: 'FARE_VERIFICATION_EXPIRED',
+        now: now,
+      );
+    }
+
+    if (request.mode != AgentCallRideBookingExecutionMode.production) {
+      return _blocked(
+        request: request,
+        code: 'TEST_MODE_REAL_BOOKING_DISABLED',
+        now: now,
+      );
+    }
+
+    if (request.fareVerification.usedTestingRouteBypass) {
+      return _blocked(
+        request: request,
+        code: 'PRODUCTION_ROUTE_VERIFICATION_REQUIRED',
+        now: now,
+      );
+    }
+
+    if (!request.mayCreateRealRideAt(now)) {
+      return _blocked(
+        request: request,
+        code: 'REAL_RIDE_PRECONDITIONS_NOT_SATISFIED',
+        now: now,
+      );
+    }
+
+    final AgentCallRideBookingExecutionResult result =
+        AgentCallRideBookingExecutionResult(
+          status: AgentCallRideBookingExecutionResult.readyForTrustedBackend,
+          code: 'READY_FOR_TRUSTED_BACKEND_EXECUTOR',
+          executionId: request.executionId.trim(),
+          idempotencyKey: request.idempotencyKey.trim(),
+          createdAt: now,
+        );
+
+    result.validate();
+    return result;
+  }
+
+  AgentCallRideBookingExecutionResult _blocked({
+    required AgentCallRideBookingExecutionRequest request,
+    required String code,
+    required DateTime now,
+  }) {
+    final AgentCallRideBookingExecutionResult result =
+        AgentCallRideBookingExecutionResult(
+          status: AgentCallRideBookingExecutionResult.blocked,
+          code: code,
+          executionId: request.executionId.trim(),
+          idempotencyKey: request.idempotencyKey.trim(),
+          createdAt: now,
+        );
+
+    result.validate();
+    return result;
+  }
+
+  bool get writesFirestore => false;
+  bool get writesRide => false;
+  bool get usesCurrentFirebaseUserAsCaller => false;
+  bool get createsApproval => false;
+  bool get consumesApproval => false;
+  bool get changesPricing => false;
+  bool get changesCommission => false;
+  bool get changesPayment => false;
+  bool get sendsSms => false;
+  bool get invokesTelephonyProvider => false;
+  bool get invokesSpeechToTextProvider => false;
+  bool get invokesTextToSpeechProvider => false;
+  bool get storesRawAudio => false;
+  bool get deploys => false;
+
+  bool get requiresDedicatedWriteAction => true;
+  bool get requiresTrustedCallerBinding => true;
+  bool get requiresTrustedContactBinding => true;
+  bool get requiresIdempotencyReservation => true;
+  bool get requiresFreshVerifiedFare => true;
+  bool get requiresDriverAvailability => true;
+  bool get requiresRideServiceAvailability => true;
+  bool get requiresExplicitCustomerConfirmation => true;
+  bool get requiresTrustedCustomerConfirmationTokenBeforeRealBackend => true;
+  bool get requiresStep1GTrustedBackendHandoffEnvelope => true;
+  bool get requiresStep1HValidatedFinalReceiptBeforeBookedClaim => true;
+  bool get rejectsTestingRouteForProduction => true;
+}

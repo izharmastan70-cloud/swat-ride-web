@@ -1,0 +1,222 @@
+import 'dart:io';
+
+import 'package:flutter_test/flutter_test.dart';
+
+import 'package:swat_ride/ai_agent/constants/agent_action_ids.dart';
+import 'package:swat_ride/ai_agent/data/initial_agent_roles_seed.dart';
+import 'package:swat_ride/ai_agent/models/agent_action_definition.dart';
+import 'package:swat_ride/ai_agent/models/agent_call_stage3_next_service_selection.dart';
+import 'package:swat_ride/ai_agent/models/agent_role.dart';
+import 'package:swat_ride/ai_agent/services/agent_action_registry.dart';
+
+String _read(String path) => File(path).readAsStringSync();
+
+AgentRole _callRole() {
+  return buildInitialAgentRoles().firstWhere(
+    (AgentRole role) => role.roleId == 'call_agent',
+  );
+}
+
+void main() {
+  group('Phase 49 Stage 3 Step 3G next-service selection', () {
+    test('Tour booking STATUS / READ is selected safely', () {
+      expect(AgentCallStage3NextServiceSelection.selectedService, 'TOUR');
+      expect(
+        AgentCallStage3NextServiceSelection.selectedCapability,
+        'TOUR_BOOKING_STATUS_READ',
+      );
+      expect(AgentCallStage3NextServiceSelection.selectedRequestType, 'STATUS');
+      expect(
+        AgentCallStage3NextServiceSelection.genericBusinessReadAction,
+        AgentActionId.readTourBooking,
+      );
+      expect(AgentCallStage3NextServiceSelection.isSafelySelected, isTrue);
+    });
+
+    test('generic Tour read action is LOW and read-only', () {
+      final AgentActionDefinition definition = AgentActionRegistry.get(
+        AgentActionId.readTourBooking,
+      )!;
+
+      expect(definition.module, 'tour');
+      expect(definition.risk, AgentActionRisk.low);
+      expect(definition.readOnly, isTrue);
+      expect(definition.alwaysRequiresApproval, isFalse);
+    });
+
+    test('Tour is not central-registry ready yet', () {
+      final String registry = _read(
+        'lib/ai_agent/services/'
+        'agent_read_only_connector_registry.dart',
+      );
+
+      expect(registry, isNot(contains('AgentTourBookingReadOnlyConnector()')));
+      expect(
+        AgentCallStage3NextServiceSelection.tourCentralRegistryReadyNow,
+        isFalse,
+      );
+    });
+
+    test('Tour raw payload omits private identity and financial amounts', () {
+      final String source = _read(
+        'lib/ai_agent/services/'
+        'agent_tour_booking_read_only_connector.dart',
+      );
+
+      expect(source, isNot(contains("'userId': booking.userId")));
+      expect(source, isNot(contains("'totalAmount':")));
+      expect(source, isNot(contains("'advanceAmount':")));
+      expect(source, isNot(contains("'remainingAmount':")));
+      expect(source, isNot(contains("'driverId':")));
+      expect(source, isNot(contains("'guideId':")));
+      expect(source, contains("'hasDriver':"));
+      expect(source, contains("'hasGuide':"));
+      expect(source, contains("'hasVehicle':"));
+      expect(source, contains("'hasHotel':"));
+    });
+
+    test('Tour Call bridge rejects sensitive Tour fields', () {
+      final String bridge = _read(
+        'lib/ai_agent/services/agent_call_tour_read_only_bridge.dart',
+      );
+
+      for (final String key in <String>[
+        "'userId'",
+        "'pickupLatitude'",
+        "'pickupLongitude'",
+        "'specialRequest'",
+        "'totalAmount'",
+        "'advanceAmount'",
+        "'remainingAmount'",
+        "'driverId'",
+        "'guideId'",
+        "'phone'",
+        "'cnic'",
+        "'email'",
+      ]) {
+        expect(bridge, contains(key));
+      }
+    });
+
+    test(
+      'Hotel remains deferred because raw connector still returns userId',
+      () {
+        final String hotel = _read(
+          'lib/ai_agent/services/'
+          'agent_hotel_booking_read_only_connector.dart',
+        );
+
+        expect(hotel, contains("'userId': booking.userId"));
+        expect(
+          AgentCallStage3NextServiceSelection
+              .hotelRawPayloadCurrentlyReturnsUserId,
+          isTrue,
+        );
+        expect(AgentCallStage3NextServiceSelection.hotelDeferred, isTrue);
+      },
+    );
+
+    test('call_agent remains exactly three existing dedicated actions', () {
+      final AgentRole role = _callRole();
+
+      expect(role.allowedActions, <String>[
+        AgentActionId.createCallRideBooking,
+        AgentActionId.readCallExistingRide,
+        AgentActionId.readCallFoodOrderStatus,
+      ]);
+
+      expect(
+        role.allowedActions,
+        isNot(contains(AgentActionId.readTourBooking)),
+      );
+      expect(
+        role.allowedActions,
+        isNot(contains(AgentActionId.readHotelBooking)),
+      );
+      expect(
+        role.allowedActions,
+        isNot(contains(AgentActionId.cancelTourBooking)),
+      );
+      expect(
+        role.allowedActions,
+        isNot(contains(AgentActionId.changeTourPrice)),
+      );
+    });
+
+    test('Step 3G grants no authority and executes no Tour operation', () {
+      expect(
+        AgentCallStage3NextServiceSelection.step3GAddsCallPermission,
+        isFalse,
+      );
+      expect(
+        AgentCallStage3NextServiceSelection.step3GExecutesTourConnector,
+        isFalse,
+      );
+      expect(
+        AgentCallStage3NextServiceSelection.step3GReadsRealTourBooking,
+        isFalse,
+      );
+      expect(
+        AgentCallStage3NextServiceSelection
+            .mayGrantGenericTourActionToCallAgent,
+        isFalse,
+      );
+      expect(AgentCallStage3NextServiceSelection.createsTourBooking, isFalse);
+      expect(AgentCallStage3NextServiceSelection.cancelsTourBooking, isFalse);
+      expect(AgentCallStage3NextServiceSelection.changesTourPrice, isFalse);
+      expect(AgentCallStage3NextServiceSelection.changesTourPayment, isFalse);
+      expect(
+        AgentCallStage3NextServiceSelection.changesTourAssignment,
+        isFalse,
+      );
+      expect(AgentCallStage3NextServiceSelection.writesTourBooking, isFalse);
+    });
+
+    test('trusted Call binding is mandatory for the next step', () {
+      expect(
+        AgentCallStage3NextServiceSelection.requiresDedicatedCallAction,
+        isTrue,
+      );
+      expect(
+        AgentCallStage3NextServiceSelection.requiresPermissionEngine,
+        isTrue,
+      );
+      expect(AgentCallStage3NextServiceSelection.requiresRuntimeGate, isTrue);
+      expect(
+        AgentCallStage3NextServiceSelection.requiresTrustedCallerBinding,
+        isTrue,
+      );
+      expect(
+        AgentCallStage3NextServiceSelection.requiresTrustedContactBinding,
+        isTrue,
+      );
+      expect(
+        AgentCallStage3NextServiceSelection.requiresTrustedTourBookingBinding,
+        isTrue,
+      );
+
+      expect(AgentCallStage3NextServiceSelection.rawPhoneIsAuthority, isFalse);
+      expect(
+        AgentCallStage3NextServiceSelection.transcriptIsAuthority,
+        isFalse,
+      );
+      expect(AgentCallStage3NextServiceSelection.voiceIsAuthority, isFalse);
+      expect(
+        AgentCallStage3NextServiceSelection.rawBookingIdAloneIsAuthority,
+        isFalse,
+      );
+      expect(
+        AgentCallStage3NextServiceSelection
+            .firebaseCurrentUserMayImpersonateCaller,
+        isFalse,
+      );
+    });
+
+    test('Cargo Student Parcel remain deferred', () {
+      expect(AgentCallStage3NextServiceSelection.cargoDeferred, isTrue);
+      expect(AgentCallStage3NextServiceSelection.studentDeferred, isTrue);
+      expect(AgentCallStage3NextServiceSelection.parcelDeferred, isTrue);
+      expect(AgentCallStage3NextServiceSelection.nextStep, contains('STEP 3H'));
+    });
+  });
+}

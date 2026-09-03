@@ -1,0 +1,518 @@
+import 'package:flutter_test/flutter_test.dart';
+
+import 'package:swat_ride/ai_agent/constants/agent_action_ids.dart';
+import 'package:swat_ride/ai_agent/constants/agent_enums.dart';
+import 'package:swat_ride/ai_agent/models/agent_call_ride_booking_authorization.dart';
+import 'package:swat_ride/ai_agent/models/agent_master_settings.dart';
+import 'package:swat_ride/ai_agent/models/agent_role.dart';
+import 'package:swat_ride/ai_agent/services/agent_call_ride_booking_authorization_broker.dart';
+import 'package:swat_ride/ai_agent/models/agent_call_ride_booking_idempotency_reservation.dart';
+
+class _FakeIdempotencyGateway
+    implements AgentCallRideBookingIdempotencyReservationGateway {
+  int calls = 0;
+
+  @override
+  Future<AgentCallRideBookingIdempotencyReservation> reserve({
+    required String idempotencyKey,
+    required String roleId,
+    required String actionId,
+    required String requestedBy,
+    required String trustedCallerReferenceId,
+    required String trustedContactReferenceId,
+  }) async {
+    calls += 1;
+
+    return AgentCallRideBookingIdempotencyReservation(
+      reservationId: 'reservation-$idempotencyKey',
+      idempotencyKey: idempotencyKey,
+      roleId: roleId,
+      actionId: actionId,
+      requestedBy: requestedBy,
+      trustedCallerReferenceId: trustedCallerReferenceId,
+      trustedContactReferenceId: trustedContactReferenceId,
+      status: AgentCallRideBookingIdempotencyReservationStatus.reserved,
+      createdAt: DateTime.utc(2026, 8, 18),
+      reusedExistingReservation: false,
+    );
+  }
+}
+
+class _FakeCentralGateway
+    implements AgentCallRideBookingCentralAuthorizationGateway {
+  _FakeCentralGateway({
+    this.permissionAllowed = true,
+    this.runtimeAllowed = true,
+    this.trustedBound = true,
+    this.permissionSource = 'AgentPermissionEngine',
+    this.runtimeSource = 'AgentRuntimeGate',
+    this.overrideRoleId,
+    this.overrideActionId,
+    this.overrideModule,
+    this.overrideRequestedBy,
+  });
+
+  final bool permissionAllowed;
+  final bool runtimeAllowed;
+  final bool trustedBound;
+  final String permissionSource;
+  final String runtimeSource;
+
+  final String? overrideRoleId;
+  final String? overrideActionId;
+  final String? overrideModule;
+  final String? overrideRequestedBy;
+
+  int calls = 0;
+  String? receivedActionId;
+  String? receivedModule;
+  Map<String, dynamic>? receivedScope;
+
+  @override
+  Future<AgentCallRideBookingCentralAuthorizationDecision> evaluate({
+    required AgentMasterSettings settings,
+    required AgentRole role,
+    required String actionId,
+    required String module,
+    required String requestedBy,
+    required Map<String, dynamic> actionScope,
+  }) async {
+    calls += 1;
+    receivedActionId = actionId;
+    receivedModule = module;
+    receivedScope = Map<String, dynamic>.from(actionScope);
+
+    final bool allowed =
+        permissionAllowed &&
+        runtimeAllowed &&
+        trustedBound &&
+        permissionSource == 'AgentPermissionEngine' &&
+        runtimeSource == 'AgentRuntimeGate';
+
+    return AgentCallRideBookingCentralAuthorizationDecision(
+      roleId: overrideRoleId ?? role.roleId,
+      actionId: overrideActionId ?? actionId,
+      module: overrideModule ?? module,
+      requestedBy: overrideRequestedBy ?? requestedBy,
+      permissionAllowed: permissionAllowed,
+      runtimeAllowed: runtimeAllowed,
+      trustedAuthorityContextBound: trustedBound,
+      permissionDecisionSource: permissionSource,
+      runtimeDecisionSource: runtimeSource,
+      reason: allowed ? '' : 'central authority blocked',
+    );
+  }
+}
+
+AgentMasterSettings _settings({bool callEnabled = true}) {
+  return AgentMasterSettings.safeDefaults().copyWith(
+    callAgentEnabled: callEnabled,
+  );
+}
+
+AgentRole _callRole({
+  bool includeBookingAction = true,
+  bool enabled = true,
+  bool failClosed = false,
+}) {
+  return AgentRole(
+    roleId: 'call_agent',
+    name: 'Call Agent',
+    description: 'Call booking test role',
+    module: 'call',
+    enabled: enabled,
+    mode: AgentMode.monitorOnly,
+    allowedActions: <String>[
+      if (includeBookingAction) AgentActionId.createCallRideBooking,
+    ],
+    approvalRequiredActions: const <String>[],
+    forbiddenActions: const <String>[],
+    aiClass: AiClass.freeAi,
+    privacyLevel: PrivacyLevel.private,
+    createdAt: DateTime.utc(2026, 8, 18),
+    isFailClosed: failClosed,
+  );
+}
+
+void main() {
+  group('Phase 49 Step 1D authorization broker', () {
+    test(
+      'central Permission/Runtime ALLOW produces Step 1B authorization',
+      () async {
+        final gateway = _FakeCentralGateway();
+        final broker = AgentCallRideBookingAuthorizationBroker(
+          centralAuthorizationGateway: gateway,
+          idempotencyReservationGateway: _FakeIdempotencyGateway(),
+        );
+
+        final result = await broker.authorize(
+          settings: _settings(),
+          role: _callRole(),
+          requestedBy: 'trusted-call-session-1',
+          trustedCallerReferenceId: 'caller-ref-1',
+          trustedContactReferenceId: 'contact-ref-1',
+          idempotencyKey: 'call-session-1:booking-1',
+        );
+
+        expect(result.baseAuthorityAllowed, isTrue);
+        expect(gateway.calls, 1);
+        expect(gateway.receivedActionId, AgentActionId.createCallRideBooking);
+        expect(gateway.receivedModule, 'call');
+        expect(
+          gateway.receivedScope?['trustedCallerReferenceId'],
+          'caller-ref-1',
+        );
+        expect(
+          gateway.receivedScope?['trustedContactReferenceId'],
+          'contact-ref-1',
+        );
+        expect(
+          gateway.receivedScope?['idempotencyKey'],
+          'call-session-1:booking-1',
+        );
+      },
+    );
+
+    test('master OFF blocks before central gateway', () async {
+      final gateway = _FakeCentralGateway();
+      final broker = AgentCallRideBookingAuthorizationBroker(
+        centralAuthorizationGateway: gateway,
+        idempotencyReservationGateway: _FakeIdempotencyGateway(),
+      );
+
+      final result = await broker.authorize(
+        settings: _settings(callEnabled: false),
+        role: _callRole(),
+        requestedBy: 'trusted-call-session-1',
+        trustedCallerReferenceId: 'caller-ref-1',
+        trustedContactReferenceId: 'contact-ref-1',
+        idempotencyKey: 'key-1',
+      );
+
+      expect(result.baseAuthorityAllowed, isFalse);
+      expect(result.reason, 'CALL_AGENT_MASTER_DISABLED');
+      expect(gateway.calls, 0);
+    });
+
+    test('wrong role/module blocks before central gateway', () async {
+      final gateway = _FakeCentralGateway();
+      final broker = AgentCallRideBookingAuthorizationBroker(
+        centralAuthorizationGateway: gateway,
+        idempotencyReservationGateway: _FakeIdempotencyGateway(),
+      );
+
+      final wrongRole = _callRole().copyWith(
+        roleId: 'ride_agent',
+        module: 'ride',
+      );
+
+      final result = await broker.authorize(
+        settings: _settings(),
+        role: wrongRole,
+        requestedBy: 'trusted-call-session-1',
+        trustedCallerReferenceId: 'caller-ref-1',
+        trustedContactReferenceId: 'contact-ref-1',
+        idempotencyKey: 'key-1',
+      );
+
+      expect(result.baseAuthorityAllowed, isFalse);
+      expect(result.reason, 'CALL_BOOKING_EXACT_CALL_ROLE_REQUIRED');
+      expect(gateway.calls, 0);
+    });
+
+    test('disabled or fail-closed Call role blocks', () async {
+      final gateway = _FakeCentralGateway();
+      final broker = AgentCallRideBookingAuthorizationBroker(
+        centralAuthorizationGateway: gateway,
+        idempotencyReservationGateway: _FakeIdempotencyGateway(),
+      );
+
+      final disabled = await broker.authorize(
+        settings: _settings(),
+        role: _callRole(enabled: false),
+        requestedBy: 'trusted-call-session-1',
+        trustedCallerReferenceId: 'caller-ref-1',
+        trustedContactReferenceId: 'contact-ref-1',
+        idempotencyKey: 'key-1',
+      );
+
+      final failClosed = await broker.authorize(
+        settings: _settings(),
+        role: _callRole(failClosed: true),
+        requestedBy: 'trusted-call-session-1',
+        trustedCallerReferenceId: 'caller-ref-1',
+        trustedContactReferenceId: 'contact-ref-1',
+        idempotencyKey: 'key-2',
+      );
+
+      expect(disabled.reason, 'CALL_AGENT_ROLE_DISABLED_OR_FAIL_CLOSED');
+      expect(failClosed.reason, 'CALL_AGENT_ROLE_DISABLED_OR_FAIL_CLOSED');
+      expect(gateway.calls, 0);
+    });
+
+    test(
+      'role without dedicated action blocks before central gateway',
+      () async {
+        final gateway = _FakeCentralGateway();
+        final broker = AgentCallRideBookingAuthorizationBroker(
+          centralAuthorizationGateway: gateway,
+          idempotencyReservationGateway: _FakeIdempotencyGateway(),
+        );
+
+        final result = await broker.authorize(
+          settings: _settings(),
+          role: _callRole(includeBookingAction: false),
+          requestedBy: 'trusted-call-session-1',
+          trustedCallerReferenceId: 'caller-ref-1',
+          trustedContactReferenceId: 'contact-ref-1',
+          idempotencyKey: 'key-1',
+        );
+
+        expect(result.baseAuthorityAllowed, isFalse);
+        expect(result.reason, 'CALL_BOOKING_ACTION_NOT_ALLOWED_FOR_ROLE');
+        expect(gateway.calls, 0);
+      },
+    );
+
+    test('central Permission deny fails closed', () async {
+      final gateway = _FakeCentralGateway(permissionAllowed: false);
+      final broker = AgentCallRideBookingAuthorizationBroker(
+        centralAuthorizationGateway: gateway,
+        idempotencyReservationGateway: _FakeIdempotencyGateway(),
+      );
+
+      final result = await broker.authorize(
+        settings: _settings(),
+        role: _callRole(),
+        requestedBy: 'trusted-call-session-1',
+        trustedCallerReferenceId: 'caller-ref-1',
+        trustedContactReferenceId: 'contact-ref-1',
+        idempotencyKey: 'key-1',
+      );
+
+      expect(result.baseAuthorityAllowed, isFalse);
+      expect(result.reason, 'central authority blocked');
+      expect(gateway.calls, 1);
+    });
+
+    test('central Runtime deny fails closed', () async {
+      final gateway = _FakeCentralGateway(runtimeAllowed: false);
+      final broker = AgentCallRideBookingAuthorizationBroker(
+        centralAuthorizationGateway: gateway,
+        idempotencyReservationGateway: _FakeIdempotencyGateway(),
+      );
+
+      final result = await broker.authorize(
+        settings: _settings(),
+        role: _callRole(),
+        requestedBy: 'trusted-call-session-1',
+        trustedCallerReferenceId: 'caller-ref-1',
+        trustedContactReferenceId: 'contact-ref-1',
+        idempotencyKey: 'key-1',
+      );
+
+      expect(result.baseAuthorityAllowed, isFalse);
+      expect(result.reason, 'central authority blocked');
+    });
+
+    test('fake decision-source names cannot authorize booking', () async {
+      final gateway = _FakeCentralGateway(permissionSource: 'VoiceTranscript');
+      final broker = AgentCallRideBookingAuthorizationBroker(
+        centralAuthorizationGateway: gateway,
+        idempotencyReservationGateway: _FakeIdempotencyGateway(),
+      );
+
+      final result = await broker.authorize(
+        settings: _settings(),
+        role: _callRole(),
+        requestedBy: 'trusted-call-session-1',
+        trustedCallerReferenceId: 'caller-ref-1',
+        trustedContactReferenceId: 'contact-ref-1',
+        idempotencyKey: 'key-1',
+      );
+
+      expect(result.baseAuthorityAllowed, isFalse);
+    });
+
+    test('central decision binding mismatch fails closed', () async {
+      final gateway = _FakeCentralGateway(
+        overrideActionId: AgentActionId.draftCallResponse,
+      );
+      final broker = AgentCallRideBookingAuthorizationBroker(
+        centralAuthorizationGateway: gateway,
+        idempotencyReservationGateway: _FakeIdempotencyGateway(),
+      );
+
+      final result = await broker.authorize(
+        settings: _settings(),
+        role: _callRole(),
+        requestedBy: 'trusted-call-session-1',
+        trustedCallerReferenceId: 'caller-ref-1',
+        trustedContactReferenceId: 'contact-ref-1',
+        idempotencyKey: 'key-1',
+      );
+
+      expect(result.baseAuthorityAllowed, isFalse);
+      expect(result.reason, 'CENTRAL_AUTHORIZATION_BINDING_MISMATCH');
+    });
+
+    test(
+      'missing trusted caller/contact/idempotency context blocks early',
+      () async {
+        final gateway = _FakeCentralGateway();
+        final broker = AgentCallRideBookingAuthorizationBroker(
+          centralAuthorizationGateway: gateway,
+          idempotencyReservationGateway: _FakeIdempotencyGateway(),
+        );
+
+        final result = await broker.authorize(
+          settings: _settings(),
+          role: _callRole(),
+          requestedBy: 'trusted-call-session-1',
+          trustedCallerReferenceId: '',
+          trustedContactReferenceId: 'contact-ref-1',
+          idempotencyKey: 'key-1',
+        );
+
+        expect(result.baseAuthorityAllowed, isFalse);
+        expect(result.reason, 'TRUSTED_CALL_AUTHORITY_CONTEXT_REQUIRED');
+        expect(gateway.calls, 0);
+      },
+    );
+
+    test('trusted authority context binding failure is blocked', () async {
+      final gateway = _FakeCentralGateway(trustedBound: false);
+      final broker = AgentCallRideBookingAuthorizationBroker(
+        centralAuthorizationGateway: gateway,
+        idempotencyReservationGateway: _FakeIdempotencyGateway(),
+      );
+
+      final result = await broker.authorize(
+        settings: _settings(),
+        role: _callRole(),
+        requestedBy: 'trusted-call-session-1',
+        trustedCallerReferenceId: 'caller-ref-1',
+        trustedContactReferenceId: 'contact-ref-1',
+        idempotencyKey: 'key-trusted-bound',
+      );
+
+      expect(result.baseAuthorityAllowed, isFalse);
+      expect(result.reason, 'central authority blocked');
+    });
+
+    test('fake Runtime decision source cannot authorize booking', () async {
+      final gateway = _FakeCentralGateway(runtimeSource: 'VoiceTranscript');
+      final broker = AgentCallRideBookingAuthorizationBroker(
+        centralAuthorizationGateway: gateway,
+        idempotencyReservationGateway: _FakeIdempotencyGateway(),
+      );
+
+      final result = await broker.authorize(
+        settings: _settings(),
+        role: _callRole(),
+        requestedBy: 'trusted-call-session-1',
+        trustedCallerReferenceId: 'caller-ref-1',
+        trustedContactReferenceId: 'contact-ref-1',
+        idempotencyKey: 'key-runtime-source',
+      );
+
+      expect(result.baseAuthorityAllowed, isFalse);
+      expect(result.reason, 'central authority blocked');
+    });
+
+    test('central role binding mismatch fails closed', () async {
+      final gateway = _FakeCentralGateway(overrideRoleId: 'ride_agent');
+      final broker = AgentCallRideBookingAuthorizationBroker(
+        centralAuthorizationGateway: gateway,
+        idempotencyReservationGateway: _FakeIdempotencyGateway(),
+      );
+
+      final result = await broker.authorize(
+        settings: _settings(),
+        role: _callRole(),
+        requestedBy: 'trusted-call-session-1',
+        trustedCallerReferenceId: 'caller-ref-1',
+        trustedContactReferenceId: 'contact-ref-1',
+        idempotencyKey: 'key-role-mismatch',
+      );
+
+      expect(result.baseAuthorityAllowed, isFalse);
+      expect(result.reason, 'CENTRAL_AUTHORIZATION_BINDING_MISMATCH');
+    });
+
+    test('central module binding mismatch fails closed', () async {
+      final gateway = _FakeCentralGateway(overrideModule: 'ride');
+      final broker = AgentCallRideBookingAuthorizationBroker(
+        centralAuthorizationGateway: gateway,
+        idempotencyReservationGateway: _FakeIdempotencyGateway(),
+      );
+
+      final result = await broker.authorize(
+        settings: _settings(),
+        role: _callRole(),
+        requestedBy: 'trusted-call-session-1',
+        trustedCallerReferenceId: 'caller-ref-1',
+        trustedContactReferenceId: 'contact-ref-1',
+        idempotencyKey: 'key-module-mismatch',
+      );
+
+      expect(result.baseAuthorityAllowed, isFalse);
+      expect(result.reason, 'CENTRAL_AUTHORIZATION_BINDING_MISMATCH');
+    });
+
+    test('central requestedBy binding mismatch fails closed', () async {
+      final gateway = _FakeCentralGateway(
+        overrideRequestedBy: 'different-session',
+      );
+      final broker = AgentCallRideBookingAuthorizationBroker(
+        centralAuthorizationGateway: gateway,
+        idempotencyReservationGateway: _FakeIdempotencyGateway(),
+      );
+
+      final result = await broker.authorize(
+        settings: _settings(),
+        role: _callRole(),
+        requestedBy: 'trusted-call-session-1',
+        trustedCallerReferenceId: 'caller-ref-1',
+        trustedContactReferenceId: 'contact-ref-1',
+        idempotencyKey: 'key-requested-by-mismatch',
+      );
+
+      expect(result.baseAuthorityAllowed, isFalse);
+      expect(result.reason, 'CENTRAL_AUTHORIZATION_BINDING_MISMATCH');
+    });
+    test('broker exposes no write/provider/query authority', () {
+      final broker = AgentCallRideBookingAuthorizationBroker(
+        centralAuthorizationGateway: _FakeCentralGateway(),
+        idempotencyReservationGateway: _FakeIdempotencyGateway(),
+      );
+
+      expect(broker.queryCanGrantPermission, isFalse);
+      expect(broker.voiceCanGrantPermission, isFalse);
+      expect(broker.transcriptCanGrantRuntime, isFalse);
+      expect(broker.aiCanSelectPrivilegedAction, isFalse);
+      expect(broker.writesRide, isFalse);
+      expect(broker.idempotencyIsAuthorization, isFalse);
+      expect(broker.requiresIdempotencyReservation, isTrue);
+      expect(broker.createsApproval, isFalse);
+      expect(broker.consumesApproval, isFalse);
+      expect(broker.changesPricing, isFalse);
+      expect(broker.changesCommission, isFalse);
+      expect(broker.changesPayment, isFalse);
+      expect(broker.changesDriverState, isFalse);
+      expect(broker.sendsSms, isFalse);
+      expect(broker.invokesTelephonyProvider, isFalse);
+      expect(broker.invokesSpeechToTextProvider, isFalse);
+      expect(broker.invokesTextToSpeechProvider, isFalse);
+      expect(broker.storesRawAudio, isFalse);
+      expect(broker.deploys, isFalse);
+
+      expect(broker.requiresCentralPermissionDecision, isTrue);
+      expect(broker.requiresCentralRuntimeDecision, isTrue);
+      expect(broker.requiresDedicatedAction, isTrue);
+      expect(broker.requiresTrustedCallerBinding, isTrue);
+      expect(broker.requiresTrustedContactBinding, isTrue);
+      expect(broker.requiresIdempotencyReservation, isTrue);
+    });
+  });
+}

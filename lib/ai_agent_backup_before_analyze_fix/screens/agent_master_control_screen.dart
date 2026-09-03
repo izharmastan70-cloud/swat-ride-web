@@ -1,0 +1,282 @@
+import 'package:flutter/material.dart';
+
+import '../models/agent_master_settings.dart';
+import '../services/agent_emergency_stop_service.dart';
+import '../services/agent_master_settings_service.dart';
+
+// =========================================================
+// AI AGENT — MASTER CONTROL SCREEN
+// =========================================================
+//
+// Standalone Phase 5 screen.
+// Not wired into main.dart.
+// Existing SWAT RIDE modules are not connected.
+
+class AgentMasterControlScreen extends StatefulWidget {
+  final String currentAdminId;
+
+  const AgentMasterControlScreen({
+    super.key,
+    required this.currentAdminId,
+  });
+
+  @override
+  State<AgentMasterControlScreen> createState() =>
+      _AgentMasterControlScreenState();
+}
+
+class _AgentMasterControlScreenState
+    extends State<AgentMasterControlScreen> {
+  final AgentMasterSettingsService _settingsService =
+      AgentMasterSettingsService();
+
+  final AgentEmergencyStopService _emergencyService =
+      AgentEmergencyStopService();
+
+  Future<void> _run(
+    Future<void> Function() action,
+  ) async {
+    try {
+      await action();
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('$error')),
+        );
+      }
+    }
+  }
+
+  Future<void> _activateEmergency() async {
+    await _run(
+      () => _emergencyService.activate(
+        actorId: widget.currentAdminId,
+        reason: 'Manual Emergency Stop from AI Master Control.',
+      ),
+    );
+  }
+
+  Future<void> _releaseEmergency() async {
+    await _run(
+      () => _emergencyService.release(
+        actorId: widget.currentAdminId,
+        reason: 'Owner/Admin manually released Emergency Stop.',
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFF0D0D0D),
+      appBar: AppBar(
+        title: const Text('AI Master Control'),
+      ),
+      body: StreamBuilder<AgentMasterSettings>(
+        stream: _settingsService.watchSettings(),
+        builder: (
+          BuildContext context,
+          AsyncSnapshot<AgentMasterSettings> snapshot,
+        ) {
+          if (snapshot.hasError) {
+            return Center(
+              child: Text(
+                'Settings error: ${snapshot.error}',
+                style: const TextStyle(color: Colors.redAccent),
+              ),
+            );
+          }
+
+          final AgentMasterSettings settings =
+              snapshot.data ?? AgentMasterSettings.safeDefaults();
+
+          return ListView(
+            padding: const EdgeInsets.all(16),
+            children: <Widget>[
+              _SwitchCard(
+                title: 'AI MASTER',
+                subtitle: 'Global AI control plane switch.',
+                value: settings.masterEnabled,
+                onChanged: (bool value) => _run(
+                  () => _settingsService.setMasterEnabled(
+                    enabled: value,
+                    actorId: widget.currentAdminId,
+                  ),
+                ),
+              ),
+              _SwitchCard(
+                title: 'FREE AI',
+                subtitle: 'Routine business/ops AI provider class.',
+                value: settings.freeAiEnabled,
+                onChanged: (bool value) => _run(
+                  () => _settingsService.setFreeAiEnabled(
+                    enabled: value,
+                    actorId: widget.currentAdminId,
+                  ),
+                ),
+              ),
+              _SwitchCard(
+                title: 'LOCAL AI',
+                subtitle: 'Future private/local AI provider class.',
+                value: settings.localAiEnabled,
+                onChanged: (bool value) => _run(
+                  () => _settingsService.setLocalAiEnabled(
+                    enabled: value,
+                    actorId: widget.currentAdminId,
+                  ),
+                ),
+              ),
+              _SwitchCard(
+                title: 'PAID CODE AI',
+                subtitle: 'Technical/code debugging only.',
+                value: settings.paidCodeAiEnabled,
+                onChanged: (bool value) => _run(
+                  () => _settingsService.setPaidCodeAiEnabled(
+                    enabled: value,
+                    actorId: widget.currentAdminId,
+                  ),
+                ),
+              ),
+              _SwitchCard(
+                title: 'CALL AGENT',
+                subtitle: 'Conversation/call automation master switch.',
+                value: settings.callAgentEnabled,
+                onChanged: (bool value) => _run(
+                  () => _settingsService.setCallAgentEnabled(
+                    enabled: value,
+                    actorId: widget.currentAdminId,
+                  ),
+                ),
+              ),
+              _SwitchCard(
+                title: 'APPROVAL ENGINE',
+                subtitle: 'Required for ASK_FIRST/high-risk actions.',
+                value: settings.approvalEngineEnabled,
+                onChanged: (bool value) => _run(
+                  () => _settingsService.setApprovalEngineEnabled(
+                    enabled: value,
+                    actorId: widget.currentAdminId,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+              Card(
+                color: const Color(0xFF1A1A1A),
+                child: Padding(
+                  padding: const EdgeInsets.all(14),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: <Widget>[
+                      const Text(
+                        'Paid Code AI Budget',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      const SizedBox(height: 6),
+                      Text(
+                        'Rs ${settings.paidCodeBudgetUsedRs} / '
+                        'Rs ${settings.monthlyPaidCodeBudgetRs}',
+                        style: const TextStyle(color: Colors.white70),
+                      ),
+                      const SizedBox(height: 6),
+                      Text(
+                        settings.paidBudgetAvailable
+                            ? 'Budget available'
+                            : 'Budget unavailable/exhausted',
+                        style: TextStyle(
+                          color: settings.paidBudgetAvailable
+                              ? Colors.greenAccent
+                              : Colors.orangeAccent,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+              Card(
+                color: settings.emergencyReadOnly
+                    ? const Color(0xFF3A1111)
+                    : const Color(0xFF1A1A1A),
+                child: Padding(
+                  padding: const EdgeInsets.all(14),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: <Widget>[
+                      Text(
+                        settings.emergencyReadOnly
+                            ? 'EMERGENCY READ-ONLY ACTIVE'
+                            : 'Emergency Stop is not active',
+                        style: TextStyle(
+                          color: settings.emergencyReadOnly
+                              ? Colors.redAccent
+                              : Colors.white,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      if (settings.emergencyReason.isNotEmpty) ...<Widget>[
+                        const SizedBox(height: 6),
+                        Text(
+                          settings.emergencyReason,
+                          style: const TextStyle(color: Colors.white60),
+                        ),
+                      ],
+                      const SizedBox(height: 12),
+                      if (!settings.emergencyReadOnly)
+                        ElevatedButton.icon(
+                          onPressed: _activateEmergency,
+                          icon: const Icon(Icons.emergency),
+                          label: const Text('ACTIVATE EMERGENCY STOP'),
+                        )
+                      else
+                        OutlinedButton(
+                          onPressed: _releaseEmergency,
+                          child: const Text('RELEASE EMERGENCY STOP'),
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+}
+
+class _SwitchCard extends StatelessWidget {
+  final String title;
+  final String subtitle;
+  final bool value;
+  final ValueChanged<bool> onChanged;
+
+  const _SwitchCard({
+    required this.title,
+    required this.subtitle,
+    required this.value,
+    required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      color: const Color(0xFF1A1A1A),
+      child: SwitchListTile(
+        value: value,
+        onChanged: onChanged,
+        activeColor: const Color(0xFFFFD60A),
+        title: Text(
+          title,
+          style: const TextStyle(color: Colors.white),
+        ),
+        subtitle: Text(
+          subtitle,
+          style: const TextStyle(color: Colors.white54),
+        ),
+      ),
+    );
+  }
+}

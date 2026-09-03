@@ -1,0 +1,125 @@
+import '../constants/agent_owner_attention_constants.dart';
+import '../constants/agent_owner_attention_sla_constants.dart';
+import '../models/agent_owner_attention_inbox_record.dart';
+import '../models/agent_owner_attention_sla_assessment.dart';
+
+class AgentOwnerAttentionSlaPolicy {
+  const AgentOwnerAttentionSlaPolicy();
+
+  Duration thresholdForPriority(String priority) {
+    switch (priority) {
+      case AgentOwnerAttentionPriority.normal:
+        return AgentOwnerAttentionSlaLimits.normal;
+
+      case AgentOwnerAttentionPriority.high:
+        return AgentOwnerAttentionSlaLimits.high;
+
+      case AgentOwnerAttentionPriority.critical:
+        return AgentOwnerAttentionSlaLimits.critical;
+
+      case AgentOwnerAttentionPriority.emergency:
+        return AgentOwnerAttentionSlaLimits.emergency;
+
+      default:
+        throw const FormatException('Unknown Owner Attention priority.');
+    }
+  }
+
+  AgentOwnerAttentionSlaAssessment assess({
+    required AgentOwnerAttentionInboxRecord record,
+    required DateTime evaluatedAtUtc,
+  }) {
+    record.validate();
+
+    if (!evaluatedAtUtc.isUtc) {
+      throw const FormatException(
+        'Owner Attention SLA evaluation time must be UTC.',
+      );
+    }
+
+    final event = record.event;
+    final threshold = thresholdForPriority(event.priority);
+
+    if (event.status == AgentOwnerAttentionStatus.resolved ||
+        event.status == AgentOwnerAttentionStatus.dismissed) {
+      return AgentOwnerAttentionSlaAssessment(
+        attentionId: event.attentionId,
+        state: AgentOwnerAttentionSlaState.terminal,
+        age: Duration.zero,
+        threshold: threshold,
+        notificationEligible: false,
+        notificationReason: null,
+      );
+    }
+
+    final activityAt = record.reviewUpdatedAtUtc ?? event.createdAtUtc;
+
+    if (activityAt.isAfter(
+      evaluatedAtUtc.add(AgentOwnerAttentionSlaLimits.maximumFutureClockSkew),
+    )) {
+      throw const FormatException(
+        'Owner Attention activity time is too far in the future.',
+      );
+    }
+
+    final age = evaluatedAtUtc.isBefore(activityAt)
+        ? Duration.zero
+        : evaluatedAtUtc.difference(activityAt);
+
+    if (event.priority == AgentOwnerAttentionPriority.emergency) {
+      return AgentOwnerAttentionSlaAssessment(
+        attentionId: event.attentionId,
+        state: AgentOwnerAttentionSlaState.immediateEscalation,
+        age: age,
+        threshold: threshold,
+        notificationEligible: true,
+        notificationReason: AgentOwnerAttentionNotificationReason.emergencyOpen,
+      );
+    }
+
+    if (event.priority == AgentOwnerAttentionPriority.critical) {
+      return AgentOwnerAttentionSlaAssessment(
+        attentionId: event.attentionId,
+        state: age >= threshold
+            ? AgentOwnerAttentionSlaState.stale
+            : AgentOwnerAttentionSlaState.immediateEscalation,
+        age: age,
+        threshold: threshold,
+        notificationEligible: true,
+        notificationReason: AgentOwnerAttentionNotificationReason.criticalOpen,
+      );
+    }
+
+    if (age >= threshold) {
+      return AgentOwnerAttentionSlaAssessment(
+        attentionId: event.attentionId,
+        state: AgentOwnerAttentionSlaState.stale,
+        age: age,
+        threshold: threshold,
+        notificationEligible: true,
+        notificationReason: event.priority == AgentOwnerAttentionPriority.high
+            ? AgentOwnerAttentionNotificationReason.staleHigh
+            : AgentOwnerAttentionNotificationReason.staleNormal,
+      );
+    }
+
+    return AgentOwnerAttentionSlaAssessment(
+      attentionId: event.attentionId,
+      state: AgentOwnerAttentionSlaState.withinSla,
+      age: age,
+      threshold: threshold,
+      notificationEligible: false,
+      notificationReason: null,
+    );
+  }
+
+  bool get assessmentOnly => true;
+  bool get writesInbox => false;
+  bool get mutatesSourceRecord => false;
+  bool get sendsNotification => false;
+  bool get consumesApproval => false;
+  bool get grantsPermission => false;
+  bool get overridesRuntimeGate => false;
+  bool get callsProvider => false;
+  bool get executesBusinessAction => false;
+}

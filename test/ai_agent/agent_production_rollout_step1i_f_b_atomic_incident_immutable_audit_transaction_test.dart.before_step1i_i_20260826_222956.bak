@@ -1,0 +1,216 @@
+import 'dart:io';
+
+import 'package:flutter_test/flutter_test.dart';
+import 'package:swat_ride/ai_agent/models/agent_security_incident_persistence_implementation_state.dart';
+import 'package:swat_ride/ai_agent/models/agent_security_incident_persistence_write_authorization.dart';
+
+void main() {
+  String repositorySource() => File(
+    'lib/ai_agent/services/agent_security_incident_repository.dart',
+  ).readAsStringSync();
+
+  test('repository uses existing AgentAuditService transaction API', () {
+    final String source = repositorySource();
+
+    expect(source.contains("import 'agent_audit_service.dart';"), isTrue);
+    expect(source.contains('AgentAuditService? auditService'), isTrue);
+    expect(source.contains('AgentAuditService(firestore: _firestore)'), isTrue);
+  });
+
+  test('create write and audit are in same transaction callback', () {
+    final String source = repositorySource();
+
+    final int transactionStart = source.indexOf('Future<void> create({');
+    final int createEnd = source.indexOf('Future<void> updateLifecycle({');
+
+    final String createBlock = source.substring(transactionStart, createEnd);
+
+    expect(createBlock.contains('runTransaction<void>'), isTrue);
+    expect(createBlock.contains('transaction.set(ref, persisted);'), isTrue);
+    expect(createBlock.contains('_appendAtomicAudit('), isTrue);
+    expect(
+      createBlock.contains("actionId: 'ai.security.incident.persist.create'"),
+      isTrue,
+    );
+    expect(
+      createBlock.indexOf('transaction.set(ref, persisted);') <
+          createBlock.indexOf('_appendAtomicAudit('),
+      isTrue,
+    );
+  });
+
+  test('lifecycle write and audit are in same transaction callback', () {
+    final String source = repositorySource();
+
+    final int updateStart = source.indexOf('Future<void> updateLifecycle({');
+    final int helperStart = source.indexOf('void _appendAtomicAudit({');
+
+    final String updateBlock = source.substring(updateStart, helperStart);
+
+    expect(updateBlock.contains('runTransaction<void>'), isTrue);
+    expect(
+      updateBlock.contains('transaction.update(ref, lifecycleUpdate);'),
+      isTrue,
+    );
+    expect(updateBlock.contains('_appendAtomicAudit('), isTrue);
+    expect(
+      updateBlock.contains(
+        "actionId: 'ai.security.incident.persist.lifecycle_update'",
+      ),
+      isTrue,
+    );
+    expect(
+      updateBlock.indexOf('transaction.update(ref, lifecycleUpdate);') <
+          updateBlock.indexOf('_appendAtomicAudit('),
+      isTrue,
+    );
+  });
+
+  test('exactly two incident transaction audit appends exist', () {
+    final String source = repositorySource();
+
+    expect(RegExp(r'_appendAtomicAudit\(').allMatches(source).length, 3);
+
+    // One is helper declaration, two are transaction call sites.
+    expect(
+      RegExp(r'_auditService\.appendInTransaction\(').allMatches(source).length,
+      1,
+    );
+  });
+
+  test('atomic audit metadata remains privacy-safe and bounded', () {
+    final String source = repositorySource();
+
+    expect(source.contains("'atomicWithIncidentWrite': true"), isTrue);
+    expect(source.contains("'protectedSecurityEvidence': true"), isTrue);
+    expect(source.contains("'containsRawPrompt': false"), isTrue);
+    expect(source.contains("'containsPrivatePayload': false"), isTrue);
+    expect(source.contains("'incidentId': record.incidentId"), isTrue);
+    expect(source.contains("'operation': authorization.operation"), isTrue);
+
+    expect(source.contains('rawConversation'), isFalse);
+    expect(source.contains('rawCallTranscript'), isFalse);
+    expect(source.contains('paymentCardNumber'), isFalse);
+  });
+
+  test('audit actor mapping never treats Super Admin as unrestricted type', () {
+    final String source = repositorySource();
+
+    expect(
+      source.contains(
+        'actorRole == AgentSecurityIncidentPersistenceActorRole.owner',
+      ),
+      isTrue,
+    );
+    expect(source.contains('return AgentAuditActorType.owner;'), isTrue);
+    expect(source.contains('return AgentAuditActorType.admin;'), isTrue);
+  });
+
+  test('authorization safe metadata contains no raw auth/session payload', () {
+    final DateTime now = DateTime.utc(2026, 8, 26, 16);
+
+    final authorization = AgentSecurityIncidentPersistenceWriteAuthorization(
+      operation: AgentSecurityIncidentPersistenceOperation.create,
+      incidentId: 'incident-001',
+      actorRole: AgentSecurityIncidentPersistenceActorRole.owner,
+      actorRef: 'owner-ref-001',
+      idempotencyKey: 'incident-write-001',
+      issuedAtUtc: now,
+      expiresAtUtc: now.add(const Duration(minutes: 2)),
+      freshTrustedIdentityVerified: true,
+      permissionGranted: true,
+      sensitiveApprovalVerified: true,
+      runtimeGateAllowed: true,
+      immutableAuditReady: true,
+    );
+
+    final Map<String, Object> metadata = authorization.toSafeAuditMetadata();
+
+    expect(metadata['containsAuthToken'], isFalse);
+    expect(metadata['containsSessionToken'], isFalse);
+    expect(metadata['containsRawPrivatePayload'], isFalse);
+  });
+
+  test('implementation state now records atomic code implementation', () {
+    expect(
+      AgentSecurityIncidentPersistenceImplementationState
+          .atomicImmutableAuditPersistenceImplemented,
+      isTrue,
+    );
+
+    expect(
+      AgentSecurityIncidentPersistenceImplementationState
+          .repositoryRuntimeAttached,
+      isFalse,
+    );
+    expect(
+      AgentSecurityIncidentPersistenceImplementationState
+          .firestoreRulesDeployed,
+      isFalse,
+    );
+    expect(
+      AgentSecurityIncidentPersistenceImplementationState
+          .liveCollectionActivated,
+      isFalse,
+    );
+    expect(
+      AgentSecurityIncidentPersistenceImplementationState
+          .productionPersistenceActive,
+      isFalse,
+    );
+  });
+
+  test('rollout and AUTO authority remain absent', () {
+    expect(
+      AgentSecurityIncidentPersistenceImplementationState.changesRolloutStage,
+      isFalse,
+    );
+    expect(
+      AgentSecurityIncidentPersistenceImplementationState.changesAgentMode,
+      isFalse,
+    );
+    expect(
+      AgentSecurityIncidentPersistenceImplementationState.changesEmergencyStop,
+      isFalse,
+    );
+    expect(
+      AgentSecurityIncidentPersistenceImplementationState.authorizesSuggestOnly,
+      isFalse,
+    );
+    expect(
+      AgentSecurityIncidentPersistenceImplementationState.authorizesAuto,
+      isFalse,
+    );
+  });
+
+  test('Firestore source still protects audit and incident deletes', () {
+    final String rules = File('firestore.rules').readAsStringSync();
+
+    expect(rules.contains('match /agent_audit_logs/{logId}'), isTrue);
+    expect(
+      rules.contains('match /agent_security_incidents/{incidentId}'),
+      isTrue,
+    );
+
+    final int auditStart = rules.indexOf('match /agent_audit_logs/{logId}');
+    final int feedbackStart = rules.indexOf(
+      'match /agent_feedback/{feedbackId}',
+    );
+
+    final String auditBlock = rules.substring(auditStart, feedbackStart);
+
+    expect(auditBlock.contains('allow update, delete: if false;'), isTrue);
+
+    final int incidentStart = rules.indexOf(
+      'match /agent_security_incidents/{incidentId}',
+    );
+    final int catchAllStart = rules.indexOf(
+      'match /{document=**}',
+      incidentStart,
+    );
+
+    final String incidentBlock = rules.substring(incidentStart, catchAllStart);
+
+    expect(incidentBlock.contains('allow delete: if false;'), isTrue);
+  });
+}

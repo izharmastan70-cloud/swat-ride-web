@@ -1,0 +1,667 @@
+﻿import 'dart:async';
+
+import 'package:flutter/material.dart';
+
+import '../models/reward_transaction_model.dart';
+import '../services/reward_history_service.dart';
+
+class RewardHistoryScreen extends StatefulWidget {
+  const RewardHistoryScreen({
+    super.key,
+    required this.userId,
+    this.historyService,
+  });
+
+  final String userId;
+  final RewardHistoryService? historyService;
+
+  @override
+  State<RewardHistoryScreen> createState() => _RewardHistoryScreenState();
+}
+
+enum _HistoryView { all, earned, redeemed }
+
+class _RewardHistoryScreenState extends State<RewardHistoryScreen> {
+  static const int _pageSize = 20;
+  static const Color _navy = Color(0xFF09233F);
+  static const Color _blue = Color(0xFF1264E5);
+  static const Color _background = Color(0xFFF5F7FB);
+
+  late final RewardHistoryService _service;
+  final TextEditingController _searchController = TextEditingController();
+  final ScrollController _scrollController = ScrollController();
+  final List<RewardTransactionModel> _transactions = [];
+
+  RewardHistorySummary _summary = RewardHistorySummary.empty();
+  _HistoryView _selectedView = _HistoryView.all;
+  Timer? _searchTimer;
+  bool _isLoading = true;
+  bool _isLoadingMore = false;
+  bool _hasMore = false;
+  int? _nextOffset;
+  String? _errorMessage;
+
+  @override
+  void initState() {
+    super.initState();
+    _service = widget.historyService ?? RewardHistoryService();
+    _scrollController.addListener(_handleScroll);
+    _loadHistory();
+  }
+
+  @override
+  void dispose() {
+    _searchTimer?.cancel();
+    _searchController.dispose();
+    _scrollController
+      ..removeListener(_handleScroll)
+      ..dispose();
+    super.dispose();
+  }
+
+  RewardHistoryFilter get _filter {
+    return RewardHistoryFilter(
+      userId: widget.userId,
+      creditOnly: _selectedView == _HistoryView.earned ? true : null,
+      debitOnly: _selectedView == _HistoryView.redeemed ? true : null,
+      searchText: _searchController.text.trim(),
+    );
+  }
+
+  Future<void> _loadHistory({bool loadMore = false}) async {
+    if (widget.userId.trim().isEmpty) {
+      setState(() {
+        _isLoading = false;
+        _errorMessage = 'User ID is required to load reward history.';
+      });
+      return;
+    }
+
+    if (loadMore) {
+      if (_isLoadingMore || !_hasMore || _nextOffset == null) return;
+      setState(() => _isLoadingMore = true);
+    } else {
+      setState(() {
+        _isLoading = true;
+        _errorMessage = null;
+      });
+    }
+
+    try {
+      final page = await _service.getHistoryPage(
+        filter: _filter,
+        offset: loadMore ? (_nextOffset ?? 0) : 0,
+        pageSize: _pageSize,
+      );
+
+      final summary = loadMore
+          ? _summary
+          : await _service.getHistorySummary(filter: _filter);
+
+      if (!mounted) return;
+      setState(() {
+        if (!loadMore) _transactions.clear();
+        _transactions.addAll(page.transactions);
+        _summary = summary;
+        _nextOffset = page.nextOffset;
+        _hasMore = page.hasMore;
+        _isLoading = false;
+        _isLoadingMore = false;
+        _errorMessage = null;
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _isLoading = false;
+        _isLoadingMore = false;
+        _errorMessage = error.toString().replaceFirst('Exception: ', '');
+      });
+    }
+  }
+
+  void _handleScroll() {
+    if (_scrollController.position.pixels >=
+        _scrollController.position.maxScrollExtent - 240) {
+      _loadHistory(loadMore: true);
+    }
+  }
+
+  void _onSearchChanged(String value) {
+    _searchTimer?.cancel();
+    _searchTimer = Timer(const Duration(milliseconds: 450), _loadHistory);
+  }
+
+  void _selectView(_HistoryView view) {
+    if (_selectedView == view) return;
+    setState(() => _selectedView = view);
+    _loadHistory();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: _background,
+      appBar: AppBar(
+        backgroundColor: Colors.white,
+        foregroundColor: _navy,
+        elevation: 0,
+        title: const Text(
+          'Reward History',
+          style: TextStyle(fontWeight: FontWeight.w800),
+        ),
+        actions: [
+          IconButton(
+            tooltip: 'Refresh',
+            onPressed: _isLoading ? null : _loadHistory,
+            icon: const Icon(Icons.refresh_rounded),
+          ),
+        ],
+      ),
+      body: SafeArea(child: _buildBody()),
+    );
+  }
+
+  Widget _buildBody() {
+    if (_isLoading) {
+      return const Center(child: CircularProgressIndicator());
+    }
+
+    if (_errorMessage != null && _transactions.isEmpty) {
+      return _MessageState(
+        icon: Icons.receipt_long_outlined,
+        title: 'History unavailable',
+        message: _errorMessage!.isEmpty
+            ? 'Reward history could not be loaded.'
+            : _errorMessage!,
+        onRetry: _loadHistory,
+      );
+    }
+
+    return RefreshIndicator(
+      onRefresh: _loadHistory,
+      child: CustomScrollView(
+        controller: _scrollController,
+        physics: const AlwaysScrollableScrollPhysics(),
+        slivers: [
+          SliverPadding(
+            padding: const EdgeInsets.fromLTRB(16, 16, 16, 10),
+            sliver: SliverToBoxAdapter(child: _buildSummary()),
+          ),
+          SliverPadding(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            sliver: SliverToBoxAdapter(child: _buildSearch()),
+          ),
+          SliverPadding(
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 14),
+            sliver: SliverToBoxAdapter(child: _buildFilters()),
+          ),
+          if (_transactions.isEmpty)
+            const SliverFillRemaining(
+              hasScrollBody: false,
+              child: _EmptyHistory(),
+            )
+          else
+            SliverPadding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 28),
+              sliver: SliverList.separated(
+                itemCount: _transactions.length + (_isLoadingMore ? 1 : 0),
+                separatorBuilder: (context, index) => const SizedBox(height: 10),
+                itemBuilder: (context, index) {
+                  if (index == _transactions.length) {
+                    return const Padding(
+                      padding: EdgeInsets.all(16),
+                      child: Center(child: CircularProgressIndicator()),
+                    );
+                  }
+                  return _TransactionCard(transaction: _transactions[index]);
+                },
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSummary() {
+    return Container(
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        gradient: const LinearGradient(
+          colors: [_navy, _blue],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        borderRadius: BorderRadius.circular(22),
+        boxShadow: const [
+          BoxShadow(
+            color: Color(0x291264E5),
+            blurRadius: 20,
+            offset: Offset(0, 10),
+          ),
+        ],
+      ),
+      child: Column(
+        children: [
+          const Row(
+            children: [
+              Icon(Icons.auto_awesome_rounded, color: Color(0xFFFFD166)),
+              SizedBox(width: 9),
+              Text(
+                'POINTS OVERVIEW',
+                style: TextStyle(
+                  color: Colors.white70,
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: 1,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 18),
+          Row(
+            children: [
+              Expanded(
+                child: _SummaryValue(
+                  label: 'Earned',
+                  value: _summary.totalEarnedPoints,
+                  icon: Icons.add_circle_rounded,
+                ),
+              ),
+              Container(height: 46, width: 1, color: Colors.white24),
+              Expanded(
+                child: _SummaryValue(
+                  label: 'Redeemed',
+                  value: _summary.totalRedeemedPoints,
+                  icon: Icons.redeem_rounded,
+                ),
+              ),
+              Container(height: 46, width: 1, color: Colors.white24),
+              Expanded(
+                child: _SummaryValue(
+                  label: 'Records',
+                  value: _summary.totalRecords,
+                  icon: Icons.receipt_long_rounded,
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSearch() {
+    return TextField(
+      controller: _searchController,
+      onChanged: _onSearchChanged,
+      textInputAction: TextInputAction.search,
+      decoration: InputDecoration(
+        hintText: 'Search rewards',
+        prefixIcon: const Icon(Icons.search_rounded),
+        suffixIcon: _searchController.text.isEmpty
+            ? null
+            : IconButton(
+                tooltip: 'Clear',
+                onPressed: () {
+                  _searchController.clear();
+                  _loadHistory();
+                },
+                icon: const Icon(Icons.close_rounded),
+              ),
+        filled: true,
+        fillColor: Colors.white,
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(16),
+          borderSide: BorderSide.none,
+        ),
+        enabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(16),
+          borderSide: const BorderSide(color: Color(0xFFE5EAF2)),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildFilters() {
+    return Row(
+      children: [
+        _FilterChipButton(
+          text: 'All',
+          selected: _selectedView == _HistoryView.all,
+          onTap: () => _selectView(_HistoryView.all),
+        ),
+        const SizedBox(width: 8),
+        _FilterChipButton(
+          text: 'Earned',
+          selected: _selectedView == _HistoryView.earned,
+          onTap: () => _selectView(_HistoryView.earned),
+        ),
+        const SizedBox(width: 8),
+        _FilterChipButton(
+          text: 'Redeemed',
+          selected: _selectedView == _HistoryView.redeemed,
+          onTap: () => _selectView(_HistoryView.redeemed),
+        ),
+      ],
+    );
+  }
+}
+
+class _SummaryValue extends StatelessWidget {
+  const _SummaryValue({
+    required this.label,
+    required this.value,
+    required this.icon,
+  });
+
+  final String label;
+  final int value;
+  final IconData icon;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        Icon(icon, size: 18, color: Colors.white70),
+        const SizedBox(height: 5),
+        FittedBox(
+          child: Text(
+            _formatNumber(value),
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 20,
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+        ),
+        const SizedBox(height: 2),
+        Text(label, style: const TextStyle(color: Colors.white60, fontSize: 12)),
+      ],
+    );
+  }
+}
+
+class _FilterChipButton extends StatelessWidget {
+  const _FilterChipButton({
+    required this.text,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final String text;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(30),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 180),
+        padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 9),
+        decoration: BoxDecoration(
+          color: selected ? const Color(0xFF1264E5) : Colors.white,
+          borderRadius: BorderRadius.circular(30),
+          border: Border.all(
+            color: selected ? const Color(0xFF1264E5) : const Color(0xFFDDE3ED),
+          ),
+        ),
+        child: Text(
+          text,
+          style: TextStyle(
+            color: selected ? Colors.white : const Color(0xFF536178),
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _TransactionCard extends StatelessWidget {
+  const _TransactionCard({required this.transaction});
+
+  final RewardTransactionModel transaction;
+
+  @override
+  Widget build(BuildContext context) {
+    final credit = transaction.isCredit;
+    final color = credit ? const Color(0xFF159B6C) : const Color(0xFFD1495B);
+
+    return Container(
+      padding: const EdgeInsets.all(15),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: const Color(0xFFE5EAF2)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            width: 46,
+            height: 46,
+            decoration: BoxDecoration(
+              color: color.withValues(alpha: 0.10),
+              borderRadius: BorderRadius.circular(14),
+            ),
+            child: Icon(_transactionIcon(transaction.type), color: color),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Expanded(
+                      child: Text(
+                        transaction.title.trim().isEmpty
+                            ? _label(transaction.type.name)
+                            : transaction.title,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: Color(0xFF09233F),
+                          fontSize: 15,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      '${credit ? '+' : ''}${_formatNumber(transaction.points)}',
+                      style: TextStyle(
+                        color: color,
+                        fontSize: 16,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 5),
+                Text(
+                  '${_label(transaction.module.name)} â€¢ ${_formatDate(transaction.createdAt)}',
+                  style: const TextStyle(color: Color(0xFF6A7890), fontSize: 12),
+                ),
+                if (transaction.description.trim().isNotEmpty) ...[
+                  const SizedBox(height: 5),
+                  Text(
+                    transaction.description,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(color: Color(0xFF536178), fontSize: 13),
+                  ),
+                ],
+                const SizedBox(height: 8),
+                _StatusBadge(status: transaction.status),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _StatusBadge extends StatelessWidget {
+  const _StatusBadge({required this.status});
+
+  final RewardTransactionStatus status;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = _statusColor(status);
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+        decoration: BoxDecoration(
+          color: color.withValues(alpha: 0.10),
+          borderRadius: BorderRadius.circular(20),
+        ),
+        child: Text(
+          _label(status.name),
+          style: TextStyle(color: color, fontSize: 11, fontWeight: FontWeight.w800),
+        ),
+      ),
+    );
+  }
+}
+
+class _EmptyHistory extends StatelessWidget {
+  const _EmptyHistory();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Padding(
+      padding: EdgeInsets.all(32),
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(Icons.receipt_long_outlined, size: 64, color: Color(0xFF9AA5B5)),
+          SizedBox(height: 14),
+          Text(
+            'No reward activity yet',
+            style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800),
+          ),
+          SizedBox(height: 7),
+          Text(
+            'Earned, redeemed and expired points will appear here.',
+            textAlign: TextAlign.center,
+            style: TextStyle(color: Color(0xFF6A7890)),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _MessageState extends StatelessWidget {
+  const _MessageState({
+    required this.icon,
+    required this.title,
+    required this.message,
+    required this.onRetry,
+  });
+
+  final IconData icon;
+  final String title;
+  final String message;
+  final VoidCallback onRetry;
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.all(28),
+        child: Column(
+          children: [
+            Icon(icon, size: 60, color: const Color(0xFF9AA5B5)),
+            const SizedBox(height: 15),
+            Text(title,
+                style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w800)),
+            const SizedBox(height: 8),
+            Text(message, textAlign: TextAlign.center),
+            const SizedBox(height: 20),
+            FilledButton(onPressed: onRetry, child: const Text('Try again')),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+IconData _transactionIcon(RewardTransactionType type) {
+  switch (type) {
+    case RewardTransactionType.earned:
+      return Icons.stars_rounded;
+    case RewardTransactionType.redeemed:
+      return Icons.redeem_rounded;
+    case RewardTransactionType.signupBonus:
+    case RewardTransactionType.firstBookingBonus:
+    case RewardTransactionType.referralBonus:
+    case RewardTransactionType.campaignBonus:
+      return Icons.card_giftcard_rounded;
+    case RewardTransactionType.manualCredit:
+      return Icons.add_circle_rounded;
+    case RewardTransactionType.manualDebit:
+      return Icons.remove_circle_rounded;
+    case RewardTransactionType.expired:
+      return Icons.schedule_rounded;
+    case RewardTransactionType.reversed:
+    case RewardTransactionType.refundAdjustment:
+      return Icons.undo_rounded;
+  }
+}
+
+Color _statusColor(RewardTransactionStatus status) {
+  switch (status) {
+    case RewardTransactionStatus.completed:
+      return const Color(0xFF159B6C);
+    case RewardTransactionStatus.pending:
+      return const Color(0xFFE07A24);
+    case RewardTransactionStatus.failed:
+    case RewardTransactionStatus.cancelled:
+      return const Color(0xFFD1495B);
+    case RewardTransactionStatus.reversed:
+      return const Color(0xFF7654C4);
+    case RewardTransactionStatus.expired:
+      return const Color(0xFF6A7890);
+  }
+}
+
+String _label(String value) {
+  final spaced = value
+      .replaceAllMapped(RegExp(r'([a-z])([A-Z])'), (match) => '${match[1]} ${match[2]}')
+      .replaceAll('_', ' ')
+      .trim();
+  if (spaced.isEmpty) return 'Other';
+  return spaced.split(' ').map((word) {
+    if (word.isEmpty) return word;
+    return '${word[0].toUpperCase()}${word.substring(1)}';
+  }).join(' ');
+}
+
+String _formatDate(DateTime date) {
+  const months = [
+    'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+  ];
+  final hour = date.hour == 0 ? 12 : (date.hour > 12 ? date.hour - 12 : date.hour);
+  final minute = date.minute.toString().padLeft(2, '0');
+  final period = date.hour >= 12 ? 'PM' : 'AM';
+  return '${date.day} ${months[date.month - 1]} ${date.year}, $hour:$minute $period';
+}
+
+String _formatNumber(int value) {
+  final digits = value.abs().toString();
+  final buffer = StringBuffer();
+  for (var index = 0; index < digits.length; index++) {
+    if (index > 0 && (digits.length - index) % 3 == 0) buffer.write(',');
+    buffer.write(digits[index]);
+  }
+  return value < 0 ? '-$buffer' : buffer.toString();
+}
+

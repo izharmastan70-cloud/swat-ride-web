@@ -1,0 +1,266 @@
+import '../constants/agent_provider_constants.dart';
+import '../models/agent_provider_routing_profile.dart';
+import 'agent_provider_selection_policy.dart';
+
+// =========================================================
+// AI AGENT - PROVIDER ROUTER COORDINATOR
+// =========================================================
+//
+// Phase 29 Step 4.
+//
+// Builds a controlled provider routing PLAN from the
+// Provider Selection Policy.
+//
+// Responsibilities:
+// - validate routing request
+// - call provider selection policy
+// - expose primary provider
+// - expose controlled fallback order
+// - preserve FREE / LOCAL vs PAID_CODE boundary
+// - fail closed when no provider is eligible
+//
+// IMPORTANT:
+// This coordinator creates a ROUTING PLAN ONLY.
+//
+// NO PROVIDER EXECUTION.
+// NO API CALL.
+// NO FIRESTORE WRITE.
+// NO SECRET ACCESS.
+// NO PAID-AI AUTO FALLBACK.
+
+class AgentProviderRoutingLane {
+  AgentProviderRoutingLane._();
+
+  static const String freeOrLocal = 'FREE_OR_LOCAL';
+
+  /// Generic paid reasoning lane for non-code AI work.
+  static const String paidReasoning = 'PAID_REASONING';
+
+  /// Dedicated Code Agent paid lane.
+  static const String paidCode = 'PAID_CODE';
+
+  static const Set<String> values = <String>{
+    freeOrLocal,
+    paidReasoning,
+    paidCode,
+  };
+
+  static bool isValid(String value) => values.contains(value);
+}
+
+class AgentProviderRouterRequest {
+  final String taskId;
+  final String requiredCapability;
+  final String routingLane;
+  final String maxCostTier;
+  final bool allowFallback;
+
+  const AgentProviderRouterRequest({
+    required this.taskId,
+    required this.requiredCapability,
+    this.routingLane = AgentProviderRoutingLane.freeOrLocal,
+    this.maxCostTier = AgentProviderCostTier.free,
+    this.allowFallback = true,
+  });
+
+  void validate() {
+    if (taskId.trim().isEmpty) {
+      throw const AgentProviderRouterException('taskId cannot be empty.');
+    }
+
+    if (!AgentProviderCapability.isValid(requiredCapability)) {
+      throw AgentProviderRouterException(
+        'Invalid required capability '
+        '"$requiredCapability".',
+      );
+    }
+
+    if (!AgentProviderRoutingLane.isValid(routingLane)) {
+      throw AgentProviderRouterException(
+        'Invalid routing lane "$routingLane".',
+      );
+    }
+
+    if (!AgentProviderCostTier.isValid(maxCostTier)) {
+      throw AgentProviderRouterException(
+        'Invalid max cost tier "$maxCostTier".',
+      );
+    }
+
+    if (routingLane == AgentProviderRoutingLane.freeOrLocal &&
+        maxCostTier != AgentProviderCostTier.free) {
+      throw const AgentProviderRouterException(
+        'FREE_OR_LOCAL lane must remain FREE cost tier.',
+      );
+    }
+
+    if (routingLane == AgentProviderRoutingLane.paidReasoning &&
+        maxCostTier == AgentProviderCostTier.free) {
+      throw const AgentProviderRouterException(
+        'PAID_REASONING lane requires a non-free max cost tier.',
+      );
+    }
+
+    if (routingLane == AgentProviderRoutingLane.paidReasoning &&
+        (requiredCapability == AgentProviderCapability.codeAnalysis ||
+            requiredCapability == AgentProviderCapability.codePatchProposal)) {
+      throw const AgentProviderRouterException(
+        'PAID_REASONING lane cannot be used for code capabilities.',
+      );
+    }
+
+    if (routingLane == AgentProviderRoutingLane.paidCode &&
+        requiredCapability != AgentProviderCapability.codeAnalysis &&
+        requiredCapability != AgentProviderCapability.codePatchProposal) {
+      throw const AgentProviderRouterException(
+        'PAID_CODE lane is restricted to code capabilities.',
+      );
+    }
+  }
+}
+
+class AgentProviderRoutingPlan {
+  final String taskId;
+  final String routingLane;
+  final String requiredCapability;
+
+  final bool providerAvailable;
+  final String? primaryProviderId;
+  final List<String> fallbackProviderIds;
+
+  final List<AgentProviderSelectionDecision> selectionDecisions;
+
+  final String reason;
+
+  const AgentProviderRoutingPlan({
+    required this.taskId,
+    required this.routingLane,
+    required this.requiredCapability,
+    required this.providerAvailable,
+    required this.primaryProviderId,
+    required this.fallbackProviderIds,
+    required this.selectionDecisions,
+    required this.reason,
+  });
+
+  bool get hasFallback => fallbackProviderIds.isNotEmpty;
+
+  bool get isFailClosed => !providerAvailable || primaryProviderId == null;
+
+  Map<String, dynamic> toMap() {
+    return <String, dynamic>{
+      'taskId': taskId,
+      'routingLane': routingLane,
+      'requiredCapability': requiredCapability,
+      'providerAvailable': providerAvailable,
+      'primaryProviderId': primaryProviderId,
+      'fallbackProviderIds': fallbackProviderIds,
+      'hasFallback': hasFallback,
+      'isFailClosed': isFailClosed,
+      'reason': reason,
+      'selectionDecisions': selectionDecisions
+          .map((AgentProviderSelectionDecision decision) => decision.toMap())
+          .toList(growable: false),
+    };
+  }
+}
+
+class AgentProviderRouterCoordinator {
+  final AgentProviderSelectionPolicy selectionPolicy;
+
+  const AgentProviderRouterCoordinator({
+    this.selectionPolicy = const AgentProviderSelectionPolicy(),
+  });
+
+  AgentProviderRoutingPlan buildPlan({
+    required AgentProviderRouterRequest request,
+    required Iterable<AgentProviderSelectionCandidate> candidates,
+  }) {
+    request.validate();
+
+    final List<AgentProviderSelectionCandidate> candidateList = candidates
+        .toList(growable: false);
+
+    final List<AgentProviderSelectionCandidate> laneCandidates = candidateList
+        .where(
+          (AgentProviderSelectionCandidate candidate) =>
+              _isCandidateAllowedForLane(candidate, request.routingLane),
+        )
+        .toList(growable: false);
+
+    final AgentProviderSelectionResult result = selectionPolicy.select(
+      candidates: laneCandidates,
+      requiredCapability: request.requiredCapability,
+      maxCostTier: request.maxCostTier,
+      allowFallback: request.allowFallback,
+    );
+
+    if (!result.hasEligibleProvider) {
+      return AgentProviderRoutingPlan(
+        taskId: request.taskId,
+        routingLane: request.routingLane,
+        requiredCapability: request.requiredCapability,
+        providerAvailable: false,
+        primaryProviderId: null,
+        fallbackProviderIds: const <String>[],
+        selectionDecisions: List<AgentProviderSelectionDecision>.unmodifiable(
+          result.decisions,
+        ),
+        reason: 'No eligible provider. Routing failed closed.',
+      );
+    }
+
+    return AgentProviderRoutingPlan(
+      taskId: request.taskId,
+      routingLane: request.routingLane,
+      requiredCapability: request.requiredCapability,
+      providerAvailable: true,
+      primaryProviderId: result.primaryProviderId,
+      fallbackProviderIds: List<String>.unmodifiable(
+        result.fallbackProviderIds,
+      ),
+      selectionDecisions: List<AgentProviderSelectionDecision>.unmodifiable(
+        result.decisions,
+      ),
+      reason: 'Controlled provider routing plan ready.',
+    );
+  }
+
+  bool _isCandidateAllowedForLane(
+    AgentProviderSelectionCandidate candidate,
+    String routingLane,
+  ) {
+    final String providerType = candidate.profile.providerType
+        .trim()
+        .toUpperCase();
+
+    if (routingLane == AgentProviderRoutingLane.paidCode) {
+      return providerType == 'PAID_CODE_AI';
+    }
+
+    if (routingLane == AgentProviderRoutingLane.paidReasoning) {
+      return providerType == AgentProviderType.paidReasoning &&
+          candidate.profile.costTier != AgentProviderCostTier.free;
+    }
+
+    // Fail closed:
+    // Paid Code and generic Paid Reasoning providers can NEVER
+    // enter the normal Free/Local fallback chain.
+    if (providerType == 'PAID_CODE_AI' ||
+        providerType == AgentProviderType.paidReasoning) {
+      return false;
+    }
+
+    // Normal lane must stay zero-cost.
+    return candidate.profile.costTier == AgentProviderCostTier.free;
+  }
+}
+
+class AgentProviderRouterException implements Exception {
+  final String message;
+
+  const AgentProviderRouterException(this.message);
+
+  @override
+  String toString() => 'AgentProviderRouterException: $message';
+}

@@ -1,0 +1,197 @@
+import '../constants/agent_guardian_security_constants.dart';
+import '../models/agent_guardian_authoritative_gate_handoff.dart';
+import '../models/agent_guardian_risk_aggregate.dart';
+import '../models/agent_guardian_security_policy_envelope.dart';
+
+class AgentGuardianPolicyHandoffService {
+  const AgentGuardianPolicyHandoffService();
+
+  AgentGuardianSecurityPolicyEnvelope buildEnvelope({
+    required String envelopeId,
+    required AgentGuardianRiskAggregate aggregate,
+    required DateTime generatedAt,
+  }) {
+    if (!aggregate.ready) {
+      return _blockedEnvelope(
+        envelopeId: envelopeId,
+        aggregate: aggregate,
+        generatedAt: generatedAt,
+      );
+    }
+
+    final bool highOrCritical =
+        aggregate.severity == AgentGuardianSeverity.high ||
+        aggregate.severity == AgentGuardianSeverity.critical;
+
+    final bool blockLikeRecommendation =
+        aggregate.recommendedDisposition ==
+            AgentGuardianRecommendedDisposition.blockRecommended ||
+        aggregate.recommendedDisposition ==
+            AgentGuardianRecommendedDisposition.blockAndEscalateRecommended;
+
+    final bool escalationLikeRecommendation =
+        aggregate.recommendedDisposition ==
+            AgentGuardianRecommendedDisposition.reviewAndEscalate ||
+        aggregate.recommendedDisposition ==
+            AgentGuardianRecommendedDisposition.blockAndEscalateRecommended;
+
+    final bool requiresPermissionEngine = highOrCritical;
+    final bool requiresRuntimeGate = highOrCritical;
+
+    final bool requiresApprovalEngine =
+        blockLikeRecommendation ||
+        aggregate.severity == AgentGuardianSeverity.critical;
+
+    final bool requiresEmergencySecurityReview =
+        aggregate.severity == AgentGuardianSeverity.critical;
+
+    final bool requiresHumanSecurityReview =
+        escalationLikeRecommendation ||
+        aggregate.severity == AgentGuardianSeverity.critical;
+
+    final bool failClosedRecommended =
+        highOrCritical ||
+        blockLikeRecommendation ||
+        escalationLikeRecommendation;
+
+    final List<String> reasons = <String>[
+      'guardian_risk_${aggregate.severity.toLowerCase()}',
+      'guardian_disposition_${aggregate.recommendedDisposition.toLowerCase()}',
+      'authoritative_checks_remain_required',
+    ];
+
+    if (aggregate.elevatedByCorrelation) {
+      reasons.add('multi_signal_correlation_elevation');
+    }
+
+    if (aggregate.hasRejections) {
+      reasons.add('correlation_had_rejected_signals');
+    }
+
+    if (requiresEmergencySecurityReview) {
+      reasons.add('critical_security_review_required');
+    }
+
+    return AgentGuardianSecurityPolicyEnvelope(
+      status: AgentGuardianPolicyEnvelopeStatus.ready,
+      envelopeId: envelopeId,
+      correlationId: aggregate.correlationId,
+      pseudonymousSubjectRef: aggregate.pseudonymousSubjectRef,
+      severity: aggregate.severity,
+      evidenceConfidence: aggregate.evidenceConfidence,
+      recommendedDisposition: aggregate.recommendedDisposition,
+      requiresPermissionEngine: requiresPermissionEngine,
+      requiresApprovalEngine: requiresApprovalEngine,
+      requiresRuntimeGate: requiresRuntimeGate,
+      requiresEmergencySecurityReview: requiresEmergencySecurityReview,
+      requiresHumanSecurityReview: requiresHumanSecurityReview,
+      failClosedRecommended: failClosedRecommended,
+      actionMayProceedWithoutAuthoritativeChecks: false,
+      policyReasonCodes: reasons,
+      generatedAt: generatedAt,
+    );
+  }
+
+  AgentGuardianAuthoritativeGateHandoff prepareHandoff({
+    required String handoffId,
+    required AgentGuardianSecurityPolicyEnvelope envelope,
+  }) {
+    try {
+      envelope.validateStructure();
+    } on AgentGuardianSecurityPolicyEnvelopeException {
+      return AgentGuardianAuthoritativeGateHandoff(
+        status: AgentGuardianAuthoritativeGateHandoffStatus.blocked,
+        handoffId: handoffId,
+        envelope: envelope,
+        permissionEngineRequired: false,
+        approvalEngineRequired: false,
+        runtimeGateRequired: false,
+        emergencySecurityReviewRequired: false,
+        humanSecurityReviewRequired: true,
+        failClosedRecommended: true,
+        authoritativeChecksStillPending: true,
+      );
+    }
+
+    if (!envelope.ready) {
+      return AgentGuardianAuthoritativeGateHandoff(
+        status: AgentGuardianAuthoritativeGateHandoffStatus.blocked,
+        handoffId: handoffId,
+        envelope: envelope,
+        permissionEngineRequired: envelope.requiresPermissionEngine,
+        approvalEngineRequired: envelope.requiresApprovalEngine,
+        runtimeGateRequired: envelope.requiresRuntimeGate,
+        emergencySecurityReviewRequired:
+            envelope.requiresEmergencySecurityReview,
+        humanSecurityReviewRequired: true,
+        failClosedRecommended: true,
+        authoritativeChecksStillPending: true,
+      );
+    }
+
+    return AgentGuardianAuthoritativeGateHandoff(
+      status: AgentGuardianAuthoritativeGateHandoffStatus.prepared,
+      handoffId: handoffId,
+      envelope: envelope,
+      permissionEngineRequired: envelope.requiresPermissionEngine,
+      approvalEngineRequired: envelope.requiresApprovalEngine,
+      runtimeGateRequired: envelope.requiresRuntimeGate,
+      emergencySecurityReviewRequired: envelope.requiresEmergencySecurityReview,
+      humanSecurityReviewRequired: envelope.requiresHumanSecurityReview,
+      failClosedRecommended: envelope.failClosedRecommended,
+      authoritativeChecksStillPending: true,
+    );
+  }
+
+  AgentGuardianSecurityPolicyEnvelope _blockedEnvelope({
+    required String envelopeId,
+    required AgentGuardianRiskAggregate aggregate,
+    required DateTime generatedAt,
+  }) {
+    return AgentGuardianSecurityPolicyEnvelope(
+      status: AgentGuardianPolicyEnvelopeStatus.blocked,
+      envelopeId: envelopeId,
+      correlationId: aggregate.correlationId,
+      pseudonymousSubjectRef: aggregate.pseudonymousSubjectRef,
+      severity: AgentGuardianSeverity.high,
+      evidenceConfidence: AgentGuardianEvidenceConfidence.low,
+      recommendedDisposition:
+          AgentGuardianRecommendedDisposition.reviewAndEscalate,
+      requiresPermissionEngine: true,
+      requiresApprovalEngine: true,
+      requiresRuntimeGate: true,
+      requiresEmergencySecurityReview: false,
+      requiresHumanSecurityReview: true,
+      failClosedRecommended: true,
+      actionMayProceedWithoutAuthoritativeChecks: false,
+      policyReasonCodes: const <String>[
+        'guardian_aggregate_not_ready',
+        'authoritative_checks_remain_required',
+      ],
+      generatedAt: generatedAt,
+    );
+  }
+
+  bool get recommendationOnly => true;
+  bool get guardianIsFinalEnforcer => false;
+  bool get invokesPermissionEngine => false;
+  bool get invokesApprovalEngine => false;
+  bool get invokesRuntimeGate => false;
+  bool get invokesEmergencyStop => false;
+  bool get bypassesPermissionEngine => false;
+  bool get bypassesApprovalEngine => false;
+  bool get bypassesRuntimeGate => false;
+  bool get bypassesEmergencyStop => false;
+  bool get grantsPermission => false;
+  bool get consumesApproval => false;
+  bool get marksRuntimeAllowed => false;
+  bool get executesBlock => false;
+  bool get executesEscalation => false;
+  bool get createsIncident => false;
+  bool get implementsIncidentResponse => false;
+  bool get mutatesSecurityControls => false;
+  bool get invokesProvider => false;
+  bool get invokesTargetAgent => false;
+  bool get writesBusinessData => false;
+  bool get persistsEnvelopeOrHandoff => false;
+}

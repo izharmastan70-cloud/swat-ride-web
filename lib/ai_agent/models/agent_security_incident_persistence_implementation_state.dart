@@ -1,0 +1,37 @@
+abstract final class AgentSecurityIncidentPersistenceImplementationState {
+  static const bool repositoryCodeImplemented = true;
+  static const bool firestoreRulesSourceImplemented = true;
+  static const bool phase63RetentionMappingImplemented = true;
+
+  // Runtime/live authority remains deliberately absent in Step1I-E.
+  static const bool repositoryRuntimeAttached = false;
+  // Phase66 Step1I-H V2 deployed the exact audited firestore.rules source.
+  // This flag records deployment only; it does not arm or attach the incident
+  // repository and does not mean incident data persistence is production-active.
+  static const bool firestoreRulesDeployed = true;
+  static const bool liveCollectionActivated = false;
+  static const bool productionPersistenceActive = false;
+
+  // Phase66 Step1I-L implements persistent exactly-once replay protection
+  // offline. Its new Firestore rules are NOT live until separately deployed.
+  static const bool persistentIdempotencyReplayProtectionImplemented = true;
+
+  // Phase66 Step1I-N deployed the exact audited replay-protection rules.
+  // This records rules deployment only. Repository runtime attachment,
+  // execution arming and production incident writes remain separately gated.
+  static const bool persistentIdempotencyReplayRulesDeployed = true;
+  static const bool runtimeActivationBlockedByReplayProtectionRulesPending =
+      false;
+
+  // Step1I-F-B code now places incident mutation + immutable audit append
+  // inside the same Firestore transaction boundary. Runtime/live activation
+  // remains separately disabled below.
+  static const bool atomicImmutableAuditPersistenceImplemented = true;
+
+  static const bool changesRolloutStage = false;
+  static const bool changesAgentMode = false;
+  static const bool changesEmergencyStop = false;
+
+  static const bool authorizesSuggestOnly = false;
+  static const bool authorizesAuto = false;
+}

@@ -1,0 +1,223 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+
+/// Controls access to the Normal Ride + Driver Admin module.
+///
+/// Production access is granted by either:
+/// 1. Firebase custom claim: `admin: true` or `role: admin/super_admin`.
+/// 2. Firestore document: `admins/{uid}` with `isActive: true` and an
+///    Admin role.
+///
+/// The phone bypass below is development-only and must be disabled before
+/// publishing the production app.
+class RideAdminAccessService {
+  RideAdminAccessService({
+    FirebaseAuth? auth,
+    FirebaseFirestore? firestore,
+  })  : _auth = auth ?? FirebaseAuth.instance,
+        _firestore = firestore ?? FirebaseFirestore.instance;
+
+  final FirebaseAuth _auth;
+  final FirebaseFirestore _firestore;
+
+  // =========================================================
+  // TESTING BYPASS - DISABLE BEFORE PRODUCTION
+  // =========================================================
+
+  static const bool testingAdminBypassEnabled = true;
+  static const Set<String> testingAdminPhones = <String>{
+    '+923414188770',
+  };
+
+  User? get currentUser => _auth.currentUser;
+
+  Stream<User?> authStateChanges() => _auth.authStateChanges();
+
+  Future<RideAdminAccessResult> checkCurrentAccess({
+    bool forceRefreshToken = false,
+  }) async {
+    final User? user = _auth.currentUser;
+    if (user == null) {
+      return const RideAdminAccessResult.denied(
+        reason: 'Please sign in before opening the Admin dashboard.',
+      );
+    }
+
+    final String normalizedPhone = _normalizePhone(user.phoneNumber);
+    if (testingAdminBypassEnabled &&
+        testingAdminPhones.contains(normalizedPhone)) {
+      return RideAdminAccessResult.allowed(
+        adminId: user.uid,
+        adminName: user.displayName?.trim().isNotEmpty == true
+            ? user.displayName!.trim()
+            : 'Testing Admin',
+        source: RideAdminAccessSource.testingPhoneBypass,
+        isTestingBypass: true,
+      );
+    }
+
+    try {
+      final IdTokenResult token = await user.getIdTokenResult(
+        forceRefreshToken,
+      );
+      final Map<String, dynamic> claims = token.claims ?? <String, dynamic>{};
+      final String claimRole = claims['role']?.toString().trim().toLowerCase() ?? '';
+      final bool hasAdminClaim = claims['admin'] == true ||
+          claimRole == 'admin' ||
+          claimRole == 'super_admin';
+
+      if (hasAdminClaim) {
+        return RideAdminAccessResult.allowed(
+          adminId: user.uid,
+          adminName: user.displayName?.trim().isNotEmpty == true
+              ? user.displayName!.trim()
+              : 'SWAT RIDE Admin',
+          source: RideAdminAccessSource.customClaim,
+        );
+      }
+    } on FirebaseAuthException catch (error) {
+      return RideAdminAccessResult.error(
+        reason: error.message ?? 'Unable to verify the Admin login token.',
+      );
+    }
+
+    try {
+      final DocumentSnapshot<Map<String, dynamic>> snapshot =
+          await _firestore.collection('admins').doc(user.uid).get();
+      final Map<String, dynamic>? data = snapshot.data();
+      if (!snapshot.exists || data == null) {
+        return const RideAdminAccessResult.denied(
+          reason: 'This account does not have Normal Ride Admin access.',
+        );
+      }
+
+      final bool isActive = data['isActive'] is bool
+          ? data['isActive'] as bool
+          : data['active'] is bool
+              ? data['active'] as bool
+              : false;
+      final String role = data['role']?.toString().trim().toLowerCase() ?? '';
+      final bool hasAdminRole = role == 'admin' || role == 'super_admin';
+
+      if (!isActive || !hasAdminRole) {
+        return RideAdminAccessResult.denied(
+          reason: !isActive
+              ? 'This Admin account is inactive.'
+              : 'This account has an invalid Admin role.',
+        );
+      }
+
+      final String storedName = <dynamic>[
+        data['displayName'],
+        data['name'],
+        user.displayName,
+      ]
+          .map((value) => value?.toString().trim() ?? '')
+          .firstWhere((value) => value.isNotEmpty, orElse: () => 'SWAT RIDE Admin');
+
+      return RideAdminAccessResult.allowed(
+        adminId: user.uid,
+        adminName: storedName,
+        source: RideAdminAccessSource.firestoreAdminRecord,
+      );
+    } on FirebaseException catch (error) {
+      return RideAdminAccessResult.error(
+        reason: error.message ?? 'Unable to verify the Admin account.',
+      );
+    } catch (error) {
+      return RideAdminAccessResult.error(
+        reason: 'Admin verification failed: $error',
+      );
+    }
+  }
+
+  Future<void> refreshUserToken() async {
+    final User? user = _auth.currentUser;
+    if (user == null) return;
+    await user.getIdToken(true);
+  }
+
+  Future<void> signOut() => _auth.signOut();
+
+  static String _normalizePhone(String? value) {
+    final String phone = value?.trim() ?? '';
+    if (phone.isEmpty) return '';
+    return phone.replaceAll(RegExp(r'[\s\-()]'), '');
+  }
+}
+
+enum RideAdminAccessSource {
+  customClaim,
+  firestoreAdminRecord,
+  testingPhoneBypass,
+  none,
+}
+
+enum RideAdminAccessStatus {
+  allowed,
+  denied,
+  error,
+}
+
+class RideAdminAccessResult {
+  const RideAdminAccessResult._({
+    required this.status,
+    required this.adminId,
+    required this.adminName,
+    required this.reason,
+    required this.source,
+    required this.isTestingBypass,
+  });
+
+  const RideAdminAccessResult.allowed({
+    required String adminId,
+    required String adminName,
+    required RideAdminAccessSource source,
+    bool isTestingBypass = false,
+  }) : this._(
+          status: RideAdminAccessStatus.allowed,
+          adminId: adminId,
+          adminName: adminName,
+          reason: '',
+          source: source,
+          isTestingBypass: isTestingBypass,
+        );
+
+  const RideAdminAccessResult.denied({required String reason})
+      : this._(
+          status: RideAdminAccessStatus.denied,
+          adminId: '',
+          adminName: '',
+          reason: reason,
+          source: RideAdminAccessSource.none,
+          isTestingBypass: false,
+        );
+
+  const RideAdminAccessResult.error({required String reason})
+      : this._(
+          status: RideAdminAccessStatus.error,
+          adminId: '',
+          adminName: '',
+          reason: reason,
+          source: RideAdminAccessSource.none,
+          isTestingBypass: false,
+        );
+
+  final RideAdminAccessStatus status;
+  final String adminId;
+  final String adminName;
+  final String reason;
+  final RideAdminAccessSource source;
+  final bool isTestingBypass;
+
+  bool get isAllowed => status == RideAdminAccessStatus.allowed;
+  bool get isDenied => status == RideAdminAccessStatus.denied;
+  bool get hasError => status == RideAdminAccessStatus.error;
+
+  String get sourceLabel => switch (source) {
+        RideAdminAccessSource.customClaim => 'Firebase Admin claim',
+        RideAdminAccessSource.firestoreAdminRecord => 'Firestore Admin record',
+        RideAdminAccessSource.testingPhoneBypass => 'Testing phone bypass',
+        RideAdminAccessSource.none => 'No Admin access',
+      };
+}

@@ -1,0 +1,383 @@
+import 'package:flutter_test/flutter_test.dart';
+import 'package:swat_ride/ai_agent/models/agent_security_incident_post_migration_rebind_atomic_write_schema.dart';
+import 'package:swat_ride/ai_agent/models/agent_security_incident_post_migration_rebind_owner_approval.dart';
+import 'package:swat_ride/ai_agent/services/agent_security_incident_post_migration_rebind_owner_approval_policy.dart';
+
+void main() {
+  const String requesterSha =
+      'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+  const String ownerSha =
+      'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+
+  final DateTime approvedAt = DateTime.utc(2026, 8, 29, 3, 0, 0);
+
+  AgentSecurityIncidentPostMigrationRebindOwnerApproval approval({
+    String approvalId = 'phase66-rebind-approval-fresh',
+    String migrationApprovalId =
+        'phase66-migration-9e2c7bb01a054a61eb81b850b4015825',
+    String requesterReferenceSha256 = requesterSha,
+    String ownerApproverReferenceSha256 = ownerSha,
+    String snapshotSha =
+        AgentSecurityIncidentPostMigrationRebindApprovalContract
+            .lockedPostMigrationSnapshotSha256,
+    String roleSha = AgentSecurityIncidentPostMigrationRebindApprovalContract
+        .lockedRoleInventoryFingerprintSha256,
+    int roleCount = 23,
+    int currentManifestRevision = 2,
+    int targetManifestRevision = 3,
+    int currentGuardRevision = 2,
+    int targetGuardRevision = 3,
+    String targetRoleId = 'security_incident_agent',
+    String targetModule = 'security_incident',
+    String targetActionId = 'security_incident.attach_runtime',
+    String requestedRolloutStage = 'MONITOR_ONLY',
+    bool freshOwner = true,
+    bool explicitOwnerApproval = true,
+    bool selfApprovalAllowed = false,
+    bool migrationApprovalReuseAllowed = false,
+    bool oldTokenReuseAllowed = false,
+    bool roleEnableAuthorized = false,
+    bool holdReleaseAuthorized = false,
+    bool attachAuthorized = false,
+    bool armAuthorized = false,
+    bool incidentWriteAuthorized = false,
+    bool suggestOnly = false,
+    bool auto = false,
+  }) {
+    return AgentSecurityIncidentPostMigrationRebindOwnerApproval(
+      approvalId: approvalId,
+      migrationApprovalId: migrationApprovalId,
+      requesterReferenceSha256: requesterReferenceSha256,
+      ownerApproverReferenceSha256: ownerApproverReferenceSha256,
+      postMigrationSnapshotSha256: snapshotSha,
+      roleInventoryFingerprintSha256: roleSha,
+      roleCount: roleCount,
+      currentAuthorityManifestRevision: currentManifestRevision,
+      targetAuthorityManifestRevision: targetManifestRevision,
+      currentGuardRevision: currentGuardRevision,
+      targetGuardRevision: targetGuardRevision,
+      targetRoleId: targetRoleId,
+      targetModule: targetModule,
+      targetActionId: targetActionId,
+      requestedRolloutStage: requestedRolloutStage,
+      approvedAtUtc: approvedAt,
+      expiresAtUtc: approvedAt.add(const Duration(minutes: 15)),
+      freshOwnerVerifiedAtApproval: freshOwner,
+      explicitOwnerApproval: explicitOwnerApproval,
+      selfApprovalAllowed: selfApprovalAllowed,
+      migrationApprovalReuseAllowed: migrationApprovalReuseAllowed,
+      oldArmingTokenReuseAllowed: oldTokenReuseAllowed,
+      roleEnableAuthorized: roleEnableAuthorized,
+      migrationHoldReleaseAuthorized: holdReleaseAuthorized,
+      repositoryAttachAuthorized: attachAuthorized,
+      repositoryArmAuthorized: armAuthorized,
+      firstIncidentWriteAuthorized: incidentWriteAuthorized,
+      authorizesSuggestOnly: suggestOnly,
+      authorizesAuto: auto,
+    );
+  }
+
+  const AgentSecurityIncidentPostMigrationRebindOwnerApprovalPolicy policy =
+      AgentSecurityIncidentPostMigrationRebindOwnerApprovalPolicy();
+
+  group('Phase66 Step1I-T-AM-V dedicated rebind approval contract', () {
+    test('exact fresh separate Owner approval is valid', () {
+      final decision = policy.evaluate(
+        approval: approval(),
+        nowUtc: approvedAt.add(const Duration(minutes: 1)),
+      );
+
+      expect(decision.valid, isTrue);
+      expect(
+        decision.status,
+        AgentSecurityIncidentPostMigrationRebindApprovalStatus.valid,
+      );
+
+      final scope = approval().toExactActionScope();
+
+      expect(
+        scope['operation'],
+        AgentSecurityIncidentPostMigrationRebindApprovalContract.operation,
+      );
+      expect(scope['roleCount'], 23);
+      expect(scope['currentAuthorityManifestRevision'], 2);
+      expect(scope['targetAuthorityManifestRevision'], 3);
+      expect(scope['currentGuardRevision'], 2);
+      expect(scope['targetGuardRevision'], 3);
+      expect(scope['roleEnableAuthorized'], isFalse);
+      expect(scope['migrationHoldReleaseAuthorized'], isFalse);
+      expect(scope['oldArmingTokenReuseAllowed'], isFalse);
+      expect(scope['authorizesSuggestOnly'], isFalse);
+      expect(scope['authorizesAuto'], isFalse);
+    });
+
+    test('migration approval cannot be reused as rebind approval', () {
+      final decision = policy.evaluate(
+        approval: approval(
+          approvalId: 'phase66-migration-9e2c7bb01a054a61eb81b850b4015825',
+        ),
+        nowUtc: approvedAt.add(const Duration(minutes: 1)),
+      );
+
+      expect(decision.valid, isFalse);
+      expect(
+        decision.status,
+        AgentSecurityIncidentPostMigrationRebindApprovalStatus
+            .blockedSeparation,
+      );
+    });
+
+    test('requester cannot self-approve rebind', () {
+      final decision = policy.evaluate(
+        approval: approval(
+          ownerApproverReferenceSha256: requesterSha,
+          selfApprovalAllowed: true,
+        ),
+        nowUtc: approvedAt.add(const Duration(minutes: 1)),
+      );
+
+      expect(decision.valid, isFalse);
+      expect(
+        decision.status,
+        AgentSecurityIncidentPostMigrationRebindApprovalStatus
+            .blockedSeparation,
+      );
+    });
+
+    test('wrong snapshot/role/guard/manifest binding fails closed', () {
+      const String wrongSha =
+          'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc';
+
+      expect(
+        policy
+            .evaluate(
+              approval: approval(snapshotSha: wrongSha),
+              nowUtc: approvedAt.add(const Duration(minutes: 1)),
+            )
+            .status,
+        AgentSecurityIncidentPostMigrationRebindApprovalStatus.blockedBinding,
+      );
+
+      expect(
+        policy
+            .evaluate(
+              approval: approval(roleCount: 22),
+              nowUtc: approvedAt.add(const Duration(minutes: 1)),
+            )
+            .status,
+        AgentSecurityIncidentPostMigrationRebindApprovalStatus.blockedBinding,
+      );
+
+      expect(
+        policy
+            .evaluate(
+              approval: approval(targetManifestRevision: 2),
+              nowUtc: approvedAt.add(const Duration(minutes: 1)),
+            )
+            .status,
+        AgentSecurityIncidentPostMigrationRebindApprovalStatus.blockedBinding,
+      );
+
+      expect(
+        policy
+            .evaluate(
+              approval: approval(targetGuardRevision: 2),
+              nowUtc: approvedAt.add(const Duration(minutes: 1)),
+            )
+            .status,
+        AgentSecurityIncidentPostMigrationRebindApprovalStatus.blockedBinding,
+      );
+    });
+
+    test('expired approval fails closed', () {
+      final decision = policy.evaluate(
+        approval: approval(),
+        nowUtc: approvedAt.add(const Duration(minutes: 15)),
+      );
+
+      expect(decision.valid, isFalse);
+      expect(
+        decision.status,
+        AgentSecurityIncidentPostMigrationRebindApprovalStatus.blockedExpired,
+      );
+    });
+
+    test(
+      'rebind approval cannot authorize enable/hold release/runtime work',
+      () {
+        expect(
+          policy
+              .evaluate(
+                approval: approval(roleEnableAuthorized: true),
+                nowUtc: approvedAt.add(const Duration(minutes: 1)),
+              )
+              .status,
+          AgentSecurityIncidentPostMigrationRebindApprovalStatus.blockedSafety,
+        );
+
+        expect(
+          policy
+              .evaluate(
+                approval: approval(holdReleaseAuthorized: true),
+                nowUtc: approvedAt.add(const Duration(minutes: 1)),
+              )
+              .status,
+          AgentSecurityIncidentPostMigrationRebindApprovalStatus.blockedSafety,
+        );
+
+        expect(
+          policy
+              .evaluate(
+                approval: approval(attachAuthorized: true),
+                nowUtc: approvedAt.add(const Duration(minutes: 1)),
+              )
+              .status,
+          AgentSecurityIncidentPostMigrationRebindApprovalStatus.blockedSafety,
+        );
+
+        expect(
+          policy
+              .evaluate(
+                approval: approval(auto: true),
+                nowUtc: approvedAt.add(const Duration(minutes: 1)),
+              )
+              .status,
+          AgentSecurityIncidentPostMigrationRebindApprovalStatus.blockedSafety,
+        );
+      },
+    );
+  });
+
+  group('Phase66 Step1I-T-AM-V six-write trusted schema', () {
+    test('exact ordered atomic write surface is six', () {
+      expect(
+        AgentSecurityIncidentPostMigrationRebindAtomicWriteSchema
+            .exactWriteSurfaceCount,
+        6,
+      );
+
+      expect(
+        AgentSecurityIncidentPostMigrationRebindAtomicWriteSchema
+            .orderedWriteSurfaces,
+        <String>[
+          'WRITE_1_CONSUME_EXACT_REBIND_OWNER_APPROVAL',
+          'WRITE_2_REBIND_AUTHORITY_MANIFEST_REVISION_3',
+          'WRITE_3_PERSIST_PRODUCTION_GUARD_REVISION_3_ROLECOUNT_23',
+          'WRITE_4_CREATE_FRESH_ONE_TIME_ARMING_TOKEN_READY',
+          'WRITE_5_CREATE_POST_MIGRATION_REBIND_RECEIPT',
+          'WRITE_6_APPEND_AUDIT_IN_SAME_TRANSACTION',
+        ],
+      );
+    });
+
+    test('rebind transaction stays fail closed', () {
+      expect(
+        AgentSecurityIncidentPostMigrationRebindAtomicWriteSchema
+            .singleTrustedBackendTransactionRequired,
+        isTrue,
+      );
+      expect(
+        AgentSecurityIncidentPostMigrationRebindAtomicWriteSchema
+            .allReadsBeforeFirstWriteRequired,
+        isTrue,
+      );
+      expect(
+        AgentSecurityIncidentPostMigrationRebindAtomicWriteSchema
+            .approvalConsumptionInSameTransactionRequired,
+        isTrue,
+      );
+      expect(
+        AgentSecurityIncidentPostMigrationRebindAtomicWriteSchema
+            .writesMigrationHold,
+        isFalse,
+      );
+      expect(
+        AgentSecurityIncidentPostMigrationRebindAtomicWriteSchema
+            .releasesMigrationHold,
+        isFalse,
+      );
+      expect(
+        AgentSecurityIncidentPostMigrationRebindAtomicWriteSchema
+            .writesSecurityIncidentRole,
+        isFalse,
+      );
+      expect(
+        AgentSecurityIncidentPostMigrationRebindAtomicWriteSchema
+            .enablesSecurityIncidentRole,
+        isFalse,
+      );
+      expect(
+        AgentSecurityIncidentPostMigrationRebindAtomicWriteSchema
+            .rawTokenPersistenceAllowed,
+        isFalse,
+      );
+      expect(
+        AgentSecurityIncidentPostMigrationRebindAtomicWriteSchema
+            .oldTokenReuseAllowed,
+        isFalse,
+      );
+      expect(
+        AgentSecurityIncidentPostMigrationRebindAtomicWriteSchema
+            .authorizesSuggestOnly,
+        isFalse,
+      );
+      expect(
+        AgentSecurityIncidentPostMigrationRebindAtomicWriteSchema
+            .authorizesAuto,
+        isFalse,
+      );
+    });
+
+    test(
+      'receipt schema is fail closed only while role disabled and hold active',
+      () {
+        const receipt = AgentSecurityIncidentPostMigrationRebindReceiptSchema(
+          receiptIdSha256:
+              'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd',
+          ownerApprovalId: 'phase66-rebind-approval-fresh',
+          postMigrationSnapshotSha256:
+              AgentSecurityIncidentPostMigrationRebindApprovalContract
+                  .lockedPostMigrationSnapshotSha256,
+          roleInventoryFingerprintSha256:
+              AgentSecurityIncidentPostMigrationRebindApprovalContract
+                  .lockedRoleInventoryFingerprintSha256,
+          roleCount: 23,
+          authorityManifestRevision: 3,
+          guardRevision: 3,
+          freshArmingTokenIdSha256:
+              'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
+          rolloutStage: 'MONITOR_ONLY',
+          migrationHoldStillActive: true,
+          securityIncidentRoleStillDisabled: true,
+          repositoryAttachAuthorized: false,
+          repositoryArmAuthorized: false,
+          firstIncidentWriteAuthorized: false,
+          authorizesSuggestOnly: false,
+          authorizesAuto: false,
+        );
+
+        expect(receipt.failClosed, isTrue);
+      },
+    );
+
+    test('pure approval policy performs no persistence or execution', () {
+      expect(policy.purePolicyOnly, isTrue);
+      expect(policy.createsApproval, isFalse);
+      expect(policy.consumesApproval, isFalse);
+      expect(policy.writesFirestore, isFalse);
+      expect(policy.executesRebind, isFalse);
+
+      final decision = policy.evaluate(
+        approval: approval(),
+        nowUtc: approvedAt.add(const Duration(minutes: 1)),
+      );
+
+      expect(decision.grantsPermission, isFalse);
+      expect(decision.consumesApproval, isFalse);
+      expect(decision.writesFirestore, isFalse);
+      expect(decision.executesRebind, isFalse);
+      expect(decision.enablesRole, isFalse);
+      expect(decision.releasesMigrationHold, isFalse);
+    });
+  });
+}

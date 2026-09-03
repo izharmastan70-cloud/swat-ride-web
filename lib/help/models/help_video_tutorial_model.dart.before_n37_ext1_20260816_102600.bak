@@ -1,0 +1,83 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
+
+class HelpVideoTutorialModel {
+  const HelpVideoTutorialModel({
+    required this.id,
+    required this.title,
+    required this.description,
+    required this.videoUrl,
+    required this.isEnabled,
+    required this.displayOrder,
+    required this.category,
+    this.createdAt,
+    this.updatedAt,
+  });
+
+  final String id;
+  final String title;
+  final String description;
+  final String videoUrl;
+  final bool isEnabled;
+  final int displayOrder;
+  final String category;
+  final DateTime? createdAt;
+  final DateTime? updatedAt;
+
+  factory HelpVideoTutorialModel.fromMap({
+    required String id,
+    required Map<String, dynamic> map,
+  }) {
+    return HelpVideoTutorialModel(
+      id: id.trim(),
+      title: _stringValue(map['title']),
+      description: _stringValue(map['description']),
+      videoUrl: _stringValue(map['videoUrl']),
+      isEnabled: _boolValue(map['isEnabled'], fallback: false),
+      displayOrder: _intValue(map['displayOrder']),
+      category: _stringValue(map['category'], fallback: 'general'),
+      createdAt: _dateValue(map['createdAt']),
+      updatedAt: _dateValue(map['updatedAt']),
+    );
+  }
+
+  static String _stringValue(dynamic value, {String fallback = ''}) {
+    final String parsed = value?.toString().trim() ?? '';
+    return parsed.isEmpty ? fallback : parsed;
+  }
+
+  static bool _boolValue(dynamic value, {required bool fallback}) {
+    if (value is bool) {
+      return value;
+    }
+
+    return fallback;
+  }
+
+  static int _intValue(dynamic value) {
+    if (value is int) {
+      return value;
+    }
+
+    if (value is num) {
+      return value.toInt();
+    }
+
+    return int.tryParse(value?.toString() ?? '') ?? 0;
+  }
+
+  static DateTime? _dateValue(dynamic value) {
+    if (value is Timestamp) {
+      return value.toDate();
+    }
+
+    if (value is DateTime) {
+      return value;
+    }
+
+    if (value is String) {
+      return DateTime.tryParse(value);
+    }
+
+    return null;
+  }
+}

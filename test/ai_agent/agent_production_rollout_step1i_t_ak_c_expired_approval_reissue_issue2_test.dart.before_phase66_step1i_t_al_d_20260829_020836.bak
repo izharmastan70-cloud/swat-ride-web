@@ -1,0 +1,115 @@
+import 'package:flutter_test/flutter_test.dart';
+import 'package:swat_ride/ai_agent/services/agent_security_incident_role_inventory_migration_exact_pending_approval_reader.dart';
+import 'package:swat_ride/ai_agent/services/agent_security_incident_role_inventory_migration_expected_approval_request_factory.dart';
+
+void main() {
+  const String binding =
+      AgentSecurityIncidentRoleInventoryMigrationExpectedApprovalRequestFactory
+          .requestBindingSha256;
+
+  test('historical Issue 1 deterministic id remains unchanged', () {
+    expect(
+      AgentSecurityIncidentRoleInventoryMigrationExactPendingApprovalReader.deterministicApprovalIdForIssue(
+        binding,
+        issue: 1,
+      ),
+      'phase66-migration-1b2041d892cdafaaa312d04b8794ee2f',
+    );
+
+    expect(
+      AgentSecurityIncidentRoleInventoryMigrationExactPendingApprovalReader.deterministicApprovalIdForBinding(
+        binding,
+      ),
+      'phase66-migration-1b2041d892cdafaaa312d04b8794ee2f',
+    );
+  });
+
+  test('Issue 2 receives a new deterministic document id', () {
+    expect(
+      AgentSecurityIncidentRoleInventoryMigrationExactPendingApprovalReader.deterministicApprovalIdForIssue(
+        binding,
+        issue: 2,
+      ),
+      'phase66-migration-878525d903c07d82032319c46d0857ca',
+    );
+  });
+
+  test('Issue 2 cannot overwrite/reuse historical Issue 1 id', () {
+    final String issue1 =
+        AgentSecurityIncidentRoleInventoryMigrationExactPendingApprovalReader.deterministicApprovalIdForIssue(
+          binding,
+          issue: 1,
+        );
+
+    final String issue2 =
+        AgentSecurityIncidentRoleInventoryMigrationExactPendingApprovalReader.deterministicApprovalIdForIssue(
+          binding,
+          issue: 2,
+        );
+
+    expect(issue2, isNot(issue1));
+  });
+
+  test('reader current issue is exactly 3', () {
+    expect(
+      AgentSecurityIncidentRoleInventoryMigrationExactPendingApprovalReader
+          .currentApprovalIssue,
+      3,
+    );
+  });
+
+  test('invalid approval issue fails closed', () {
+    expect(
+      () =>
+          AgentSecurityIncidentRoleInventoryMigrationExactPendingApprovalReader.deterministicApprovalIdForIssue(
+            binding,
+            issue: 0,
+          ),
+      throwsFormatException,
+    );
+  });
+
+  test('invalid binding SHA fails closed', () {
+    expect(
+      () =>
+          AgentSecurityIncidentRoleInventoryMigrationExactPendingApprovalReader.deterministicApprovalIdForIssue(
+            'not-a-sha',
+            issue: 2,
+          ),
+      throwsFormatException,
+    );
+  });
+
+  test('Issue 3 receives the next deterministic document id', () {
+    expect(
+      AgentSecurityIncidentRoleInventoryMigrationExactPendingApprovalReader.deterministicApprovalIdForIssue(
+        binding,
+        issue: 3,
+      ),
+      'phase66-migration-cccd1ff7e012d637e06e743ecb248596',
+    );
+  });
+
+  test('Issue 3 cannot overwrite/reuse Issue 1 or Issue 2', () {
+    final String issue1 =
+        AgentSecurityIncidentRoleInventoryMigrationExactPendingApprovalReader.deterministicApprovalIdForIssue(
+          binding,
+          issue: 1,
+        );
+
+    final String issue2 =
+        AgentSecurityIncidentRoleInventoryMigrationExactPendingApprovalReader.deterministicApprovalIdForIssue(
+          binding,
+          issue: 2,
+        );
+
+    final String issue3 =
+        AgentSecurityIncidentRoleInventoryMigrationExactPendingApprovalReader.deterministicApprovalIdForIssue(
+          binding,
+          issue: 3,
+        );
+
+    expect(issue3, isNot(issue1));
+    expect(issue3, isNot(issue2));
+  });
+}

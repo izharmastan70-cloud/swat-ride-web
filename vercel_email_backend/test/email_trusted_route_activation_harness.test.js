@@ -1,0 +1,527 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+
+import {
+  createDisabledTrustedEmailRuntime,
+} from '../src/runtime/email_trusted_runtime_composer.js';
+
+import {
+  runSyntheticTrustedRouteActivationHarness,
+} from '../src/runtime/email_trusted_route_activation_harness.js';
+
+import {
+  DisabledBrevoTransactionalEmailTransport,
+} from '../src/providers/brevo_transactional_email_transport.js';
+
+class FakeSnapshot {
+  constructor(data) {
+    this._data = data;
+    this.exists = data !== undefined;
+  }
+
+  data() {
+    return this._data;
+  }
+}
+
+class FakeDocumentReference {
+  constructor(firestore, collectionName, id) {
+    this.firestore = firestore;
+    this.collectionName = collectionName;
+    this.id = id;
+  }
+
+  async get() {
+    return new FakeSnapshot(
+        this.firestore.getData(
+            this.collectionName,
+            this.id));
+  }
+
+  async update(patch) {
+    this.firestore.updateData(
+        this.collectionName,
+        this.id,
+        patch);
+  }
+}
+
+class FakeCollectionReference {
+  constructor(firestore, name) {
+    this.firestore = firestore;
+    this.name = name;
+  }
+
+  doc(id) {
+    return new FakeDocumentReference(
+        this.firestore,
+        this.name,
+        id);
+  }
+}
+
+class FakeTransaction {
+  constructor(firestore) {
+    this.firestore = firestore;
+  }
+
+  async get(ref) {
+    return ref.get();
+  }
+
+  set(ref, data) {
+    this.firestore.setData(
+        ref.collectionName,
+        ref.id,
+        data);
+  }
+
+  update(ref, patch) {
+    this.firestore.updateData(
+        ref.collectionName,
+        ref.id,
+        patch);
+  }
+}
+
+class FakeFirestore {
+  constructor(seed = {}) {
+    this.store = new Map();
+
+    for (const [key, value] of Object.entries(seed)) {
+      this.store.set(
+          key,
+          structuredClone(value));
+    }
+  }
+
+  collection(name) {
+    return new FakeCollectionReference(
+        this,
+        name);
+  }
+
+  async runTransaction(callback) {
+    return callback(
+        new FakeTransaction(this));
+  }
+
+  key(collectionName, id) {
+    return `${collectionName}/${id}`;
+  }
+
+  getData(collectionName, id) {
+    const value =
+        this.store.get(
+            this.key(collectionName, id));
+
+    return value === undefined
+        ? undefined
+        : structuredClone(value);
+  }
+
+  setData(collectionName, id, data) {
+    this.store.set(
+        this.key(collectionName, id),
+        structuredClone(data));
+  }
+
+  updateData(collectionName, id, patch) {
+    const key =
+        this.key(collectionName, id);
+
+    const current =
+        this.store.get(key);
+
+    if (current === undefined) {
+      throw new Error(
+          'Fake update target does not exist.');
+    }
+
+    this.store.set(
+        key,
+        structuredClone({
+          ...current,
+          ...patch,
+        }));
+  }
+}
+
+function validApprovalScope() {
+  return {
+    authorizationRequestId:
+        'authorization_1',
+    draftId:
+        'draft_1',
+    binding: {
+      algorithm:
+          'CANONICAL_JSON_SHA256_BASE64URL_V2',
+      fingerprint:
+          'binding_1',
+      draftId:
+          'draft_1',
+      exactDraftMatchRequired:
+          true,
+    },
+    exactDraftMatchRequired:
+        true,
+    oneActionOnly:
+        true,
+    oneTimeConsumptionRequired:
+        true,
+  };
+}
+
+function seed() {
+  return {
+    'agent_settings/master': {
+      emailAgentEnabled: true,
+    },
+
+    'agent_approvals/approval_1': {
+      approvalId: 'approval_1',
+      roleId: 'email_agent',
+      actionId: 'email.send',
+      module: 'email',
+      requestedBy: 'owner_uid',
+      actionScope:
+          validApprovalScope(),
+      status: 'CONSUMED',
+      createdAt: new Date(1000),
+      expiresAt: new Date(5000),
+      consumedAt: new Date(4000),
+    },
+
+    'agent_email_sender_identities/sender_primary': {
+      senderIdentityId:
+          'sender_primary',
+      providerId:
+          'brevo',
+      fromAddress:
+          'synthetic@example.com',
+      displayName:
+          'Synthetic Sender',
+      enabled:
+          true,
+      verifiedAt:
+          new Date(3000),
+      verificationSource:
+          'SERVER_PROVIDER_VERIFIED',
+      createdAt:
+          new Date(2000),
+      updatedAt:
+          new Date(3000),
+    },
+  };
+}
+
+function handoff() {
+  return {
+    approvalId:
+        'approval_1',
+    handoffId:
+        'handoff_1',
+    authorizationRequestId:
+        'authorization_1',
+    draftId:
+        'draft_1',
+    bindingFingerprint:
+        'binding_1',
+    senderIdentityId:
+        'sender_primary',
+    providerId:
+        'brevo',
+    fromAddress:
+        'synthetic@example.com',
+  };
+}
+
+function createRuntime({
+  firestore = new FakeFirestore(seed()),
+  role = 'super_admin',
+} = {}) {
+  return createDisabledTrustedEmailRuntime({
+    app: {
+      syntheticFirebaseAdminApp: true,
+    },
+    serverConfig: {
+      liveSendEnabled: false,
+    },
+    serviceHandleFactory() {
+      return {
+        auth: {
+          async verifyIdToken(
+            token,
+            checkRevoked,
+          ) {
+            assert.equal(
+                token,
+                'synthetic.firebase.id.token');
+
+            assert.equal(
+                checkRevoked,
+                true);
+
+            return {
+              uid: 'owner_uid',
+              role,
+              superAdmin:
+                  role === 'super_admin',
+            };
+          },
+        },
+        firestore,
+      };
+    },
+    providerTransport:
+        new DisabledBrevoTransactionalEmailTransport(),
+    serverTimestamp: () => ({
+      syntheticServerTimestamp: true,
+    }),
+  });
+}
+
+test('synthetic trusted route harness passes every real trusted adapter gate and still cannot send', async () => {
+  const runtime =
+      createRuntime();
+
+  const result =
+      await runSyntheticTrustedRouteActivationHarness({
+        idToken:
+            'synthetic.firebase.id.token',
+        handoff:
+            handoff(),
+        runtime,
+      });
+
+  assert.equal(result.ok, true);
+  assert.equal(
+      result.readyForRealSenderSetup,
+      true);
+  assert.equal(
+      result.providerExecutionAllowed,
+      false);
+  assert.equal(
+      result.liveRouteActivationAllowed,
+      false);
+  assert.equal(
+      result.code,
+      'SYNTHETIC_TRUSTED_ROUTE_PRECHECK_PASSED');
+  assert.equal(
+      runtime.providerTransport.ready,
+      false);
+  assert.equal(
+      runtime.providerTransport.liveNetworkAllowed,
+      false);
+});
+
+test('synthetic harness fails closed when Email Agent master switch is OFF', async () => {
+  const data = seed();
+  data['agent_settings/master'] = {
+    emailAgentEnabled: false,
+  };
+
+  const runtime =
+      createRuntime({
+        firestore:
+            new FakeFirestore(data),
+      });
+
+  const result =
+      await runSyntheticTrustedRouteActivationHarness({
+        idToken:
+            'synthetic.firebase.id.token',
+        handoff:
+            handoff(),
+        runtime,
+      });
+
+  assert.equal(result.ok, false);
+  assert.equal(
+      result.stage,
+      'MASTER_TOGGLE');
+  assert.equal(
+      result.providerExecutionAllowed,
+      false);
+});
+
+test('synthetic harness fails closed for non-Super-Admin identity', async () => {
+  const runtime =
+      createRuntime({
+        role: 'customer',
+      });
+
+  const result =
+      await runSyntheticTrustedRouteActivationHarness({
+        idToken:
+            'synthetic.firebase.id.token',
+        handoff:
+            handoff(),
+        runtime,
+      });
+
+  assert.equal(result.ok, false);
+  assert.equal(
+      result.stage,
+      'SUPER_ADMIN');
+});
+
+test('synthetic harness rejects mutated approval scope before sender/idempotency', async () => {
+  const data = seed();
+
+  data['agent_approvals/approval_1'] = {
+    ...data['agent_approvals/approval_1'],
+    actionScope: {
+      ...validApprovalScope(),
+      subject:
+          'must-not-be-authorized-here',
+    },
+  };
+
+  const firestore =
+      new FakeFirestore(data);
+
+  const runtime =
+      createRuntime({
+        firestore,
+      });
+
+  const result =
+      await runSyntheticTrustedRouteActivationHarness({
+        idToken:
+            'synthetic.firebase.id.token',
+        handoff:
+            handoff(),
+        runtime,
+      });
+
+  assert.equal(result.ok, false);
+  assert.equal(
+      result.stage,
+      'APPROVAL');
+
+  assert.equal(
+      firestore.getData(
+          'agent_email_delivery_idempotency',
+          'email:approval_1:handoff_1'),
+      undefined);
+});
+
+test('synthetic harness rejects unverified sender before idempotency claim', async () => {
+  const data = seed();
+
+  data[
+      'agent_email_sender_identities/sender_primary'
+  ] = {
+    ...data[
+        'agent_email_sender_identities/sender_primary'
+    ],
+    verificationSource:
+        'CLIENT_ASSERTED',
+  };
+
+  const firestore =
+      new FakeFirestore(data);
+
+  const runtime =
+      createRuntime({
+        firestore,
+      });
+
+  const result =
+      await runSyntheticTrustedRouteActivationHarness({
+        idToken:
+            'synthetic.firebase.id.token',
+        handoff:
+            handoff(),
+        runtime,
+      });
+
+  assert.equal(result.ok, false);
+  assert.equal(
+      result.stage,
+      'SENDER');
+
+  assert.equal(
+      firestore.getData(
+          'agent_email_delivery_idempotency',
+          'email:approval_1:handoff_1'),
+      undefined);
+});
+
+test('synthetic harness atomically claims idempotency and rejects replay', async () => {
+  const firestore =
+      new FakeFirestore(seed());
+
+  const runtime =
+      createRuntime({
+        firestore,
+      });
+
+  const first =
+      await runSyntheticTrustedRouteActivationHarness({
+        idToken:
+            'synthetic.firebase.id.token',
+        handoff:
+            handoff(),
+        runtime,
+      });
+
+  const second =
+      await runSyntheticTrustedRouteActivationHarness({
+        idToken:
+            'synthetic.firebase.id.token',
+        handoff:
+            handoff(),
+        runtime,
+      });
+
+  assert.equal(first.ok, true);
+  assert.equal(second.ok, false);
+  assert.equal(
+      second.stage,
+      'IDEMPOTENCY');
+
+  const stored =
+      firestore.getData(
+          'agent_email_delivery_idempotency',
+          'email:approval_1:handoff_1');
+
+  assert.equal(
+      stored.status,
+      'RESERVED');
+  assert.equal(
+      stored.providerId,
+      'brevo');
+});
+
+test('harness itself refuses any runtime that claims provider or route execution authority', async () => {
+  const runtime =
+      createRuntime();
+
+  const unsafeRuntime = {
+    ...runtime,
+    liveSendEnabled: true,
+  };
+
+  const result =
+      await runSyntheticTrustedRouteActivationHarness({
+        idToken:
+            'synthetic.firebase.id.token',
+        handoff:
+            handoff(),
+        runtime:
+            unsafeRuntime,
+      });
+
+  assert.equal(result.ok, false);
+  assert.equal(
+      result.stage,
+      'RUNTIME');
+  assert.equal(
+      result.providerExecutionAllowed,
+      false);
+  assert.equal(
+      result.liveRouteActivationAllowed,
+      false);
+});

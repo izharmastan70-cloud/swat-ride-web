@@ -1,0 +1,241 @@
+import '../models/admin_intelligence_reasoning_policy.dart';
+import '../models/agent_ai_cost_usage_assessment.dart';
+import 'agent_ai_cost_usage_service.dart';
+import 'agent_provider_usage_accounting_service.dart';
+
+import '../models/agent_master_settings.dart';
+
+class AdminIntelligencePaidRuntimeGateResult {
+  const AdminIntelligencePaidRuntimeGateResult({
+    required this.costAssessment,
+    required this.paidBudget,
+    required this.reasoningDecision,
+    required this.providerCapacityAvailable,
+    required this.paidExecutionAllowed,
+    required this.reason,
+  });
+
+  final AgentAiCostUsageAssessment costAssessment;
+  final AdminIntelligencePaidBudget paidBudget;
+  final AdminIntelligenceReasoningDecision reasoningDecision;
+
+  /// Reuses existing provider daily quota/rate-limit accounting.
+  final bool providerCapacityAvailable;
+
+  /// True only after every Phase 38 paid guard is satisfied.
+  final bool paidExecutionAllowed;
+
+  final String reason;
+
+  bool get systemMayContinue => reasoningDecision.systemMayContinue;
+}
+
+/// Final pre-execution paid reasoning cost gate.
+///
+/// Reuses AgentAiCostUsageService ONLY for deterministic token/cost
+/// estimation. Paid Code AI budget storage is intentionally NOT reused,
+/// because PAID_CODE_AI remains isolated to the Code Agent.
+///
+/// This gate does not execute a provider, charge money, mutate a budget,
+/// write Firestore, or grant owner approval.
+class AdminIntelligencePaidRuntimeGate {
+  const AdminIntelligencePaidRuntimeGate({
+    this.costUsageService = const AgentAiCostUsageService(),
+  });
+
+  final AgentAiCostUsageService costUsageService;
+
+  AdminIntelligencePaidRuntimeGateResult evaluate({
+    required String taskId,
+    required String providerId,
+    required String operationName,
+    required int inputTokens,
+    required int outputTokens,
+    required double inputCostPer1kTokensRs,
+    required double outputCostPer1kTokensRs,
+    required double perTaskLimitRs,
+    required double dailyLimitRs,
+    required double monthlyLimitRs,
+    required double spentTodayRs,
+    required double spentThisMonthRs,
+    required AdminIntelligenceReasoningPolicy reasoningPolicy,
+    required AdminIntelligenceReasoningState reasoningState,
+    AgentProviderUsageSnapshot? providerUsage,
+    int expensiveTokenThreshold = 8000,
+    double expensiveCostThresholdRs = 50,
+    bool repeatedOperation = false,
+    bool deterministicOperation = false,
+    bool reusableResult = false,
+  }) {
+    _validateMoney(
+      perTaskLimitRs: perTaskLimitRs,
+      dailyLimitRs: dailyLimitRs,
+      monthlyLimitRs: monthlyLimitRs,
+      spentTodayRs: spentTodayRs,
+      spentThisMonthRs: spentThisMonthRs,
+    );
+
+    final AgentAiCostUsageAssessment assessment = costUsageService.assess(
+      taskId: taskId,
+      providerId: providerId,
+      operationName: operationName,
+      inputTokens: inputTokens,
+      outputTokens: outputTokens,
+      inputCostPer1kTokensRs: inputCostPer1kTokensRs,
+      outputCostPer1kTokensRs: outputCostPer1kTokensRs,
+
+      // IMPORTANT:
+      // Existing monthly budget fields are for PAID_CODE_AI.
+      // Admin Intelligence uses its own isolated Rs limits below.
+      monthlyBudgetRs: 0,
+      monthlyUsedRs: 0,
+
+      expensiveTokenThreshold: expensiveTokenThreshold,
+      expensiveCostThresholdRs: expensiveCostThresholdRs,
+      repeatedOperation: repeatedOperation,
+      deterministicOperation: deterministicOperation,
+      reusableResult: reusableResult,
+    );
+
+    final AdminIntelligencePaidBudget paidBudget = AdminIntelligencePaidBudget(
+      perTaskLimitRs: perTaskLimitRs,
+      dailyLimitRs: dailyLimitRs,
+      monthlyLimitRs: monthlyLimitRs,
+      spentTodayRs: spentTodayRs,
+      spentThisMonthRs: spentThisMonthRs,
+      estimatedTaskCostRs: assessment.estimatedCostRs,
+    );
+
+    final AdminIntelligenceReasoningDecision decision = reasoningPolicy
+        .decideNext(state: reasoningState, paidBudget: paidBudget);
+
+    final bool providerCapacityAvailable =
+        providerUsage == null || !providerUsage.blocked;
+
+    final bool paidExecutionAllowed =
+        decision.shouldUsePaidAi &&
+        decision.paidCostAllowed &&
+        !decision.requiresOwnerApproval &&
+        paidBudget.canSpendPaid &&
+        providerCapacityAvailable;
+
+    final String reason = _reason(
+      decision: decision,
+      paidBudget: paidBudget,
+      providerCapacityAvailable: providerCapacityAvailable,
+      paidExecutionAllowed: paidExecutionAllowed,
+    );
+
+    return AdminIntelligencePaidRuntimeGateResult(
+      costAssessment: assessment,
+      paidBudget: paidBudget,
+      reasoningDecision: decision,
+      providerCapacityAvailable: providerCapacityAvailable,
+      paidExecutionAllowed: paidExecutionAllowed,
+      reason: reason,
+    );
+  }
+
+  /// Canonical Phase 40 Master Control entry for generic Paid Reasoning.
+  ///
+  /// This method does not create a second paid gate. It maps the current
+  /// AgentMasterSettings snapshot into the existing Free-First reasoning
+  /// policy and then delegates to [evaluate].
+  ///
+  /// PAID_CODE_AI budget/state is intentionally not referenced here.
+  AdminIntelligencePaidRuntimeGateResult evaluateWithMasterSettings({
+    required AgentMasterSettings settings,
+    required String taskId,
+    required String providerId,
+    required String operationName,
+    required int inputTokens,
+    required int outputTokens,
+    required double inputCostPer1kTokensRs,
+    required double outputCostPer1kTokensRs,
+    required double spentTodayRs,
+    required double spentThisMonthRs,
+    required AdminIntelligenceReasoningState reasoningState,
+    required bool paidApprovalGranted,
+    AgentProviderUsageSnapshot? providerUsage,
+    int expensiveTokenThreshold = 8000,
+    double expensiveCostThresholdRs = 50,
+    bool repeatedOperation = false,
+    bool deterministicOperation = false,
+    bool reusableResult = false,
+  }) {
+    final AdminIntelligenceReasoningPolicy reasoningPolicy =
+        AdminIntelligenceReasoningPolicy(
+          freeOnlineEnabled: settings.masterEnabled && settings.freeAiEnabled,
+          localAiEnabled: settings.masterEnabled && settings.localAiEnabled,
+          paidAiEnabled: settings.paidReasoningOperational,
+          askBeforePaid: settings.askBeforePaid,
+          paidApprovalGranted: paidApprovalGranted,
+        );
+
+    return evaluate(
+      taskId: taskId,
+      providerId: providerId,
+      operationName: operationName,
+      inputTokens: inputTokens,
+      outputTokens: outputTokens,
+      inputCostPer1kTokensRs: inputCostPer1kTokensRs,
+      outputCostPer1kTokensRs: outputCostPer1kTokensRs,
+      perTaskLimitRs: settings.paidReasoningPerTaskLimitRs.toDouble(),
+      dailyLimitRs: settings.paidReasoningDailyLimitRs.toDouble(),
+      monthlyLimitRs: settings.paidReasoningMonthlyLimitRs.toDouble(),
+      spentTodayRs: spentTodayRs,
+      spentThisMonthRs: spentThisMonthRs,
+      reasoningPolicy: reasoningPolicy,
+      reasoningState: reasoningState,
+      providerUsage: providerUsage,
+      expensiveTokenThreshold: expensiveTokenThreshold,
+      expensiveCostThresholdRs: expensiveCostThresholdRs,
+      repeatedOperation: repeatedOperation,
+      deterministicOperation: deterministicOperation,
+      reusableResult: reusableResult,
+    );
+  }
+
+  void _validateMoney({
+    required double perTaskLimitRs,
+    required double dailyLimitRs,
+    required double monthlyLimitRs,
+    required double spentTodayRs,
+    required double spentThisMonthRs,
+  }) {
+    if (perTaskLimitRs < 0 ||
+        dailyLimitRs < 0 ||
+        monthlyLimitRs < 0 ||
+        spentTodayRs < 0 ||
+        spentThisMonthRs < 0) {
+      throw ArgumentError(
+        'Admin Intelligence paid limits/usage cannot be negative.',
+      );
+    }
+  }
+
+  String _reason({
+    required AdminIntelligenceReasoningDecision decision,
+    required AdminIntelligencePaidBudget paidBudget,
+    required bool providerCapacityAvailable,
+    required bool paidExecutionAllowed,
+  }) {
+    if (paidExecutionAllowed) {
+      return 'paid_reasoning_runtime_gate_passed';
+    }
+
+    if (decision.requiresOwnerApproval) {
+      return 'paid_reasoning_waiting_for_owner_approval';
+    }
+
+    if (!paidBudget.canSpendPaid) {
+      return 'paid_reasoning_rs_budget_blocked_system_continues';
+    }
+
+    if (!providerCapacityAvailable) {
+      return 'paid_reasoning_provider_quota_blocked_system_continues';
+    }
+
+    return decision.reason;
+  }
+}

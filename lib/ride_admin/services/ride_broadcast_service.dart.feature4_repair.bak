@@ -1,0 +1,60 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
+
+class RideBroadcastService {
+  RideBroadcastService({FirebaseFirestore? firestore})
+    : _firestore = firestore ?? FirebaseFirestore.instance;
+  final FirebaseFirestore _firestore;
+  CollectionReference<Map<String, dynamic>> get _broadcasts =>
+      _firestore.collection('ride_admin_broadcasts');
+
+  Stream<QuerySnapshot<Map<String, dynamic>>> watchBroadcasts({
+    int limit = 100,
+  }) => _broadcasts
+      .orderBy('createdAt', descending: true)
+      .limit(limit)
+      .snapshots();
+
+  Future<String> createBroadcast({
+    required String audience,
+    required String title,
+    required String body,
+    required String createdBy,
+    required String createdByName,
+    String target = '',
+    DateTime? scheduledAt,
+  }) async {
+    final a = audience.trim();
+    final t = title.trim();
+    final b = body.trim();
+    final admin = createdBy.trim();
+    if (!const <String>{'riders', 'drivers', 'both'}.contains(a)) {
+      throw ArgumentError('Audience must be riders, drivers, or both.');
+    }
+    if (t.isEmpty || t.length > 120)
+      throw ArgumentError('Title is required and must be <= 120 characters.');
+    if (b.isEmpty || b.length > 1000)
+      throw ArgumentError('Body is required and must be <= 1000 characters.');
+    if (admin.isEmpty) throw ArgumentError('Admin ID is required.');
+    final now = DateTime.now();
+    final scheduled = scheduledAt != null && scheduledAt.isAfter(now);
+    final ref = _broadcasts.doc();
+    await ref.set(<String, dynamic>{
+      'audience': a,
+      'title': t,
+      'body': b,
+      'target': target.trim(),
+      'createdBy': admin,
+      'createdByName': createdByName.trim(),
+      'createdAt': FieldValue.serverTimestamp(),
+      'scheduledAt': scheduledAt == null
+          ? null
+          : Timestamp.fromDate(scheduledAt),
+      'status': scheduled ? 'scheduled' : 'recorded',
+      'pushProviderConnected': false,
+      'providerMessageId': null,
+      'sentAt': null,
+      'architectureVersion': 1,
+    });
+    return ref.id;
+  }
+}

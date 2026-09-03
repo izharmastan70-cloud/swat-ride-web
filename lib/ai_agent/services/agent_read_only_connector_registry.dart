@@ -1,0 +1,46 @@
+import 'agent_core_read_only_connector.dart';
+import 'agent_driver_read_only_connector.dart';
+import 'agent_food_order_read_only_connector.dart';
+import 'agent_restaurant_read_only_connector.dart';
+import 'agent_read_only_connector.dart';
+import 'agent_ride_read_only_connector.dart';
+
+// =========================================================
+// AI AGENT ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â READ-ONLY CONNECTOR REGISTRY
+// =========================================================
+//
+// Phase 7 attaches only the AI Core connector.
+// Business-module connectors are intentionally absent.
+
+class AgentReadOnlyConnectorRegistry {
+  final List<AgentReadOnlyConnector> _connectors;
+
+  AgentReadOnlyConnectorRegistry({
+    List<AgentReadOnlyConnector>? connectors,
+  }) : _connectors = List<AgentReadOnlyConnector>.unmodifiable(
+          connectors ??
+              <AgentReadOnlyConnector>[
+                AgentCoreReadOnlyConnector(),
+                AgentRideReadOnlyConnector(),
+                AgentDriverReadOnlyConnector(),
+AgentFoodOrderReadOnlyConnector(),
+                AgentRestaurantReadOnlyConnector(),
+              ],
+        );
+
+  AgentReadOnlyConnector? connectorFor({
+    required String module,
+    required String actionId,
+  }) {
+    for (final AgentReadOnlyConnector connector in _connectors) {
+      if (connector.module == module &&
+          connector.supports(actionId)) {
+        return connector;
+      }
+    }
+    return null;
+  }
+
+  List<AgentReadOnlyConnector> get all =>
+      List<AgentReadOnlyConnector>.unmodifiable(_connectors);
+}

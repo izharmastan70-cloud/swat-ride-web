@@ -1,0 +1,2296 @@
+// lib/food/admin/screens/food_support_screen.dart
+// =============================================================
+// SWAT RIDE - FOOD DELIVERY
+// Admin Food Support Screen
+//
+// Firestore collection:
+// food_support_tickets/{ticketId}
+//
+// Real features:
+// - Live support tickets
+// - Customer / Restaurant / Rider support
+// - Search and filters
+// - Priority and status controls
+// - Admin assignment
+// - Internal admin notes
+// - Reply history
+// - Resolve / close / reopen ticket
+//
+// Existing non-Food modules remain untouched.
+// =============================================================
+
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:flutter/material.dart';
+
+enum _FoodSupportFilter {
+  all,
+  open,
+  inProgress,
+  resolved,
+  closed,
+  critical,
+}
+
+enum _FoodSupportTicketStatus {
+  open,
+  inProgress,
+  resolved,
+  closed,
+}
+
+enum _FoodSupportPriority {
+  low,
+  medium,
+  high,
+  critical,
+}
+
+enum _FoodSupportUserType {
+  customer,
+  restaurant,
+  rider,
+}
+
+class FoodSupportScreen extends StatefulWidget {
+  const FoodSupportScreen({
+    super.key,
+  });
+
+  @override
+  State<FoodSupportScreen> createState() =>
+      _FoodSupportScreenState();
+}
+
+class _FoodSupportScreenState
+    extends State<FoodSupportScreen> {
+  static const Color yellow = Color(0xFFFFD60A);
+  static const Color background = Color(0xFF0D0D0D);
+  static const Color cardColor = Color(0xFF1A1A1A);
+
+  static const String collectionName =
+      'food_support_tickets';
+
+  final FirebaseFirestore _firestore =
+      FirebaseFirestore.instance;
+
+  final TextEditingController _searchController =
+      TextEditingController();
+
+  _FoodSupportFilter _selectedFilter =
+      _FoodSupportFilter.all;
+
+  String _searchText = '';
+  bool _isUpdating = false;
+
+  CollectionReference<Map<String, dynamic>>
+      get _ticketsRef =>
+          _firestore.collection(collectionName);
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    super.dispose();
+  }
+
+  Stream<List<_FoodSupportTicket>>
+      _watchTickets() {
+    return _ticketsRef.snapshots().map(
+      (
+        QuerySnapshot<Map<String, dynamic>> snapshot,
+      ) {
+        final List<_FoodSupportTicket> tickets =
+            snapshot.docs.map(
+          (
+            QueryDocumentSnapshot<Map<String, dynamic>>
+                document,
+          ) {
+            return _FoodSupportTicket.fromMap(
+              id: document.id,
+              map: document.data(),
+            );
+          },
+        ).toList();
+
+        tickets.sort(
+          (
+            _FoodSupportTicket first,
+            _FoodSupportTicket second,
+          ) {
+            final int priorityCompare =
+                second.priority.index.compareTo(
+              first.priority.index,
+            );
+
+            if (priorityCompare != 0) {
+              return priorityCompare;
+            }
+
+            return second.updatedAt.compareTo(
+              first.updatedAt,
+            );
+          },
+        );
+
+        return tickets;
+      },
+    );
+  }
+
+  void _showMessage(String message) {
+    if (!mounted) {
+      return;
+    }
+
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Text(message),
+        ),
+      );
+  }
+
+  List<_FoodSupportTicket> _filterTickets(
+    List<_FoodSupportTicket> tickets,
+  ) {
+    final String query =
+        _searchText.trim().toLowerCase();
+
+    return tickets.where(
+      (_FoodSupportTicket ticket) {
+        final bool statusMatches;
+
+        switch (_selectedFilter) {
+          case _FoodSupportFilter.all:
+            statusMatches = true;
+            break;
+
+          case _FoodSupportFilter.open:
+            statusMatches =
+                ticket.status ==
+                _FoodSupportTicketStatus.open;
+            break;
+
+          case _FoodSupportFilter.inProgress:
+            statusMatches =
+                ticket.status ==
+                _FoodSupportTicketStatus.inProgress;
+            break;
+
+          case _FoodSupportFilter.resolved:
+            statusMatches =
+                ticket.status ==
+                _FoodSupportTicketStatus.resolved;
+            break;
+
+          case _FoodSupportFilter.closed:
+            statusMatches =
+                ticket.status ==
+                _FoodSupportTicketStatus.closed;
+            break;
+
+          case _FoodSupportFilter.critical:
+            statusMatches =
+                ticket.priority ==
+                _FoodSupportPriority.critical;
+            break;
+        }
+
+        if (!statusMatches) {
+          return false;
+        }
+
+        if (query.isEmpty) {
+          return true;
+        }
+
+        final String searchable = <String>[
+          ticket.id,
+          ticket.title,
+          ticket.description,
+          ticket.userId,
+          ticket.userName,
+          ticket.userPhone,
+          ticket.orderId,
+          ticket.restaurantId,
+          ticket.riderId,
+          ticket.assignedAdminName,
+          ticket.status.name,
+          ticket.priority.name,
+          ticket.userType.name,
+        ].join(' ').toLowerCase();
+
+        return searchable.contains(query);
+      },
+    ).toList();
+  }
+
+  int _countForFilter(
+    List<_FoodSupportTicket> tickets,
+    _FoodSupportFilter filter,
+  ) {
+    switch (filter) {
+      case _FoodSupportFilter.all:
+        return tickets.length;
+
+      case _FoodSupportFilter.open:
+        return tickets
+            .where(
+              (_FoodSupportTicket ticket) =>
+                  ticket.status ==
+                  _FoodSupportTicketStatus.open,
+            )
+            .length;
+
+      case _FoodSupportFilter.inProgress:
+        return tickets
+            .where(
+              (_FoodSupportTicket ticket) =>
+                  ticket.status ==
+                  _FoodSupportTicketStatus.inProgress,
+            )
+            .length;
+
+      case _FoodSupportFilter.resolved:
+        return tickets
+            .where(
+              (_FoodSupportTicket ticket) =>
+                  ticket.status ==
+                  _FoodSupportTicketStatus.resolved,
+            )
+            .length;
+
+      case _FoodSupportFilter.closed:
+        return tickets
+            .where(
+              (_FoodSupportTicket ticket) =>
+                  ticket.status ==
+                  _FoodSupportTicketStatus.closed,
+            )
+            .length;
+
+      case _FoodSupportFilter.critical:
+        return tickets
+            .where(
+              (_FoodSupportTicket ticket) =>
+                  ticket.priority ==
+                  _FoodSupportPriority.critical,
+            )
+            .length;
+    }
+  }
+
+  Future<void> _updateTicketFields({
+    required String ticketId,
+    required Map<String, dynamic> fields,
+    required String successMessage,
+  }) async {
+    if (_isUpdating) {
+      return;
+    }
+
+    setState(() {
+      _isUpdating = true;
+    });
+
+    try {
+      await _ticketsRef.doc(ticketId).set(
+        <String, dynamic>{
+          ...fields,
+          'updatedAt':
+              DateTime.now().toIso8601String(),
+        },
+        SetOptions(merge: true),
+      );
+
+      _showMessage(successMessage);
+    } on FirebaseException catch (error) {
+      _showMessage(
+        error.message ??
+            'Unable to update support ticket.',
+      );
+    } catch (error) {
+      _showMessage(
+        'Unable to update support ticket: $error',
+      );
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isUpdating = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _changeStatus(
+    _FoodSupportTicket ticket,
+  ) async {
+    _FoodSupportTicketStatus selected =
+        ticket.status;
+
+    final _FoodSupportTicketStatus? result =
+        await showDialog<_FoodSupportTicketStatus>(
+      context: context,
+      builder: (BuildContext dialogContext) {
+        return StatefulBuilder(
+          builder: (
+            BuildContext context,
+            void Function(void Function()) setDialogState,
+          ) {
+            return AlertDialog(
+              backgroundColor: cardColor,
+              title: const Text(
+                'Update Ticket Status',
+              ),
+              content: DropdownButtonFormField<
+                  _FoodSupportTicketStatus>(
+                value: selected,
+                dropdownColor:
+                    const Color(0xFF252525),
+                decoration: const InputDecoration(
+                  labelText: 'Status',
+                  border: OutlineInputBorder(),
+                ),
+                items:
+                    _FoodSupportTicketStatus.values
+                        .map(
+                          (
+                            _FoodSupportTicketStatus
+                                status,
+                          ) =>
+                              DropdownMenuItem<
+                                  _FoodSupportTicketStatus>(
+                            value: status,
+                            child: Text(
+                              _statusText(status),
+                            ),
+                          ),
+                        )
+                        .toList(),
+                onChanged: (
+                  _FoodSupportTicketStatus? value,
+                ) {
+                  if (value == null) {
+                    return;
+                  }
+
+                  setDialogState(() {
+                    selected = value;
+                  });
+                },
+              ),
+              actions: <Widget>[
+                TextButton(
+                  onPressed: () =>
+                      Navigator.pop(dialogContext),
+                  child: const Text('Cancel'),
+                ),
+                ElevatedButton(
+                  onPressed: () =>
+                      Navigator.pop(
+                    dialogContext,
+                    selected,
+                  ),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: yellow,
+                    foregroundColor: Colors.black,
+                  ),
+                  child: const Text('Update'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+
+    if (result == null ||
+        result == ticket.status) {
+      return;
+    }
+
+    final DateTime now = DateTime.now();
+
+    final Map<String, dynamic> fields =
+        <String, dynamic>{
+      'status': result.name,
+    };
+
+    if (result ==
+        _FoodSupportTicketStatus.resolved) {
+      fields['resolvedAt'] =
+          now.toIso8601String();
+    }
+
+    if (result ==
+        _FoodSupportTicketStatus.closed) {
+      fields['closedAt'] =
+          now.toIso8601String();
+    }
+
+    await _updateTicketFields(
+      ticketId: ticket.id,
+      fields: fields,
+      successMessage:
+          'Ticket status updated to ${_statusText(result)}.',
+    );
+  }
+
+  Future<void> _changePriority(
+    _FoodSupportTicket ticket,
+  ) async {
+    _FoodSupportPriority selected =
+        ticket.priority;
+
+    final _FoodSupportPriority? result =
+        await showDialog<_FoodSupportPriority>(
+      context: context,
+      builder: (BuildContext dialogContext) {
+        return StatefulBuilder(
+          builder: (
+            BuildContext context,
+            void Function(void Function()) setDialogState,
+          ) {
+            return AlertDialog(
+              backgroundColor: cardColor,
+              title: const Text(
+                'Update Ticket Priority',
+              ),
+              content: DropdownButtonFormField<
+                  _FoodSupportPriority>(
+                value: selected,
+                dropdownColor:
+                    const Color(0xFF252525),
+                decoration: const InputDecoration(
+                  labelText: 'Priority',
+                  border: OutlineInputBorder(),
+                ),
+                items:
+                    _FoodSupportPriority.values
+                        .map(
+                          (
+                            _FoodSupportPriority
+                                priority,
+                          ) =>
+                              DropdownMenuItem<
+                                  _FoodSupportPriority>(
+                            value: priority,
+                            child: Text(
+                              _priorityText(
+                                priority,
+                              ),
+                            ),
+                          ),
+                        )
+                        .toList(),
+                onChanged: (
+                  _FoodSupportPriority? value,
+                ) {
+                  if (value == null) {
+                    return;
+                  }
+
+                  setDialogState(() {
+                    selected = value;
+                  });
+                },
+              ),
+              actions: <Widget>[
+                TextButton(
+                  onPressed: () =>
+                      Navigator.pop(dialogContext),
+                  child: const Text('Cancel'),
+                ),
+                ElevatedButton(
+                  onPressed: () =>
+                      Navigator.pop(
+                    dialogContext,
+                    selected,
+                  ),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: yellow,
+                    foregroundColor: Colors.black,
+                  ),
+                  child: const Text('Update'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+
+    if (result == null ||
+        result == ticket.priority) {
+      return;
+    }
+
+    await _updateTicketFields(
+      ticketId: ticket.id,
+      fields: <String, dynamic>{
+        'priority': result.name,
+      },
+      successMessage:
+          'Ticket priority updated.',
+    );
+  }
+
+  Future<void> _assignAdmin(
+    _FoodSupportTicket ticket,
+  ) async {
+    final TextEditingController nameController =
+        TextEditingController(
+      text: ticket.assignedAdminName,
+    );
+
+    final TextEditingController idController =
+        TextEditingController(
+      text: ticket.assignedAdminId,
+    );
+
+    final Map<String, String>? result =
+        await showDialog<Map<String, String>>(
+      context: context,
+      builder: (BuildContext dialogContext) {
+        return AlertDialog(
+          backgroundColor: cardColor,
+          title: const Text(
+            'Assign Admin',
+          ),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              TextField(
+                controller: nameController,
+                decoration: const InputDecoration(
+                  labelText: 'Admin name',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: idController,
+                decoration: const InputDecoration(
+                  labelText: 'Admin ID',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+            ],
+          ),
+          actions: <Widget>[
+            TextButton(
+              onPressed: () =>
+                  Navigator.pop(dialogContext),
+              child: const Text('Cancel'),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                final String name =
+                    nameController.text.trim();
+
+                final String id =
+                    idController.text.trim();
+
+                if (name.isEmpty ||
+                    id.isEmpty) {
+                  return;
+                }
+
+                Navigator.pop(
+                  dialogContext,
+                  <String, String>{
+                    'name': name,
+                    'id': id,
+                  },
+                );
+              },
+              style: ElevatedButton.styleFrom(
+                backgroundColor: yellow,
+                foregroundColor: Colors.black,
+              ),
+              child: const Text('Assign'),
+            ),
+          ],
+        );
+      },
+    );
+
+    nameController.dispose();
+    idController.dispose();
+
+    if (result == null) {
+      return;
+    }
+
+    await _updateTicketFields(
+      ticketId: ticket.id,
+      fields: <String, dynamic>{
+        'assignedAdminName':
+            result['name'] ?? '',
+        'assignedAdminId':
+            result['id'] ?? '',
+        'status':
+            _FoodSupportTicketStatus
+                .inProgress.name,
+      },
+      successMessage:
+          'Ticket assigned successfully.',
+    );
+  }
+
+  Future<void> _addReply(
+    _FoodSupportTicket ticket, {
+    required bool internalNote,
+  }) async {
+    final TextEditingController controller =
+        TextEditingController();
+
+    final String? message =
+        await showDialog<String>(
+      context: context,
+      builder: (BuildContext dialogContext) {
+        return AlertDialog(
+          backgroundColor: cardColor,
+          title: Text(
+            internalNote
+                ? 'Add Internal Note'
+                : 'Reply to Ticket',
+          ),
+          content: TextField(
+            controller: controller,
+            minLines: 4,
+            maxLines: 7,
+            decoration: InputDecoration(
+              labelText: internalNote
+                  ? 'Internal note'
+                  : 'Reply message',
+              hintText: internalNote
+                  ? 'Visible only to admins'
+                  : 'Write a response for the user',
+              border: const OutlineInputBorder(),
+            ),
+          ),
+          actions: <Widget>[
+            TextButton(
+              onPressed: () =>
+                  Navigator.pop(dialogContext),
+              child: const Text('Cancel'),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                final String value =
+                    controller.text.trim();
+
+                if (value.isEmpty) {
+                  return;
+                }
+
+                Navigator.pop(
+                  dialogContext,
+                  value,
+                );
+              },
+              style: ElevatedButton.styleFrom(
+                backgroundColor: yellow,
+                foregroundColor: Colors.black,
+              ),
+              child: Text(
+                internalNote
+                    ? 'Add Note'
+                    : 'Send Reply',
+              ),
+            ),
+          ],
+        );
+      },
+    );
+
+    controller.dispose();
+
+    if (message == null) {
+      return;
+    }
+
+    final DateTime now = DateTime.now();
+
+    final List<Map<String, dynamic>> replies =
+        ticket.replies
+            .map(
+              (_FoodSupportReply reply) =>
+                  reply.toMap(),
+            )
+            .toList();
+
+    replies.add(
+      _FoodSupportReply(
+        id: now.microsecondsSinceEpoch
+            .toString(),
+        senderId: 'admin',
+        senderName:
+            ticket.assignedAdminName.trim().isEmpty
+                ? 'Food Admin'
+                : ticket.assignedAdminName,
+        message: message,
+        isInternalNote: internalNote,
+        createdAt: now,
+      ).toMap(),
+    );
+
+    await _updateTicketFields(
+      ticketId: ticket.id,
+      fields: <String, dynamic>{
+        'replies': replies,
+        if (!internalNote)
+          'status':
+              _FoodSupportTicketStatus
+                  .inProgress.name,
+      },
+      successMessage: internalNote
+          ? 'Internal note added.'
+          : 'Reply added successfully.',
+    );
+  }
+
+  void _showTicketDetails(
+    _FoodSupportTicket ticket,
+  ) {
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: cardColor,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(
+          top: Radius.circular(24),
+        ),
+      ),
+      builder: (BuildContext sheetContext) {
+        return SafeArea(
+          child: DraggableScrollableSheet(
+            expand: false,
+            initialChildSize: 0.90,
+            minChildSize: 0.50,
+            maxChildSize: 0.97,
+            builder: (
+              BuildContext context,
+              ScrollController controller,
+            ) {
+              return ListView(
+                controller: controller,
+                padding: const EdgeInsets.all(20),
+                children: <Widget>[
+                  Center(
+                    child: Container(
+                      width: 42,
+                      height: 4,
+                      decoration: BoxDecoration(
+                        color: Colors.grey.shade700,
+                        borderRadius:
+                            BorderRadius.circular(20),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 18),
+                  _buildDetailsHeader(ticket),
+                  const SizedBox(height: 18),
+                  _detailsCard(
+                    title: 'Ticket Information',
+                    children: <Widget>[
+                      _InfoRow(
+                        label: 'Ticket ID',
+                        value: ticket.id,
+                      ),
+                      const Divider(
+                        color: Colors.white12,
+                      ),
+                      _InfoRow(
+                        label: 'User type',
+                        value: _userTypeText(
+                          ticket.userType,
+                        ),
+                      ),
+                      const Divider(
+                        color: Colors.white12,
+                      ),
+                      _InfoRow(
+                        label: 'User',
+                        value: ticket.userName,
+                      ),
+                      const Divider(
+                        color: Colors.white12,
+                      ),
+                      _InfoRow(
+                        label: 'Phone',
+                        value: ticket.userPhone,
+                      ),
+                      const Divider(
+                        color: Colors.white12,
+                      ),
+                      _InfoRow(
+                        label: 'Order ID',
+                        value: ticket.orderId,
+                      ),
+                      const Divider(
+                        color: Colors.white12,
+                      ),
+                      _InfoRow(
+                        label: 'Restaurant ID',
+                        value: ticket.restaurantId,
+                      ),
+                      const Divider(
+                        color: Colors.white12,
+                      ),
+                      _InfoRow(
+                        label: 'Rider ID',
+                        value: ticket.riderId,
+                      ),
+                      const Divider(
+                        color: Colors.white12,
+                      ),
+                      _InfoRow(
+                        label: 'Assigned admin',
+                        value:
+                            ticket.assignedAdminName,
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 14),
+                  _detailsCard(
+                    title: 'Issue Description',
+                    children: <Widget>[
+                      Text(
+                        ticket.description,
+                        style: const TextStyle(
+                          height: 1.5,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 14),
+                  _detailsCard(
+                    title: 'Reply History',
+                    children: <Widget>[
+                      if (ticket.replies.isEmpty)
+                        const Text(
+                          'No replies or notes yet.',
+                          style: TextStyle(
+                            color: Colors.grey,
+                          ),
+                        )
+                      else
+                        ...ticket.replies.map(
+                          (_FoodSupportReply reply) =>
+                              Padding(
+                            padding:
+                                const EdgeInsets.only(
+                              bottom: 10,
+                            ),
+                            child: _ReplyCard(
+                              reply: reply,
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                  const SizedBox(height: 18),
+                  _buildTicketActions(ticket),
+                ],
+              );
+            },
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildDetailsHeader(
+    _FoodSupportTicket ticket,
+  ) {
+    final Color priorityColor =
+        _priorityColor(ticket.priority);
+
+    return Row(
+      children: <Widget>[
+        CircleAvatar(
+          radius: 31,
+          backgroundColor:
+              priorityColor.withValues(
+            alpha: 0.14,
+          ),
+          child: Icon(
+            _userTypeIcon(
+              ticket.userType,
+            ),
+            color: priorityColor,
+            size: 31,
+          ),
+        ),
+        const SizedBox(width: 13),
+        Expanded(
+          child: Column(
+            crossAxisAlignment:
+                CrossAxisAlignment.start,
+            children: <Widget>[
+              Text(
+                ticket.title,
+                style: const TextStyle(
+                  fontSize: 20,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              const SizedBox(height: 5),
+              Wrap(
+                spacing: 8,
+                runSpacing: 5,
+                children: <Widget>[
+                  _detailTag(
+                    _statusText(ticket.status),
+                    _statusColor(ticket.status),
+                  ),
+                  _detailTag(
+                    _priorityText(
+                      ticket.priority,
+                    ),
+                    priorityColor,
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildTicketActions(
+    _FoodSupportTicket ticket,
+  ) {
+    return Column(
+      children: <Widget>[
+        Row(
+          children: <Widget>[
+            Expanded(
+              child: ElevatedButton.icon(
+                onPressed: _isUpdating
+                    ? null
+                    : () {
+                        Navigator.pop(context);
+                        _addReply(
+                          ticket,
+                          internalNote: false,
+                        );
+                      },
+                icon: const Icon(
+                  Icons.reply_outlined,
+                ),
+                label: const Text(
+                  'Reply',
+                ),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: yellow,
+                  foregroundColor: Colors.black,
+                ),
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: OutlinedButton.icon(
+                onPressed: _isUpdating
+                    ? null
+                    : () {
+                        Navigator.pop(context);
+                        _addReply(
+                          ticket,
+                          internalNote: true,
+                        );
+                      },
+                icon: const Icon(
+                  Icons.note_add_outlined,
+                ),
+                label: const Text(
+                  'Internal Note',
+                ),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: yellow,
+                  side: const BorderSide(
+                    color: yellow,
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 10),
+        Row(
+          children: <Widget>[
+            Expanded(
+              child: OutlinedButton(
+                onPressed: _isUpdating
+                    ? null
+                    : () {
+                        Navigator.pop(context);
+                        _changePriority(ticket);
+                      },
+                child: const Text(
+                  'Change Priority',
+                ),
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: OutlinedButton(
+                onPressed: _isUpdating
+                    ? null
+                    : () {
+                        Navigator.pop(context);
+                        _assignAdmin(ticket);
+                      },
+                child: const Text(
+                  'Assign Admin',
+                ),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 10),
+        SizedBox(
+          width: double.infinity,
+          child: ElevatedButton.icon(
+            onPressed: _isUpdating
+                ? null
+                : () {
+                    Navigator.pop(context);
+                    _changeStatus(ticket);
+                  },
+            icon: const Icon(
+              Icons.sync_alt,
+            ),
+            label: const Text(
+              'Update Ticket Status',
+            ),
+            style: ElevatedButton.styleFrom(
+              backgroundColor:
+                  const Color(0xFF2A2A2A),
+              foregroundColor: Colors.white,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: background,
+      appBar: AppBar(
+        backgroundColor: background,
+        title: const Text(
+          'Food Support',
+          style: TextStyle(
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+      ),
+      body: SafeArea(
+        child:
+            StreamBuilder<List<_FoodSupportTicket>>(
+          stream: _watchTickets(),
+          builder: (
+            BuildContext context,
+            AsyncSnapshot<
+                    List<_FoodSupportTicket>>
+                snapshot,
+          ) {
+            if (snapshot.connectionState ==
+                    ConnectionState.waiting &&
+                !snapshot.hasData) {
+              return const Center(
+                child: CircularProgressIndicator(
+                  color: yellow,
+                ),
+              );
+            }
+
+            if (snapshot.hasError) {
+              return _buildErrorState();
+            }
+
+            final List<_FoodSupportTicket>
+                allTickets =
+                snapshot.data ??
+                    const <_FoodSupportTicket>[];
+
+            final List<_FoodSupportTicket>
+                visibleTickets =
+                _filterTickets(allTickets);
+
+            return Column(
+              children: <Widget>[
+                _buildSummary(allTickets),
+                _buildSearchField(),
+                _buildFilters(allTickets),
+                Expanded(
+                  child: visibleTickets.isEmpty
+                      ? _buildEmptyState()
+                      : RefreshIndicator(
+                          color: yellow,
+                          onRefresh: () async {
+                            setState(() {});
+                          },
+                          child: ListView.separated(
+                            physics:
+                                const AlwaysScrollableScrollPhysics(),
+                            padding:
+                                const EdgeInsets.fromLTRB(
+                              16,
+                              10,
+                              16,
+                              30,
+                            ),
+                            itemCount:
+                                visibleTickets.length,
+                            separatorBuilder: (
+                              BuildContext context,
+                              int index,
+                            ) =>
+                                const SizedBox(
+                              height: 12,
+                            ),
+                            itemBuilder: (
+                              BuildContext context,
+                              int index,
+                            ) {
+                              final _FoodSupportTicket
+                                  ticket =
+                                  visibleTickets[index];
+
+                              return _SupportTicketCard(
+                                ticket: ticket,
+                                isUpdating:
+                                    _isUpdating,
+                                onTap: () =>
+                                    _showTicketDetails(
+                                  ticket,
+                                ),
+                                onStatus: () =>
+                                    _changeStatus(
+                                  ticket,
+                                ),
+                                onAssign: () =>
+                                    _assignAdmin(
+                                  ticket,
+                                ),
+                              );
+                            },
+                          ),
+                        ),
+                ),
+              ],
+            );
+          },
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSummary(
+    List<_FoodSupportTicket> tickets,
+  ) {
+    final int open = _countForFilter(
+      tickets,
+      _FoodSupportFilter.open,
+    );
+
+    final int critical = _countForFilter(
+      tickets,
+      _FoodSupportFilter.critical,
+    );
+
+    return Container(
+      margin: const EdgeInsets.fromLTRB(
+        16,
+        14,
+        16,
+        10,
+      ),
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: yellow,
+        borderRadius: BorderRadius.circular(21),
+      ),
+      child: Row(
+        children: <Widget>[
+          const CircleAvatar(
+            radius: 29,
+            backgroundColor: Colors.black,
+            child: Icon(
+              Icons.support_agent,
+              color: yellow,
+              size: 31,
+            ),
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment:
+                  CrossAxisAlignment.start,
+              children: <Widget>[
+                const Text(
+                  'Food Support Tickets',
+                  style: TextStyle(
+                    color: Colors.black,
+                    fontSize: 20,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  '$open open • $critical critical',
+                  style: const TextStyle(
+                    color: Colors.black87,
+                    fontSize: 12,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Text(
+            '${tickets.length}',
+            style: const TextStyle(
+              color: Colors.black,
+              fontSize: 24,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSearchField() {
+    return Padding(
+      padding: const EdgeInsets.symmetric(
+        horizontal: 16,
+      ),
+      child: TextField(
+        controller: _searchController,
+        onChanged: (String value) {
+          setState(() {
+            _searchText = value;
+          });
+        },
+        decoration: InputDecoration(
+          hintText:
+              'Search ticket, user, order or admin',
+          prefixIcon: const Icon(
+            Icons.search,
+            color: yellow,
+          ),
+          suffixIcon: _searchText.isEmpty
+              ? null
+              : IconButton(
+                  onPressed: () {
+                    _searchController.clear();
+
+                    setState(() {
+                      _searchText = '';
+                    });
+                  },
+                  icon: const Icon(Icons.close),
+                ),
+          filled: true,
+          fillColor: cardColor,
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(16),
+            borderSide: BorderSide.none,
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildFilters(
+    List<_FoodSupportTicket> tickets,
+  ) {
+    final List<_SupportFilterItem> filters =
+        <_SupportFilterItem>[
+      const _SupportFilterItem(
+        filter: _FoodSupportFilter.all,
+        label: 'All',
+      ),
+      const _SupportFilterItem(
+        filter: _FoodSupportFilter.open,
+        label: 'Open',
+      ),
+      const _SupportFilterItem(
+        filter: _FoodSupportFilter.inProgress,
+        label: 'In Progress',
+      ),
+      const _SupportFilterItem(
+        filter: _FoodSupportFilter.resolved,
+        label: 'Resolved',
+      ),
+      const _SupportFilterItem(
+        filter: _FoodSupportFilter.closed,
+        label: 'Closed',
+      ),
+      const _SupportFilterItem(
+        filter: _FoodSupportFilter.critical,
+        label: 'Critical',
+      ),
+    ];
+
+    return SizedBox(
+      height: 58,
+      child: ListView.separated(
+        padding: const EdgeInsets.symmetric(
+          horizontal: 16,
+          vertical: 8,
+        ),
+        scrollDirection: Axis.horizontal,
+        itemCount: filters.length,
+        separatorBuilder: (
+          BuildContext context,
+          int index,
+        ) =>
+            const SizedBox(width: 8),
+        itemBuilder: (
+          BuildContext context,
+          int index,
+        ) {
+          final _SupportFilterItem item =
+              filters[index];
+
+          final bool selected =
+              _selectedFilter == item.filter;
+
+          final int count = _countForFilter(
+            tickets,
+            item.filter,
+          );
+
+          return ChoiceChip(
+            label: Text(
+              '${item.label} ($count)',
+            ),
+            selected: selected,
+            onSelected: (_) {
+              setState(() {
+                _selectedFilter = item.filter;
+              });
+            },
+            selectedColor: yellow,
+            backgroundColor: cardColor,
+            checkmarkColor: Colors.black,
+            labelStyle: TextStyle(
+              color: selected
+                  ? Colors.black
+                  : Colors.white,
+              fontWeight: FontWeight.bold,
+            ),
+            side: BorderSide.none,
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _buildEmptyState() {
+    return const Center(
+      child: Padding(
+        padding: EdgeInsets.all(30),
+        child: Column(
+          mainAxisAlignment:
+              MainAxisAlignment.center,
+          children: <Widget>[
+            Icon(
+              Icons.support_agent,
+              color: yellow,
+              size: 76,
+            ),
+            SizedBox(height: 16),
+            Text(
+              'No support tickets found',
+              style: TextStyle(
+                fontSize: 21,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            SizedBox(height: 8),
+            Text(
+              'Food support tickets matching this filter will appear here.',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                color: Colors.grey,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildErrorState() {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(30),
+        child: Column(
+          mainAxisAlignment:
+              MainAxisAlignment.center,
+          children: <Widget>[
+            const Icon(
+              Icons.cloud_off,
+              color: Colors.redAccent,
+              size: 72,
+            ),
+            const SizedBox(height: 16),
+            const Text(
+              'Unable to load support tickets',
+              style: TextStyle(
+                fontSize: 21,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              'Check Firestore connection and security rules.',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                color: Colors.grey,
+              ),
+            ),
+            const SizedBox(height: 18),
+            ElevatedButton(
+              onPressed: () {
+                setState(() {});
+              },
+              style: ElevatedButton.styleFrom(
+                backgroundColor: yellow,
+                foregroundColor: Colors.black,
+              ),
+              child: const Text('Try Again'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _detailsCard({
+    required String title,
+    required List<Widget> children,
+  }) {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: const Color(0xFF252525),
+        borderRadius: BorderRadius.circular(17),
+      ),
+      child: Column(
+        crossAxisAlignment:
+            CrossAxisAlignment.start,
+        children: <Widget>[
+          Text(
+            title,
+            style: const TextStyle(
+              color: yellow,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          const SizedBox(height: 13),
+          ...children,
+        ],
+      ),
+    );
+  }
+
+  Widget _detailTag(
+    String text,
+    Color color,
+  ) {
+    return Container(
+      padding: const EdgeInsets.symmetric(
+        horizontal: 9,
+        vertical: 5,
+      ),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Text(
+        text,
+        style: TextStyle(
+          color: color,
+          fontSize: 10,
+          fontWeight: FontWeight.bold,
+        ),
+      ),
+    );
+  }
+
+  static String _statusText(
+    _FoodSupportTicketStatus status,
+  ) {
+    switch (status) {
+      case _FoodSupportTicketStatus.open:
+        return 'Open';
+      case _FoodSupportTicketStatus.inProgress:
+        return 'In Progress';
+      case _FoodSupportTicketStatus.resolved:
+        return 'Resolved';
+      case _FoodSupportTicketStatus.closed:
+        return 'Closed';
+    }
+  }
+
+  static Color _statusColor(
+    _FoodSupportTicketStatus status,
+  ) {
+    switch (status) {
+      case _FoodSupportTicketStatus.open:
+        return Colors.orangeAccent;
+      case _FoodSupportTicketStatus.inProgress:
+        return Colors.lightBlueAccent;
+      case _FoodSupportTicketStatus.resolved:
+        return Colors.greenAccent;
+      case _FoodSupportTicketStatus.closed:
+        return Colors.grey;
+    }
+  }
+
+  static String _priorityText(
+    _FoodSupportPriority priority,
+  ) {
+    switch (priority) {
+      case _FoodSupportPriority.low:
+        return 'Low';
+      case _FoodSupportPriority.medium:
+        return 'Medium';
+      case _FoodSupportPriority.high:
+        return 'High';
+      case _FoodSupportPriority.critical:
+        return 'Critical';
+    }
+  }
+
+  static Color _priorityColor(
+    _FoodSupportPriority priority,
+  ) {
+    switch (priority) {
+      case _FoodSupportPriority.low:
+        return Colors.greenAccent;
+      case _FoodSupportPriority.medium:
+        return yellow;
+      case _FoodSupportPriority.high:
+        return Colors.orangeAccent;
+      case _FoodSupportPriority.critical:
+        return Colors.redAccent;
+    }
+  }
+
+  static String _userTypeText(
+    _FoodSupportUserType type,
+  ) {
+    switch (type) {
+      case _FoodSupportUserType.customer:
+        return 'Customer';
+      case _FoodSupportUserType.restaurant:
+        return 'Restaurant';
+      case _FoodSupportUserType.rider:
+        return 'Food Rider';
+    }
+  }
+
+  static IconData _userTypeIcon(
+    _FoodSupportUserType type,
+  ) {
+    switch (type) {
+      case _FoodSupportUserType.customer:
+        return Icons.person_outline;
+      case _FoodSupportUserType.restaurant:
+        return Icons.storefront_outlined;
+      case _FoodSupportUserType.rider:
+        return Icons.delivery_dining;
+    }
+  }
+}
+
+class _SupportTicketCard extends StatelessWidget {
+  const _SupportTicketCard({
+    required this.ticket,
+    required this.isUpdating,
+    required this.onTap,
+    required this.onStatus,
+    required this.onAssign,
+  });
+
+  static const Color yellow = Color(0xFFFFD60A);
+  static const Color cardColor = Color(0xFF1A1A1A);
+
+  final _FoodSupportTicket ticket;
+  final bool isUpdating;
+  final VoidCallback onTap;
+  final VoidCallback onStatus;
+  final VoidCallback onAssign;
+
+  @override
+  Widget build(BuildContext context) {
+    final Color priorityColor =
+        _FoodSupportScreenState
+            ._priorityColor(
+      ticket.priority,
+    );
+
+    return Material(
+      color: cardColor,
+      borderRadius: BorderRadius.circular(19),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(19),
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment:
+                CrossAxisAlignment.start,
+            children: <Widget>[
+              Row(
+                children: <Widget>[
+                  CircleAvatar(
+                    backgroundColor:
+                        priorityColor.withValues(
+                      alpha: 0.14,
+                    ),
+                    child: Icon(
+                      _FoodSupportScreenState
+                          ._userTypeIcon(
+                        ticket.userType,
+                      ),
+                      color: priorityColor,
+                    ),
+                  ),
+                  const SizedBox(width: 11),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment:
+                          CrossAxisAlignment.start,
+                      children: <Widget>[
+                        Text(
+                          ticket.title,
+                          maxLines: 1,
+                          overflow:
+                              TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            fontSize: 16,
+                            fontWeight:
+                                FontWeight.bold,
+                          ),
+                        ),
+                        const SizedBox(height: 3),
+                        Text(
+                          '${ticket.userName} • ${_FoodSupportScreenState._userTypeText(ticket.userType)}',
+                          style: const TextStyle(
+                            color: Colors.grey,
+                            fontSize: 11,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  Container(
+                    padding:
+                        const EdgeInsets.symmetric(
+                      horizontal: 9,
+                      vertical: 5,
+                    ),
+                    decoration: BoxDecoration(
+                      color:
+                          priorityColor.withValues(
+                        alpha: 0.12,
+                      ),
+                      borderRadius:
+                          BorderRadius.circular(20),
+                    ),
+                    child: Text(
+                      _FoodSupportScreenState
+                          ._priorityText(
+                        ticket.priority,
+                      ),
+                      style: TextStyle(
+                        color: priorityColor,
+                        fontSize: 10,
+                        fontWeight:
+                            FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 13),
+              Text(
+                ticket.description,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  color: Colors.grey,
+                  fontSize: 11,
+                  height: 1.35,
+                ),
+              ),
+              const SizedBox(height: 12),
+              Wrap(
+                spacing: 8,
+                runSpacing: 7,
+                children: <Widget>[
+                  _tag(
+                    Icons.sync_alt,
+                    _FoodSupportScreenState
+                        ._statusText(
+                      ticket.status,
+                    ),
+                    _FoodSupportScreenState
+                        ._statusColor(
+                      ticket.status,
+                    ),
+                  ),
+                  _tag(
+                    Icons.chat_bubble_outline,
+                    '${ticket.replies.length} replies',
+                    yellow,
+                  ),
+                  _tag(
+                    Icons.admin_panel_settings_outlined,
+                    ticket.assignedAdminName
+                            .trim()
+                            .isEmpty
+                        ? 'Unassigned'
+                        : ticket.assignedAdminName,
+                    ticket.assignedAdminName
+                            .trim()
+                            .isEmpty
+                        ? Colors.orangeAccent
+                        : Colors.greenAccent,
+                  ),
+                ],
+              ),
+              const SizedBox(height: 13),
+              Row(
+                children: <Widget>[
+                  Text(
+                    _dateTimeText(
+                      ticket.updatedAt,
+                    ),
+                    style: const TextStyle(
+                      color: Colors.grey,
+                      fontSize: 10,
+                    ),
+                  ),
+                  const Spacer(),
+                  TextButton(
+                    onPressed:
+                        isUpdating
+                            ? null
+                            : onAssign,
+                    child: const Text(
+                      'Assign',
+                      style: TextStyle(
+                        color: yellow,
+                      ),
+                    ),
+                  ),
+                  TextButton(
+                    onPressed:
+                        isUpdating
+                            ? null
+                            : onStatus,
+                    child: const Text(
+                      'Status',
+                      style: TextStyle(
+                        color: yellow,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  static Widget _tag(
+    IconData icon,
+    String text,
+    Color color,
+  ) {
+    return Container(
+      padding: const EdgeInsets.symmetric(
+        horizontal: 8,
+        vertical: 5,
+      ),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: <Widget>[
+          Icon(
+            icon,
+            color: color,
+            size: 13,
+          ),
+          const SizedBox(width: 4),
+          Text(
+            text,
+            style: TextStyle(
+              color: color,
+              fontSize: 10,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  static String _dateTimeText(
+    DateTime value,
+  ) {
+    final String day =
+        value.day.toString().padLeft(2, '0');
+
+    final String month =
+        value.month.toString().padLeft(2, '0');
+
+    final String hour =
+        value.hour.toString().padLeft(2, '0');
+
+    final String minute =
+        value.minute.toString().padLeft(2, '0');
+
+    return '$day/$month/${value.year} • $hour:$minute';
+  }
+}
+
+class _ReplyCard extends StatelessWidget {
+  const _ReplyCard({
+    required this.reply,
+  });
+
+  static const Color yellow = Color(0xFFFFD60A);
+
+  final _FoodSupportReply reply;
+
+  @override
+  Widget build(BuildContext context) {
+    final Color color = reply.isInternalNote
+        ? Colors.orangeAccent
+        : yellow;
+
+    return Container(
+      padding: const EdgeInsets.all(13),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.10),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(
+          color: color.withValues(alpha: 0.35),
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment:
+            CrossAxisAlignment.start,
+        children: <Widget>[
+          Row(
+            children: <Widget>[
+              Expanded(
+                child: Text(
+                  reply.senderName,
+                  style: TextStyle(
+                    color: color,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+              if (reply.isInternalNote)
+                const Text(
+                  'INTERNAL NOTE',
+                  style: TextStyle(
+                    color: Colors.orangeAccent,
+                    fontSize: 9,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Text(
+            reply.message,
+            style: const TextStyle(
+              height: 1.4,
+            ),
+          ),
+          const SizedBox(height: 7),
+          Text(
+            _SupportTicketCard._dateTimeText(
+              reply.createdAt,
+            ),
+            style: const TextStyle(
+              color: Colors.grey,
+              fontSize: 10,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _InfoRow extends StatelessWidget {
+  const _InfoRow({
+    required this.label,
+    required this.value,
+  });
+
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      crossAxisAlignment:
+          CrossAxisAlignment.start,
+      children: <Widget>[
+        Expanded(
+          child: Text(
+            label,
+            style: const TextStyle(
+              color: Colors.grey,
+            ),
+          ),
+        ),
+        const SizedBox(width: 12),
+        Flexible(
+          child: Text(
+            value.trim().isEmpty ? '—' : value,
+            textAlign: TextAlign.right,
+            style: const TextStyle(
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _FoodSupportTicket {
+  const _FoodSupportTicket({
+    required this.id,
+    required this.userId,
+    required this.userName,
+    required this.userPhone,
+    required this.userType,
+    required this.title,
+    required this.description,
+    required this.orderId,
+    required this.restaurantId,
+    required this.riderId,
+    required this.status,
+    required this.priority,
+    required this.assignedAdminId,
+    required this.assignedAdminName,
+    required this.replies,
+    required this.createdAt,
+    required this.updatedAt,
+    required this.resolvedAt,
+    required this.closedAt,
+  });
+
+  final String id;
+  final String userId;
+  final String userName;
+  final String userPhone;
+  final _FoodSupportUserType userType;
+  final String title;
+  final String description;
+  final String orderId;
+  final String restaurantId;
+  final String riderId;
+  final _FoodSupportTicketStatus status;
+  final _FoodSupportPriority priority;
+  final String assignedAdminId;
+  final String assignedAdminName;
+  final List<_FoodSupportReply> replies;
+  final DateTime createdAt;
+  final DateTime updatedAt;
+  final DateTime? resolvedAt;
+  final DateTime? closedAt;
+
+  factory _FoodSupportTicket.fromMap({
+    required String id,
+    required Map<String, dynamic> map,
+  }) {
+    return _FoodSupportTicket(
+      id: id,
+      userId: _stringValue(
+        map['userId'],
+      ),
+      userName: _stringValue(
+        map['userName'],
+        fallback: 'Unknown User',
+      ),
+      userPhone: _stringValue(
+        map['userPhone'],
+      ),
+      userType: _userTypeValue(
+        map['userType'],
+      ),
+      title: _stringValue(
+        map['title'],
+        fallback: 'Food Support Ticket',
+      ),
+      description: _stringValue(
+        map['description'],
+      ),
+      orderId: _stringValue(
+        map['orderId'],
+      ),
+      restaurantId: _stringValue(
+        map['restaurantId'],
+      ),
+      riderId: _stringValue(
+        map['riderId'],
+      ),
+      status: _statusValue(
+        map['status'],
+      ),
+      priority: _priorityValue(
+        map['priority'],
+      ),
+      assignedAdminId: _stringValue(
+        map['assignedAdminId'],
+      ),
+      assignedAdminName: _stringValue(
+        map['assignedAdminName'],
+      ),
+      replies: _replyListValue(
+        map['replies'],
+      ),
+      createdAt: _dateTimeValue(
+            map['createdAt'],
+          ) ??
+          DateTime.now(),
+      updatedAt: _dateTimeValue(
+            map['updatedAt'],
+          ) ??
+          DateTime.now(),
+      resolvedAt: _dateTimeValue(
+        map['resolvedAt'],
+      ),
+      closedAt: _dateTimeValue(
+        map['closedAt'],
+      ),
+    );
+  }
+
+  static String _stringValue(
+    dynamic value, {
+    String fallback = '',
+  }) {
+    final String text =
+        value?.toString().trim() ?? '';
+
+    return text.isEmpty ? fallback : text;
+  }
+
+  static _FoodSupportUserType _userTypeValue(
+    dynamic value,
+  ) {
+    final String text =
+        value?.toString().trim().toLowerCase() ??
+            '';
+
+    if (text == 'restaurant') {
+      return _FoodSupportUserType.restaurant;
+    }
+
+    if (text == 'rider') {
+      return _FoodSupportUserType.rider;
+    }
+
+    return _FoodSupportUserType.customer;
+  }
+
+  static _FoodSupportTicketStatus _statusValue(
+    dynamic value,
+  ) {
+    final String text =
+        value?.toString().trim().toLowerCase() ??
+            '';
+
+    if (text == 'inprogress' ||
+        text == 'in_progress') {
+      return _FoodSupportTicketStatus.inProgress;
+    }
+
+    if (text == 'resolved') {
+      return _FoodSupportTicketStatus.resolved;
+    }
+
+    if (text == 'closed') {
+      return _FoodSupportTicketStatus.closed;
+    }
+
+    return _FoodSupportTicketStatus.open;
+  }
+
+  static _FoodSupportPriority _priorityValue(
+    dynamic value,
+  ) {
+    final String text =
+        value?.toString().trim().toLowerCase() ??
+            '';
+
+    if (text == 'medium') {
+      return _FoodSupportPriority.medium;
+    }
+
+    if (text == 'high') {
+      return _FoodSupportPriority.high;
+    }
+
+    if (text == 'critical') {
+      return _FoodSupportPriority.critical;
+    }
+
+    return _FoodSupportPriority.low;
+  }
+
+  static List<_FoodSupportReply>
+      _replyListValue(
+    dynamic value,
+  ) {
+    if (value is! Iterable) {
+      return const <_FoodSupportReply>[];
+    }
+
+    return value
+        .whereType<Map>()
+        .map(
+          (Map item) =>
+              _FoodSupportReply.fromMap(
+            Map<String, dynamic>.from(item),
+          ),
+        )
+        .toList();
+  }
+
+  static DateTime? _dateTimeValue(
+    dynamic value,
+  ) {
+    if (value == null) {
+      return null;
+    }
+
+    if (value is DateTime) {
+      return value;
+    }
+
+    try {
+      final dynamic converted =
+          value.toDate();
+
+      if (converted is DateTime) {
+        return converted;
+      }
+    } catch (_) {
+      // Supports Firestore Timestamp.
+    }
+
+    return DateTime.tryParse(
+      value.toString(),
+    );
+  }
+}
+
+class _FoodSupportReply {
+  const _FoodSupportReply({
+    required this.id,
+    required this.senderId,
+    required this.senderName,
+    required this.message,
+    required this.isInternalNote,
+    required this.createdAt,
+  });
+
+  final String id;
+  final String senderId;
+  final String senderName;
+  final String message;
+  final bool isInternalNote;
+  final DateTime createdAt;
+
+  factory _FoodSupportReply.fromMap(
+    Map<String, dynamic> map,
+  ) {
+    return _FoodSupportReply(
+      id: map['id']?.toString() ?? '',
+      senderId:
+          map['senderId']?.toString() ?? '',
+      senderName:
+          map['senderName']?.toString() ??
+              'Unknown',
+      message:
+          map['message']?.toString() ?? '',
+      isInternalNote:
+          _boolValue(map['isInternalNote']),
+      createdAt:
+          _FoodSupportTicket._dateTimeValue(
+            map['createdAt'],
+          ) ??
+          DateTime.now(),
+    );
+  }
+
+  Map<String, dynamic> toMap() {
+    return <String, dynamic>{
+      'id': id,
+      'senderId': senderId,
+      'senderName': senderName,
+      'message': message,
+      'isInternalNote': isInternalNote,
+      'createdAt':
+          createdAt.toIso8601String(),
+    };
+  }
+
+  static bool _boolValue(
+    dynamic value,
+  ) {
+    if (value is bool) {
+      return value;
+    }
+
+    if (value is num) {
+      return value != 0;
+    }
+
+    final String text =
+        value?.toString().trim().toLowerCase() ??
+            '';
+
+    return text == 'true' ||
+        text == '1' ||
+        text == 'yes';
+  }
+}
+
+class _SupportFilterItem {
+  const _SupportFilterItem({
+    required this.filter,
+    required this.label,
+  });
+
+  final _FoodSupportFilter filter;
+  final String label;
+}

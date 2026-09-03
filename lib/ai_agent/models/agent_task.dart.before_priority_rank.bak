@@ -1,0 +1,390 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
+
+import '../constants/agent_task_constants.dart';
+
+// =========================================================
+// AI AGENT — QUEUED TASK MODEL
+// =========================================================
+//
+// One logical task must use one stable idempotencyKey.
+// Worker lease fields prevent multiple workers from processing
+// the same task simultaneously.
+
+class AgentTask {
+  final String taskId;
+  final String idempotencyKey;
+  final String taskType;
+  final String module;
+  final String targetAgentRoleId;
+  final String source;
+  final String requestedBy;
+  final String status;
+  final String priority;
+  final Map<String, dynamic> payload;
+  final bool approvalRequired;
+  final String? approvalId;
+  final int attemptCount;
+  final int maxAttempts;
+  final String? leaseOwnerId;
+  final String? leaseToken;
+  final DateTime? leaseExpiresAt;
+  final DateTime availableAt;
+  final DateTime createdAt;
+  final DateTime updatedAt;
+  final DateTime? startedAt;
+  final DateTime? completedAt;
+  final String? lastErrorCode;
+  final String? lastErrorMessage;
+  final String? resultSummary;
+  final String? auditCorrelationId;
+
+  const AgentTask({
+    required this.taskId,
+    required this.idempotencyKey,
+    required this.taskType,
+    required this.module,
+    required this.targetAgentRoleId,
+    required this.source,
+    required this.requestedBy,
+    required this.status,
+    required this.priority,
+    required this.payload,
+    required this.approvalRequired,
+    required this.attemptCount,
+    required this.maxAttempts,
+    required this.availableAt,
+    required this.createdAt,
+    required this.updatedAt,
+    this.approvalId,
+    this.leaseOwnerId,
+    this.leaseToken,
+    this.leaseExpiresAt,
+    this.startedAt,
+    this.completedAt,
+    this.lastErrorCode,
+    this.lastErrorMessage,
+    this.resultSummary,
+    this.auditCorrelationId,
+  });
+
+  bool get isTerminal => AgentTaskStatus.isTerminal(status);
+
+  bool get hasActiveLease {
+    final DateTime? expiry = leaseExpiresAt;
+    return leaseOwnerId != null &&
+        leaseToken != null &&
+        expiry != null &&
+        expiry.isAfter(DateTime.now());
+  }
+
+  bool get canRetry =>
+      !isTerminal && attemptCount < maxAttempts;
+
+  void validate() {
+    if (taskId.trim().isEmpty) {
+      throw const AgentTaskException('taskId is required.');
+    }
+
+    if (idempotencyKey.trim().isEmpty) {
+      throw const AgentTaskException('idempotencyKey is required.');
+    }
+
+    if (taskType.trim().isEmpty) {
+      throw const AgentTaskException('taskType is required.');
+    }
+
+    if (module.trim().isEmpty) {
+      throw const AgentTaskException('module is required.');
+    }
+
+    if (targetAgentRoleId.trim().isEmpty) {
+      throw const AgentTaskException(
+        'targetAgentRoleId is required.',
+      );
+    }
+
+    if (requestedBy.trim().isEmpty) {
+      throw const AgentTaskException('requestedBy is required.');
+    }
+
+    if (!AgentTaskSource.isValid(source)) {
+      throw AgentTaskException('Invalid task source: $source');
+    }
+
+    if (!AgentTaskStatus.isValid(status)) {
+      throw AgentTaskException('Invalid task status: $status');
+    }
+
+    if (!AgentTaskPriority.isValid(priority)) {
+      throw AgentTaskException('Invalid task priority: $priority');
+    }
+
+    if (attemptCount < 0) {
+      throw const AgentTaskException(
+        'attemptCount cannot be negative.',
+      );
+    }
+
+    if (maxAttempts < 1) {
+      throw const AgentTaskException(
+        'maxAttempts must be at least 1.',
+      );
+    }
+
+    if (attemptCount > maxAttempts) {
+      throw const AgentTaskException(
+        'attemptCount cannot exceed maxAttempts.',
+      );
+    }
+
+    if (payload.length > AgentTaskDefaults.maxPayloadKeys) {
+      throw AgentTaskException(
+        'Payload exceeds ${AgentTaskDefaults.maxPayloadKeys} keys.',
+      );
+    }
+
+    final bool hasAnyLeaseValue =
+        leaseOwnerId != null ||
+        leaseToken != null ||
+        leaseExpiresAt != null;
+
+    final bool hasCompleteLease =
+        leaseOwnerId != null &&
+        leaseOwnerId!.trim().isNotEmpty &&
+        leaseToken != null &&
+        leaseToken!.trim().isNotEmpty &&
+        leaseExpiresAt != null;
+
+    if (hasAnyLeaseValue && !hasCompleteLease) {
+      throw const AgentTaskException(
+        'Lease owner, token and expiry must be supplied together.',
+      );
+    }
+
+    if (lastErrorMessage != null &&
+        lastErrorMessage!.length >
+            AgentTaskDefaults.maxErrorLength) {
+      throw AgentTaskException(
+        'lastErrorMessage exceeds '
+        '${AgentTaskDefaults.maxErrorLength} characters.',
+      );
+    }
+  }
+
+  Map<String, dynamic> toMap() {
+    validate();
+
+    return <String, dynamic>{
+      'taskId': taskId,
+      'idempotencyKey': idempotencyKey,
+      'taskType': taskType,
+      'module': module,
+      'targetAgentRoleId': targetAgentRoleId,
+      'source': source,
+      'requestedBy': requestedBy,
+      'status': status,
+      'priority': priority,
+      'payload': payload,
+      'approvalRequired': approvalRequired,
+      'approvalId': approvalId,
+      'attemptCount': attemptCount,
+      'maxAttempts': maxAttempts,
+      'leaseOwnerId': leaseOwnerId,
+      'leaseToken': leaseToken,
+      'leaseExpiresAt': _toTimestamp(leaseExpiresAt),
+      'availableAt': Timestamp.fromDate(availableAt),
+      'createdAt': Timestamp.fromDate(createdAt),
+      'updatedAt': Timestamp.fromDate(updatedAt),
+      'startedAt': _toTimestamp(startedAt),
+      'completedAt': _toTimestamp(completedAt),
+      'lastErrorCode': lastErrorCode,
+      'lastErrorMessage': lastErrorMessage,
+      'resultSummary': resultSummary,
+      'auditCorrelationId': auditCorrelationId,
+    };
+  }
+
+  factory AgentTask.fromMap(
+    Map<String, dynamic> map, {
+    String? documentId,
+  }) {
+    final AgentTask task = AgentTask(
+      taskId: _readString(map['taskId'], fallback: documentId),
+      idempotencyKey: _readString(map['idempotencyKey']),
+      taskType: _readString(map['taskType']),
+      module: _readString(map['module']),
+      targetAgentRoleId: _readString(map['targetAgentRoleId']),
+      source: _readString(map['source']),
+      requestedBy: _readString(map['requestedBy']),
+      status: _readString(map['status']),
+      priority: _readString(map['priority']),
+      payload: _readPayload(map['payload']),
+      approvalRequired: map['approvalRequired'] == true,
+      approvalId: _readNullableString(map['approvalId']),
+      attemptCount: _readInt(map['attemptCount']),
+      maxAttempts: _readInt(
+        map['maxAttempts'],
+        fallback: AgentTaskDefaults.maxAttempts,
+      ),
+      leaseOwnerId: _readNullableString(map['leaseOwnerId']),
+      leaseToken: _readNullableString(map['leaseToken']),
+      leaseExpiresAt: _readDateTime(map['leaseExpiresAt']),
+      availableAt:
+          _readDateTime(map['availableAt']) ?? DateTime.now(),
+      createdAt:
+          _readDateTime(map['createdAt']) ?? DateTime.now(),
+      updatedAt:
+          _readDateTime(map['updatedAt']) ?? DateTime.now(),
+      startedAt: _readDateTime(map['startedAt']),
+      completedAt: _readDateTime(map['completedAt']),
+      lastErrorCode: _readNullableString(map['lastErrorCode']),
+      lastErrorMessage:
+          _readNullableString(map['lastErrorMessage']),
+      resultSummary: _readNullableString(map['resultSummary']),
+      auditCorrelationId:
+          _readNullableString(map['auditCorrelationId']),
+    );
+
+    task.validate();
+    return task;
+  }
+
+  AgentTask copyWith({
+    String? taskId,
+    String? idempotencyKey,
+    String? taskType,
+    String? module,
+    String? targetAgentRoleId,
+    String? source,
+    String? requestedBy,
+    String? status,
+    String? priority,
+    Map<String, dynamic>? payload,
+    bool? approvalRequired,
+    String? approvalId,
+    int? attemptCount,
+    int? maxAttempts,
+    String? leaseOwnerId,
+    String? leaseToken,
+    DateTime? leaseExpiresAt,
+    DateTime? availableAt,
+    DateTime? createdAt,
+    DateTime? updatedAt,
+    DateTime? startedAt,
+    DateTime? completedAt,
+    String? lastErrorCode,
+    String? lastErrorMessage,
+    String? resultSummary,
+    String? auditCorrelationId,
+    bool clearApprovalId = false,
+    bool clearLease = false,
+    bool clearError = false,
+  }) {
+    return AgentTask(
+      taskId: taskId ?? this.taskId,
+      idempotencyKey: idempotencyKey ?? this.idempotencyKey,
+      taskType: taskType ?? this.taskType,
+      module: module ?? this.module,
+      targetAgentRoleId:
+          targetAgentRoleId ?? this.targetAgentRoleId,
+      source: source ?? this.source,
+      requestedBy: requestedBy ?? this.requestedBy,
+      status: status ?? this.status,
+      priority: priority ?? this.priority,
+      payload: payload ?? this.payload,
+      approvalRequired:
+          approvalRequired ?? this.approvalRequired,
+      approvalId:
+          clearApprovalId ? null : approvalId ?? this.approvalId,
+      attemptCount: attemptCount ?? this.attemptCount,
+      maxAttempts: maxAttempts ?? this.maxAttempts,
+      leaseOwnerId:
+          clearLease ? null : leaseOwnerId ?? this.leaseOwnerId,
+      leaseToken:
+          clearLease ? null : leaseToken ?? this.leaseToken,
+      leaseExpiresAt:
+          clearLease ? null : leaseExpiresAt ?? this.leaseExpiresAt,
+      availableAt: availableAt ?? this.availableAt,
+      createdAt: createdAt ?? this.createdAt,
+      updatedAt: updatedAt ?? this.updatedAt,
+      startedAt: startedAt ?? this.startedAt,
+      completedAt: completedAt ?? this.completedAt,
+      lastErrorCode:
+          clearError ? null : lastErrorCode ?? this.lastErrorCode,
+      lastErrorMessage: clearError
+          ? null
+          : lastErrorMessage ?? this.lastErrorMessage,
+      resultSummary: resultSummary ?? this.resultSummary,
+      auditCorrelationId:
+          auditCorrelationId ?? this.auditCorrelationId,
+    );
+  }
+
+  static Timestamp? _toTimestamp(DateTime? value) {
+    return value == null ? null : Timestamp.fromDate(value);
+  }
+
+  static DateTime? _readDateTime(dynamic value) {
+    if (value is Timestamp) return value.toDate();
+    if (value is DateTime) return value;
+
+    if (value is String) {
+      return DateTime.tryParse(value);
+    }
+
+    return null;
+  }
+
+  static String _readString(
+    dynamic value, {
+    String? fallback,
+  }) {
+    if (value is String && value.trim().isNotEmpty) {
+      return value.trim();
+    }
+
+    return fallback?.trim() ?? '';
+  }
+
+  static String? _readNullableString(dynamic value) {
+    if (value is! String) return null;
+
+    final String trimmed = value.trim();
+    return trimmed.isEmpty ? null : trimmed;
+  }
+
+  static int _readInt(
+    dynamic value, {
+    int fallback = 0,
+  }) {
+    if (value is int) return value;
+    if (value is num) return value.toInt();
+    return fallback;
+  }
+
+  static Map<String, dynamic> _readPayload(dynamic value) {
+    if (value is Map<String, dynamic>) {
+      return Map<String, dynamic>.unmodifiable(value);
+    }
+
+    if (value is Map) {
+      return Map<String, dynamic>.unmodifiable(
+        value.map(
+          (dynamic key, dynamic item) =>
+              MapEntry<String, dynamic>(key.toString(), item),
+        ),
+      );
+    }
+
+    return const <String, dynamic>{};
+  }
+}
+
+class AgentTaskException implements Exception {
+  final String message;
+
+  const AgentTaskException(this.message);
+
+  @override
+  String toString() => 'AgentTaskException: $message';
+}

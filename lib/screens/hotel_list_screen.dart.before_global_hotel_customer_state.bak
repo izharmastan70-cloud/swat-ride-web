@@ -1,0 +1,991 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/material.dart';
+
+import '../models/hotel_favorite.dart';
+import '../services/hotel_favorite_service.dart';
+import 'hotel_detail_screen.dart';
+import 'my_favorite_hotels_screen.dart';
+
+class HotelListScreen extends StatefulWidget {
+  const HotelListScreen({
+    super.key,
+  });
+
+  @override
+  State<HotelListScreen> createState() =>
+      _HotelListScreenState();
+}
+
+class _HotelListScreenState
+    extends State<HotelListScreen> {
+  static const Color yellow = Color(0xFFFFD60A);
+  static const Color darkCard = Color(0xFF1A1A1A);
+  static const Color darkBackground = Color(0xFF0D0D0D);
+
+  final TextEditingController searchController =
+      TextEditingController();
+
+  final HotelFavoriteService _favoriteService =
+      HotelFavoriteService();
+
+  String selectedCategory = 'All';
+  String _workingHotelId = '';
+
+  final List<String> categories = const <String>[
+    'All',
+    'Budget',
+    'Standard',
+    'Family',
+    'Luxury',
+  ];
+
+  // =========================================================
+  // REAL FIRESTORE HOTEL DATA
+  // =========================================================
+
+  Stream<QuerySnapshot<Map<String, dynamic>>> get _hotelStream =>
+      FirebaseFirestore.instance
+          .collection('hotels')
+          .where('isActive', isEqualTo: true)
+          .snapshots();
+
+  Map<String, dynamic> _hotelFromDoc(
+    DocumentSnapshot<Map<String, dynamic>> doc,
+  ) {
+    final data = Map<String, dynamic>.from(doc.data() ?? {});
+    final id = (data['hotelId']?.toString().trim().isNotEmpty == true)
+        ? data['hotelId'].toString().trim()
+        : doc.id;
+    final name = (data['hotelName']?.toString().trim().isNotEmpty == true)
+        ? data['hotelName'].toString().trim()
+        : (data['name']?.toString().trim().isNotEmpty == true)
+            ? data['name'].toString().trim()
+            : 'Hotel';
+    final price = _readDouble(
+      data['startingPrice'] ?? data['pricePerNight'] ?? data['price'],
+    );
+    return <String, dynamic>{
+      ...data,
+      'id': id,
+      'hotelId': id,
+      'name': name,
+      'hotelName': name,
+      'location': data['location']?.toString() ?? '',
+      'category': data['category']?.toString().trim().isNotEmpty == true
+          ? data['category'].toString().trim()
+          : 'Standard',
+      'price': price,
+      'startingPrice': price,
+      'rating': _readDouble(data['rating'] ?? data['averageRating']),
+      'reviewCount': _readInt(data['reviewCount']),
+      'rooms': _readInt(
+        data['availableRooms'] ?? data['rooms'] ?? data['roomCount'],
+      ),
+      'imageUrl': data['imageUrl']?.toString() ??
+          data['coverImageUrl']?.toString() ??
+          '',
+      'description': data['description']?.toString() ?? '',
+      'amenities': data['amenities'] is List
+          ? List<String>.from(
+              (data['amenities'] as List).map((e) => e.toString()),
+            )
+          : <String>[],
+      'isActive': data['isActive'] != false,
+    };
+  }
+
+  List<Map<String, dynamic>> _filterHotels(
+    List<Map<String, dynamic>> hotels,
+  ) {
+    final query = searchController.text.trim().toLowerCase();
+    return hotels.where((hotel) {
+      final name = hotel['name']?.toString().toLowerCase() ?? '';
+      final location = hotel['location']?.toString().toLowerCase() ?? '';
+      final category = hotel['category']?.toString() ?? '';
+      final matchesSearch = query.isEmpty ||
+          name.contains(query) ||
+          location.contains(query) ||
+          category.toLowerCase().contains(query);
+      final matchesCategory = selectedCategory == 'All' ||
+          category.toLowerCase() == selectedCategory.toLowerCase();
+      return hotel['isActive'] != false &&
+          matchesSearch &&
+          matchesCategory;
+    }).toList();
+  }
+
+  @override
+  void dispose() {
+    searchController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: darkBackground,
+      appBar: AppBar(
+        backgroundColor: darkBackground,
+        elevation: 0,
+        iconTheme: const IconThemeData(
+          color: Colors.white,
+        ),
+        title: const Text(
+          'Swat Hotels',
+          style: TextStyle(
+            color: Colors.white,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+        actions: <Widget>[
+          IconButton(
+            tooltip: 'My Favorite Hotels',
+            onPressed: _openFavoriteHotels,
+            icon: const Icon(
+              Icons.favorite,
+              color: Colors.redAccent,
+            ),
+          ),
+        ],
+      ),
+      body: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+        stream: _hotelStream,
+        builder: (context, snapshot) {
+          if (snapshot.connectionState == ConnectionState.waiting &&
+              !snapshot.hasData) {
+            return const Center(
+              child: CircularProgressIndicator(color: yellow),
+            );
+          }
+          if (snapshot.hasError) {
+            return Center(
+              child: Padding(
+                padding: const EdgeInsets.all(24),
+                child: Text(
+                  'Unable to load hotels: ${snapshot.error}',
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(color: Colors.white),
+                ),
+              ),
+            );
+          }
+
+          final hotels = (snapshot.data?.docs ?? [])
+              .map<Map<String, dynamic>>(_hotelFromDoc)
+              .toList();
+          final visibleHotels = _filterHotels(hotels);
+
+          return SafeArea(
+            child: SingleChildScrollView(
+          padding: const EdgeInsets.fromLTRB(
+            16,
+            8,
+            16,
+            30,
+          ),
+          child: Column(
+            crossAxisAlignment:
+                CrossAxisAlignment.start,
+            children: <Widget>[
+              const Text(
+                'Find Your Stay',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 28,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                'Choose from Budget, Standard, Family and Luxury hotels across Swat.',
+                style: TextStyle(
+                  color: Colors.grey,
+                  fontSize: 14,
+                  height: 1.5,
+                ),
+              ),
+              const SizedBox(height: 20),
+              Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                ),
+                decoration: BoxDecoration(
+                  color: darkCard,
+                  borderRadius:
+                      BorderRadius.circular(14),
+                  border: Border.all(
+                    color: Colors.white.withValues(
+                      alpha: 0.05,
+                    ),
+                  ),
+                ),
+                child: TextField(
+                  controller: searchController,
+                  onChanged: (_) {
+                    setState(() {});
+                  },
+                  style: const TextStyle(
+                    color: Colors.white,
+                  ),
+                  decoration: InputDecoration(
+                    icon: const Icon(
+                      Icons.search,
+                      color: yellow,
+                    ),
+                    hintText:
+                        'Search hotel or location',
+                    hintStyle: const TextStyle(
+                      color: Colors.grey,
+                    ),
+                    border: InputBorder.none,
+                    suffixIcon:
+                        searchController.text.isNotEmpty
+                            ? IconButton(
+                                onPressed: () {
+                                  searchController.clear();
+                                  setState(() {});
+                                },
+                                icon: const Icon(
+                                  Icons.close,
+                                  color: Colors.grey,
+                                ),
+                              )
+                            : null,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 20),
+              SizedBox(
+                height: 42,
+                child: ListView.separated(
+                  scrollDirection:
+                      Axis.horizontal,
+                  itemCount: categories.length,
+                  separatorBuilder:
+                      (context, index) {
+                    return const SizedBox(
+                      width: 10,
+                    );
+                  },
+                  itemBuilder: (context, index) {
+                    final String category =
+                        categories[index];
+
+                    return _filterChip(
+                      title: category,
+                      selected:
+                          selectedCategory ==
+                              category,
+                      onTap: () {
+                        setState(() {
+                          selectedCategory =
+                              category;
+                        });
+                      },
+                    );
+                  },
+                ),
+              ),
+              const SizedBox(height: 24),
+              Row(
+                children: <Widget>[
+                  const Expanded(
+                    child: Text(
+                      'Recommended Hotels',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 20,
+                        fontWeight:
+                            FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                  Text(
+                    '${visibleHotels.length} found',
+                    style: const TextStyle(
+                      color: Colors.grey,
+                      fontSize: 12,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 14),
+              if (visibleHotels.isEmpty)
+                Container(
+                  width: double.infinity,
+                  padding:
+                      const EdgeInsets.symmetric(
+                    horizontal: 20,
+                    vertical: 40,
+                  ),
+                  decoration: BoxDecoration(
+                    color: darkCard,
+                    borderRadius:
+                        BorderRadius.circular(18),
+                  ),
+                  child: const Column(
+                    children: <Widget>[
+                      Icon(
+                        Icons.hotel_outlined,
+                        color: yellow,
+                        size: 50,
+                      ),
+                      SizedBox(height: 14),
+                      Text(
+                        'No hotels found',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 17,
+                          fontWeight:
+                              FontWeight.bold,
+                        ),
+                      ),
+                      SizedBox(height: 6),
+                      Text(
+                        'Try another hotel name, location or category.',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          color: Colors.grey,
+                          fontSize: 13,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ...visibleHotels.map(
+                (Map<String, dynamic> hotel) {
+                  return _hotelCard(
+                    context: context,
+                    hotel: hotel,
+                  );
+                },
+              ),
+              const SizedBox(height: 10),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(14),
+                decoration: BoxDecoration(
+                  color: yellow.withValues(
+                    alpha: 0.08,
+                  ),
+                  borderRadius:
+                      BorderRadius.circular(14),
+                  border: Border.all(
+                    color: yellow.withValues(
+                      alpha: 0.18,
+                    ),
+                  ),
+                ),
+                child: const Row(
+                  crossAxisAlignment:
+                      CrossAxisAlignment.start,
+                  children: <Widget>[
+                    Icon(
+                      Icons.info_outline,
+                      color: yellow,
+                      size: 22,
+                    ),
+                    SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        'Hotels and favorites use real Firestore. Hotel images remain on local placeholders until Firebase Storage billing is enabled.',
+                        style: TextStyle(
+                          color: Colors.grey,
+                          fontSize: 12,
+                          height: 1.4,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _filterChip({
+    required String title,
+    required bool selected,
+    required VoidCallback onTap,
+  }) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(22),
+      child: Container(
+        padding: const EdgeInsets.symmetric(
+          horizontal: 18,
+        ),
+        decoration: BoxDecoration(
+          color: selected ? yellow : darkCard,
+          borderRadius: BorderRadius.circular(22),
+          border: Border.all(
+            color: selected
+                ? yellow
+                : Colors.white.withValues(
+                    alpha: 0.05,
+                  ),
+          ),
+        ),
+        child: Center(
+          child: Text(
+            title,
+            style: TextStyle(
+              color:
+                  selected ? Colors.black : Colors.white,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _hotelCard({
+    required BuildContext context,
+    required Map<String, dynamic> hotel,
+  }) {
+    final String hotelId =
+        hotel['id']?.toString() ?? '';
+    final String name =
+        hotel['name']?.toString() ?? 'Hotel';
+    final String location =
+        hotel['location']?.toString() ?? '';
+    final String category =
+        hotel['category']?.toString() ?? '';
+    final int price =
+        _readInt(hotel['price']);
+    final double rating =
+        _readDouble(hotel['rating']);
+    final int rooms =
+        _readInt(hotel['rooms']);
+    final int reviewCount =
+        _readInt(hotel['reviewCount']);
+
+    final User? user =
+        FirebaseAuth.instance.currentUser;
+    final bool working =
+        _workingHotelId == hotelId;
+
+    return InkWell(
+      onTap: () {
+        Navigator.push(
+          context,
+          MaterialPageRoute<void>(
+            builder: (context) {
+              return HotelDetailScreen(
+                hotel: hotel,
+              );
+            },
+          ),
+        );
+      },
+      borderRadius: BorderRadius.circular(18),
+      child: Container(
+        margin:
+            const EdgeInsets.only(bottom: 16),
+        decoration: BoxDecoration(
+          color: darkCard,
+          borderRadius:
+              BorderRadius.circular(18),
+          border: Border.all(
+            color: Colors.white.withValues(
+              alpha: 0.06,
+            ),
+          ),
+        ),
+        child: Column(
+          crossAxisAlignment:
+              CrossAxisAlignment.start,
+          children: <Widget>[
+            Container(
+              height: 170,
+              width: double.infinity,
+              decoration: const BoxDecoration(
+                color: Color(0xFF252525),
+                borderRadius:
+                    BorderRadius.vertical(
+                  top: Radius.circular(18),
+                ),
+              ),
+              child: Stack(
+                children: <Widget>[
+                  const Center(
+                    child: Icon(
+                      Icons.hotel,
+                      color: yellow,
+                      size: 55,
+                    ),
+                  ),
+                  Positioned(
+                    top: 12,
+                    left: 12,
+                    child: Container(
+                      padding:
+                          const EdgeInsets.symmetric(
+                        horizontal: 9,
+                        vertical: 5,
+                      ),
+                      decoration: BoxDecoration(
+                        color: Colors.black
+                            .withValues(alpha: 0.70),
+                        borderRadius:
+                            BorderRadius.circular(8),
+                      ),
+                      child: Text(
+                        category,
+                        style: const TextStyle(
+                          color: yellow,
+                          fontSize: 11,
+                          fontWeight:
+                              FontWeight.bold,
+                        ),
+                      ),
+                    ),
+                  ),
+                  Positioned(
+                    top: 12,
+                    right: 12,
+                    child: user == null
+                        ? _favoriteButton(
+                            isFavorite: false,
+                            isWorking: false,
+                            onPressed: () {
+                              _showLoginRequired();
+                            },
+                          )
+                        : StreamBuilder<bool>(
+                            stream: _favoriteService
+                                .favoriteStatusStream(
+                              userId: user.uid,
+                              hotelId: hotelId,
+                            ),
+                            builder:
+                                (context, snapshot) {
+                              return _favoriteButton(
+                                isFavorite:
+                                    snapshot.data ==
+                                        true,
+                                isWorking: working,
+                                onPressed: working
+                                    ? null
+                                    : () {
+                                        _toggleFavorite(
+                                          hotel: hotel,
+                                          userId:
+                                              user.uid,
+                                        );
+                                      },
+                              );
+                            },
+                          ),
+                  ),
+                  Positioned(
+                    bottom: 12,
+                    right: 12,
+                    child: Container(
+                      padding:
+                          const EdgeInsets.symmetric(
+                        horizontal: 9,
+                        vertical: 5,
+                      ),
+                      decoration: BoxDecoration(
+                        color: Colors.black
+                            .withValues(alpha: 0.70),
+                        borderRadius:
+                            BorderRadius.circular(8),
+                      ),
+                      child: Row(
+                        children: <Widget>[
+                          const Icon(
+                            Icons.star,
+                            color: yellow,
+                            size: 15,
+                          ),
+                          const SizedBox(width: 4),
+                          Text(
+                            rating.toStringAsFixed(1),
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 11,
+                              fontWeight:
+                                  FontWeight.bold,
+                            ),
+                          ),
+                          if (reviewCount > 0) ...<Widget>[
+                            const SizedBox(width: 4),
+                            Text(
+                              '($reviewCount)',
+                              style: const TextStyle(
+                                color: Colors.grey,
+                                fontSize: 9,
+                              ),
+                            ),
+                          ],
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment:
+                    CrossAxisAlignment.start,
+                children: <Widget>[
+                  Text(
+                    name,
+                    maxLines: 1,
+                    overflow:
+                        TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 18,
+                      fontWeight:
+                          FontWeight.bold,
+                    ),
+                  ),
+                  const SizedBox(height: 7),
+                  Row(
+                    children: <Widget>[
+                      const Icon(
+                        Icons.location_on,
+                        color: yellow,
+                        size: 17,
+                      ),
+                      const SizedBox(width: 5),
+                      Expanded(
+                        child: Text(
+                          location,
+                          maxLines: 1,
+                          overflow:
+                              TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            color: Colors.grey,
+                            fontSize: 13,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 10),
+                  Row(
+                    children: <Widget>[
+                      const Icon(
+                        Icons.meeting_room_outlined,
+                        color: Colors.grey,
+                        size: 17,
+                      ),
+                      const SizedBox(width: 6),
+                      Text(
+                        rooms > 0 ? '$rooms rooms listed' : 'Room availability shown after selection',
+                        style: const TextStyle(
+                          color: Colors.grey,
+                          fontSize: 12,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 14),
+                  Row(
+                    children: <Widget>[
+                      Expanded(
+                        child: Text(
+                          'Rs. ${_formatPrice(price)}',
+                          style: const TextStyle(
+                            color: yellow,
+                            fontSize: 17,
+                            fontWeight:
+                                FontWeight.bold,
+                          ),
+                        ),
+                      ),
+                      const Text(
+                        '/ night',
+                        style: TextStyle(
+                          color: Colors.grey,
+                          fontSize: 12,
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      const Icon(
+                        Icons.arrow_forward_ios,
+                        color: yellow,
+                        size: 17,
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _favoriteButton({
+    required bool isFavorite,
+    required bool isWorking,
+    required VoidCallback? onPressed,
+  }) {
+    return Material(
+      color: Colors.black.withValues(
+        alpha: 0.74,
+      ),
+      shape: const CircleBorder(),
+      child: IconButton(
+        tooltip: isFavorite
+            ? 'Remove Favorite'
+            : 'Add Favorite',
+        onPressed: onPressed,
+        icon: isWorking
+            ? const SizedBox(
+                width: 20,
+                height: 20,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  color: yellow,
+                ),
+              )
+            : Icon(
+                isFavorite
+                    ? Icons.favorite
+                    : Icons.favorite_border,
+                color: isFavorite
+                    ? Colors.redAccent
+                    : Colors.white,
+              ),
+      ),
+    );
+  }
+
+  Future<void> _toggleFavorite({
+    required Map<String, dynamic> hotel,
+    required String userId,
+  }) async {
+    final String hotelId =
+        hotel['id']?.toString() ?? '';
+
+    if (hotelId.isEmpty) {
+      _showMessage(
+        'Hotel ID is missing.',
+        isError: true,
+      );
+      return;
+    }
+
+    setState(() {
+      _workingHotelId = hotelId;
+    });
+
+    try {
+      final HotelFavorite favorite =
+          HotelFavorite(
+        id: '',
+        userId: userId,
+        hotelId: hotelId,
+        hotelName:
+            hotel['name']?.toString() ??
+                'Hotel',
+        hotelLocation:
+            hotel['location']?.toString() ??
+                '',
+        coverImageUrl:
+            hotel['imageUrl']?.toString() ??
+                '',
+        localCoverImagePath: '',
+        averageRating:
+            _readDouble(hotel['rating']),
+        reviewCount:
+            _readInt(hotel['reviewCount']),
+        startingPrice:
+            _readDouble(hotel['price']),
+        isActive:
+            hotel['isActive'] != false,
+        storageUploadUsed: false,
+        createdAt: DateTime.now(),
+        updatedAt: DateTime.now(),
+      );
+
+      final bool isNowFavorite =
+          await _favoriteService.toggleFavorite(
+        favorite: favorite,
+      );
+
+      _showMessage(
+        isNowFavorite
+            ? 'Hotel added to favorites.'
+            : 'Hotel removed from favorites.',
+      );
+    } catch (error) {
+      _showMessage(
+        'Unable to update favorite: $error',
+        isError: true,
+      );
+    } finally {
+      if (mounted) {
+        setState(() {
+          _workingHotelId = '';
+        });
+      }
+    }
+  }
+
+  Future<void> _openFavoriteHotels() async {
+    final User? user =
+        FirebaseAuth.instance.currentUser;
+
+    if (user == null) {
+      _showLoginRequired();
+      return;
+    }
+
+    final Map<String, dynamic>? selectedHotel =
+        await Navigator.push<
+            Map<String, dynamic>>(
+      context,
+      MaterialPageRoute<
+          Map<String, dynamic>>(
+        builder: (context) =>
+            const MyFavoriteHotelsScreen(),
+      ),
+    );
+
+    if (!mounted ||
+        selectedHotel == null) {
+      return;
+    }
+
+    final String hotelId =
+        selectedHotel['hotelId']?.toString() ??
+            '';
+
+    try {
+      final byField = await FirebaseFirestore.instance
+          .collection('hotels')
+          .where('hotelId', isEqualTo: hotelId)
+          .limit(1)
+          .get();
+
+      DocumentSnapshot<Map<String, dynamic>>? document;
+      if (byField.docs.isNotEmpty) {
+        document = byField.docs.first;
+      } else {
+        final direct = await FirebaseFirestore.instance
+            .collection('hotels')
+            .doc(hotelId)
+            .get();
+        if (direct.exists) document = direct;
+      }
+
+      if (!mounted) return;
+
+      if (document == null ||
+          document.data() == null ||
+          document.data()!['isActive'] == false) {
+        _showMessage(
+          'This hotel is no longer available.',
+          isError: true,
+        );
+        return;
+      }
+
+      await Navigator.push<void>(
+        context,
+        MaterialPageRoute<void>(
+          builder: (context) => HotelDetailScreen(
+            hotel: _hotelFromDoc(document!),
+          ),
+        ),
+      );
+    } catch (error) {
+      _showMessage(
+        'Unable to load hotel details: $error',
+        isError: true,
+      );
+    }
+  }
+
+  void _showLoginRequired() {
+    _showMessage(
+      'Please log in to use hotel favorites.',
+      isError: true,
+    );
+  }
+
+  int _readInt(dynamic value) {
+    if (value is int) {
+      return value;
+    }
+
+    if (value is num) {
+      return value.toInt();
+    }
+
+    return int.tryParse(
+          value?.toString() ?? '',
+        ) ??
+        0;
+  }
+
+  double _readDouble(dynamic value) {
+    if (value is num) {
+      return value.toDouble();
+    }
+
+    return double.tryParse(
+          value?.toString() ?? '',
+        ) ??
+        0;
+  }
+
+  String _formatPrice(int price) {
+    final String priceText =
+        price.toString();
+    final StringBuffer result =
+        StringBuffer();
+
+    for (int index = 0;
+        index < priceText.length;
+        index++) {
+      final int remaining =
+          priceText.length - index;
+
+      result.write(priceText[index]);
+
+      if (remaining > 1 &&
+          remaining % 3 == 1) {
+        result.write(',');
+      }
+    }
+
+    return result.toString();
+  }
+
+  void _showMessage(
+    String message, {
+    bool isError = false,
+  }) {
+    if (!mounted) {
+      return;
+    }
+
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Text(message),
+          backgroundColor:
+              isError ? Colors.red : darkCard,
+        ),
+      );
+  }
+}

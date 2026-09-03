@@ -1,0 +1,1815 @@
+// lib/food/admin/screens/food_restaurant_management_screen.dart
+// =============================================================
+// SWAT RIDE - FOOD DELIVERY
+// Admin Restaurant Partner Management Screen
+//
+// Connected with:
+// - RestaurantPartnerModel
+// - RestaurantPartnerService
+//
+// Real features:
+// - Live Firestore partner applications
+// - Search and status filters
+// - Approve / reject
+// - Suspend / restore
+// - Commission update
+// - Full partner, business and document details
+//
+// Firebase Storage remains bypassed.
+// Existing non-Food modules remain untouched.
+// =============================================================
+
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/material.dart';
+
+import '../../restaurant_partner/models/restaurant_partner_model.dart';
+import '../../restaurant_partner/services/restaurant_partner_service.dart';
+
+enum _RestaurantAdminFilter {
+  all,
+  pending,
+  approved,
+  rejected,
+  suspended,
+}
+
+class FoodRestaurantManagementScreen extends StatefulWidget {
+  const FoodRestaurantManagementScreen({
+    super.key,
+  });
+
+  @override
+  State<FoodRestaurantManagementScreen> createState() =>
+      _FoodRestaurantManagementScreenState();
+}
+
+class _FoodRestaurantManagementScreenState
+    extends State<FoodRestaurantManagementScreen> {
+  static const Color yellow = Color(0xFFFFD60A);
+  static const Color background = Color(0xFF0D0D0D);
+  static const Color cardColor = Color(0xFF1A1A1A);
+
+  final RestaurantPartnerService _partnerService =
+      RestaurantPartnerService();
+
+  final TextEditingController _searchController =
+      TextEditingController();
+
+  _RestaurantAdminFilter _selectedFilter =
+      _RestaurantAdminFilter.all;
+
+  String _searchText = '';
+  bool _isUpdating = false;
+
+  String get _currentAdminId =>
+      FirebaseAuth.instance.currentUser?.uid.trim() ?? '';
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    super.dispose();
+  }
+
+  void _showMessage(String message) {
+    if (!mounted) return;
+
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(content: Text(message)),
+      );
+  }
+
+  List<RestaurantPartnerModel> _filterPartners(
+    List<RestaurantPartnerModel> partners,
+  ) {
+    final String query =
+        _searchText.trim().toLowerCase();
+
+    return partners.where(
+      (RestaurantPartnerModel partner) {
+        final bool statusMatches;
+
+        switch (_selectedFilter) {
+          case _RestaurantAdminFilter.all:
+            statusMatches = true;
+            break;
+          case _RestaurantAdminFilter.pending:
+            statusMatches =
+                partner.applicationStatus ==
+                    RestaurantPartnerApplicationStatus.pending ||
+                partner.applicationStatus ==
+                    RestaurantPartnerApplicationStatus.underReview;
+            break;
+          case _RestaurantAdminFilter.approved:
+            statusMatches =
+                partner.applicationStatus ==
+                    RestaurantPartnerApplicationStatus.approved &&
+                !partner.isBlocked;
+            break;
+          case _RestaurantAdminFilter.rejected:
+            statusMatches =
+                partner.applicationStatus ==
+                RestaurantPartnerApplicationStatus.rejected;
+            break;
+          case _RestaurantAdminFilter.suspended:
+            statusMatches =
+                partner.applicationStatus ==
+                    RestaurantPartnerApplicationStatus.suspended ||
+                partner.isBlocked;
+            break;
+        }
+
+        if (!statusMatches) return false;
+        if (query.isEmpty) return true;
+
+        final String searchable = <String>[
+          partner.restaurantName,
+          partner.ownerName,
+          partner.phoneNumber,
+          partner.email,
+          partner.cnicNumber,
+          partner.restaurantType,
+          partner.city,
+          partner.area,
+          partner.address,
+          partner.applicationStatus.value,
+          ...partner.categories,
+          ...partner.foodTypes,
+        ].join(' ').toLowerCase();
+
+        return searchable.contains(query);
+      },
+    ).toList();
+  }
+
+  int _countForFilter(
+    List<RestaurantPartnerModel> partners,
+    _RestaurantAdminFilter filter,
+  ) {
+    switch (filter) {
+      case _RestaurantAdminFilter.all:
+        return partners.length;
+      case _RestaurantAdminFilter.pending:
+        return partners.where(
+          (RestaurantPartnerModel partner) =>
+              partner.applicationStatus ==
+                  RestaurantPartnerApplicationStatus.pending ||
+              partner.applicationStatus ==
+                  RestaurantPartnerApplicationStatus.underReview,
+        ).length;
+      case _RestaurantAdminFilter.approved:
+        return partners.where(
+          (RestaurantPartnerModel partner) =>
+              partner.applicationStatus ==
+                  RestaurantPartnerApplicationStatus.approved &&
+              !partner.isBlocked,
+        ).length;
+      case _RestaurantAdminFilter.rejected:
+        return partners.where(
+          (RestaurantPartnerModel partner) =>
+              partner.applicationStatus ==
+              RestaurantPartnerApplicationStatus.rejected,
+        ).length;
+      case _RestaurantAdminFilter.suspended:
+        return partners.where(
+          (RestaurantPartnerModel partner) =>
+              partner.applicationStatus ==
+                  RestaurantPartnerApplicationStatus.suspended ||
+              partner.isBlocked,
+        ).length;
+    }
+  }
+
+  Future<void> _runAction(
+    Future<void> Function() action,
+    String successMessage,
+  ) async {
+    if (_isUpdating) return;
+
+    setState(() {
+      _isUpdating = true;
+    });
+
+    try {
+      await action();
+      _showMessage(successMessage);
+    } on RestaurantPartnerServiceException catch (error) {
+      _showMessage(error.message);
+    } catch (error) {
+      _showMessage('Unable to update restaurant: $error');
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isUpdating = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _approvePartner(
+    RestaurantPartnerModel partner,
+  ) async {
+    final TextEditingController controller =
+        TextEditingController(
+      text: partner.commissionPercentage > 0
+          ? partner.commissionPercentage.toStringAsFixed(0)
+          : '15',
+    );
+
+    final double? commission =
+        await showDialog<double>(
+      context: context,
+      builder: (BuildContext dialogContext) {
+        return AlertDialog(
+          backgroundColor: cardColor,
+          title: const Text('Approve Restaurant'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment:
+                CrossAxisAlignment.start,
+            children: <Widget>[
+              Text(
+                partner.restaurantName,
+                style: const TextStyle(
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: controller,
+                keyboardType:
+                    const TextInputType.numberWithOptions(
+                  decimal: true,
+                ),
+                decoration: const InputDecoration(
+                  labelText: 'Admin commission',
+                  suffixText: '%',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+            ],
+          ),
+          actions: <Widget>[
+            TextButton(
+              onPressed: () =>
+                  Navigator.pop(dialogContext),
+              child: const Text('Cancel'),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                final double? value =
+                    double.tryParse(
+                  controller.text.trim(),
+                );
+
+                if (value == null ||
+                    value < 0 ||
+                    value > 100) {
+                  return;
+                }
+
+                Navigator.pop(dialogContext, value);
+              },
+              style: ElevatedButton.styleFrom(
+                backgroundColor: yellow,
+                foregroundColor: Colors.black,
+              ),
+              child: const Text('Approve'),
+            ),
+          ],
+        );
+      },
+    );
+
+    controller.dispose();
+
+    if (commission == null) return;
+
+    await _runAction(
+      () => _partnerService.approvePartner(
+        partner.partnerId,
+        commissionPercentage: commission,
+        reviewedBy: _currentAdminId,
+      ),
+      'Restaurant approved successfully.',
+    );
+  }
+
+  Future<String?> _requestReason({
+    required String title,
+    required String hint,
+    required String actionLabel,
+  }) async {
+    final TextEditingController controller =
+        TextEditingController();
+
+    final String? reason =
+        await showDialog<String>(
+      context: context,
+      builder: (BuildContext dialogContext) {
+        return AlertDialog(
+          backgroundColor: cardColor,
+          title: Text(title),
+          content: TextField(
+            controller: controller,
+            minLines: 3,
+            maxLines: 5,
+            decoration: InputDecoration(
+              labelText: 'Reason',
+              hintText: hint,
+              border: const OutlineInputBorder(),
+            ),
+          ),
+          actions: <Widget>[
+            TextButton(
+              onPressed: () =>
+                  Navigator.pop(dialogContext),
+              child: const Text('Cancel'),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                final String value =
+                    controller.text.trim();
+
+                if (value.isEmpty) return;
+
+                Navigator.pop(dialogContext, value);
+              },
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.redAccent,
+                foregroundColor: Colors.white,
+              ),
+              child: Text(actionLabel),
+            ),
+          ],
+        );
+      },
+    );
+
+    controller.dispose();
+    return reason;
+  }
+
+  Future<void> _rejectPartner(
+    RestaurantPartnerModel partner,
+  ) async {
+    final String? reason =
+        await _requestReason(
+      title: 'Reject Restaurant',
+      hint:
+          'Enter the reason for rejecting this application',
+      actionLabel: 'Reject',
+    );
+
+    if (reason == null) return;
+
+    await _runAction(
+      () => _partnerService.rejectPartner(
+        partnerId: partner.partnerId,
+        reason: reason,
+        reviewedBy: _currentAdminId,
+      ),
+      'Restaurant application rejected.',
+    );
+  }
+
+  Future<void> _requestCorrection(
+    RestaurantPartnerModel partner,
+  ) async {
+    final String? note = await _requestReason(
+      title: 'Request Correction',
+      hint:
+          'Explain which application details or documents must be corrected',
+      actionLabel: 'Request Correction',
+    );
+
+    if (note == null) return;
+
+    await _runAction(
+      () => _partnerService.requestApplicationCorrection(
+        partnerId: partner.partnerId,
+        correctionNote: note,
+        reviewedBy: _currentAdminId,
+      ),
+      'Correction requested from restaurant partner.',
+    );
+  }
+
+  Future<void> _resetApplicationForReview(
+    RestaurantPartnerModel partner,
+  ) async {
+    await _runAction(
+      () => _partnerService.resetApplicationForReview(
+        partnerId: partner.partnerId,
+        reviewedBy: _currentAdminId,
+      ),
+      'Application reset to pending review.',
+    );
+  }
+  Future<void> _suspendPartner(
+    RestaurantPartnerModel partner,
+  ) async {
+    final String? reason =
+        await _requestReason(
+      title: 'Suspend Restaurant',
+      hint:
+          'Enter the reason for suspending this restaurant',
+      actionLabel: 'Suspend',
+    );
+
+    if (reason == null) return;
+
+    await _runAction(
+      () => _partnerService.suspendPartner(
+        partnerId: partner.partnerId,
+        reason: reason,
+        reviewedBy: _currentAdminId,
+      ),
+      'Restaurant suspended.',
+    );
+  }
+
+  Future<void> _updateCommission(
+    RestaurantPartnerModel partner,
+  ) async {
+    final TextEditingController controller =
+        TextEditingController(
+      text: partner.commissionPercentage
+          .toStringAsFixed(0),
+    );
+
+    final double? commission =
+        await showDialog<double>(
+      context: context,
+      builder: (BuildContext dialogContext) {
+        return AlertDialog(
+          backgroundColor: cardColor,
+          title: const Text('Update Commission'),
+          content: TextField(
+            controller: controller,
+            keyboardType:
+                const TextInputType.numberWithOptions(
+              decimal: true,
+            ),
+            decoration: const InputDecoration(
+              labelText: 'Commission percentage',
+              suffixText: '%',
+              border: OutlineInputBorder(),
+            ),
+          ),
+          actions: <Widget>[
+            TextButton(
+              onPressed: () =>
+                  Navigator.pop(dialogContext),
+              child: const Text('Cancel'),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                final double? value =
+                    double.tryParse(
+                  controller.text.trim(),
+                );
+
+                if (value == null ||
+                    value < 0 ||
+                    value > 100) {
+                  return;
+                }
+
+                Navigator.pop(dialogContext, value);
+              },
+              style: ElevatedButton.styleFrom(
+                backgroundColor: yellow,
+                foregroundColor: Colors.black,
+              ),
+              child: const Text('Save'),
+            ),
+          ],
+        );
+      },
+    );
+
+    controller.dispose();
+
+    if (commission == null) return;
+
+    await _runAction(
+      () => _partnerService.updateCommission(
+        partnerId: partner.partnerId,
+        commissionPercentage: commission,
+      ),
+      'Restaurant commission updated.',
+    );
+  }
+
+  void _showPartnerDetails(
+    RestaurantPartnerModel partner,
+  ) {
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: cardColor,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(
+          top: Radius.circular(24),
+        ),
+      ),
+      builder: (BuildContext sheetContext) {
+        return SafeArea(
+          child: DraggableScrollableSheet(
+            expand: false,
+            initialChildSize: 0.85,
+            minChildSize: 0.50,
+            maxChildSize: 0.95,
+            builder: (
+              BuildContext context,
+              ScrollController controller,
+            ) {
+              return ListView(
+                controller: controller,
+                padding: const EdgeInsets.all(20),
+                children: <Widget>[
+                  Center(
+                    child: Container(
+                      width: 42,
+                      height: 4,
+                      decoration: BoxDecoration(
+                        color: Colors.grey.shade700,
+                        borderRadius:
+                            BorderRadius.circular(20),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 18),
+                  Row(
+                    children: <Widget>[
+                      const CircleAvatar(
+                        radius: 31,
+                        backgroundColor:
+                            Color(0xFF252525),
+                        child: Icon(
+                          Icons.storefront_outlined,
+                          color: yellow,
+                          size: 34,
+                        ),
+                      ),
+                      const SizedBox(width: 13),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment:
+                              CrossAxisAlignment.start,
+                          children: <Widget>[
+                            Text(
+                              partner.restaurantName,
+                              style: const TextStyle(
+                                fontSize: 20,
+                                fontWeight:
+                                    FontWeight.bold,
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              _statusText(
+                                partner.applicationStatus,
+                              ),
+                              style: TextStyle(
+                                color: _statusColor(
+                                  partner.applicationStatus,
+                                ),
+                                fontWeight:
+                                    FontWeight.bold,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 20),
+                  _detailsCard(
+                    title: 'Owner Information',
+                    children: <Widget>[
+                      _InfoRow(
+                        label: 'Owner',
+                        value: partner.ownerName,
+                      ),
+                      const Divider(
+                        color: Colors.white12,
+                      ),
+                      _InfoRow(
+                        label: 'Phone',
+                        value: partner.phoneNumber,
+                      ),
+                      const Divider(
+                        color: Colors.white12,
+                      ),
+                      _InfoRow(
+                        label: 'Email',
+                        value: partner.email,
+                      ),
+                      const Divider(
+                        color: Colors.white12,
+                      ),
+                      _InfoRow(
+                        label: 'CNIC',
+                        value: partner.cnicNumber,
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 14),
+                  _detailsCard(
+                    title: 'Restaurant Details',
+                    children: <Widget>[
+                      _InfoRow(
+                        label: 'Type',
+                        value: partner.restaurantType,
+                      ),
+                      const Divider(
+                        color: Colors.white12,
+                      ),
+                      _InfoRow(
+                        label: 'Categories',
+                        value:
+                            partner.categories.join(', '),
+                      ),
+                      const Divider(
+                        color: Colors.white12,
+                      ),
+                      _InfoRow(
+                        label: 'Hours',
+                        value:
+                            '${partner.openingTime} - ${partner.closingTime}',
+                      ),
+                      const Divider(
+                        color: Colors.white12,
+                      ),
+                      _InfoRow(
+                        label: 'Delivery radius',
+                        value:
+                            '${partner.deliveryRadiusKm.toStringAsFixed(1)} km',
+                      ),
+                      const Divider(
+                        color: Colors.white12,
+                      ),
+                      _InfoRow(
+                        label: 'Minimum order',
+                        value:
+                            'Rs. ${partner.minimumOrderAmount.toStringAsFixed(0)}',
+                      ),
+                      const Divider(
+                        color: Colors.white12,
+                      ),
+                      _InfoRow(
+                        label: 'Delivery fee',
+                        value:
+                            'Rs. ${partner.deliveryFee.toStringAsFixed(0)}',
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 14),
+                  _detailsCard(
+                    title: 'Location',
+                    children: <Widget>[
+                      _InfoRow(
+                        label: 'Address',
+                        value:
+                            '${partner.address}, ${partner.area}, ${partner.city}',
+                      ),
+                      const Divider(
+                        color: Colors.white12,
+                      ),
+                      _InfoRow(
+                        label: 'Landmark',
+                        value: partner.landmark,
+                      ),
+                      const Divider(
+                        color: Colors.white12,
+                      ),
+                      _InfoRow(
+                        label: 'Coordinates',
+                        value:
+                            '${partner.latitude.toStringAsFixed(6)}, ${partner.longitude.toStringAsFixed(6)}',
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 14),
+                  _detailsCard(
+                    title: 'Documents',
+                    children: <Widget>[
+                      _documentLine(
+                        'CNIC Front',
+                        partner.cnicFrontPath,
+                      ),
+                      _documentLine(
+                        'CNIC Back',
+                        partner.cnicBackPath,
+                      ),
+                      _documentLine(
+                        'Restaurant License',
+                        partner.restaurantLicensePath,
+                      ),
+                      _documentLine(
+                        'Food Authority Certificate',
+                        partner.foodAuthorityCertificatePath,
+                      ),
+                      _documentLine(
+                        'Restaurant Logo',
+                        partner.logoImagePath,
+                      ),
+                      _documentLine(
+                        'Cover Image',
+                        partner.coverImagePath,
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 14),
+                  _detailsCard(
+                    title: 'Business Summary',
+                    children: <Widget>[
+                      _InfoRow(
+                        label: 'Commission',
+                        value:
+                            '${partner.commissionPercentage.toStringAsFixed(0)}%',
+                      ),
+                      const Divider(
+                        color: Colors.white12,
+                      ),
+                      _InfoRow(
+                        label: 'Orders',
+                        value: '${partner.totalOrders}',
+                      ),
+                      const Divider(
+                        color: Colors.white12,
+                      ),
+                      _InfoRow(
+                        label: 'Completed',
+                        value:
+                            '${partner.completedOrders}',
+                      ),
+                      const Divider(
+                        color: Colors.white12,
+                      ),
+                      _InfoRow(
+                        label: 'Earnings',
+                        value:
+                            'Rs. ${partner.totalEarnings.toStringAsFixed(0)}',
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 18),
+                  _detailActions(partner),
+                ],
+              );
+            },
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _detailActions(
+    RestaurantPartnerModel partner,
+  ) {
+    if (partner.applicationStatus ==
+            RestaurantPartnerApplicationStatus.pending ||
+        partner.applicationStatus ==
+            RestaurantPartnerApplicationStatus.underReview) {
+      return Column(
+        children: <Widget>[
+          SizedBox(
+            width: double.infinity,
+            child: OutlinedButton.icon(
+              onPressed: _isUpdating
+                  ? null
+                  : () {
+                      Navigator.pop(context);
+                      _requestCorrection(partner);
+                    },
+              icon: const Icon(Icons.edit_note_outlined),
+              label: const Text('Request Correction'),
+              style: OutlinedButton.styleFrom(
+                foregroundColor: Colors.orangeAccent,
+                side: const BorderSide(
+                  color: Colors.orangeAccent,
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: <Widget>[
+              Expanded(
+                child: OutlinedButton(
+                  onPressed: _isUpdating
+                      ? null
+                      : () {
+                          Navigator.pop(context);
+                          _rejectPartner(partner);
+                        },
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: Colors.redAccent,
+                    side: const BorderSide(
+                      color: Colors.redAccent,
+                    ),
+                  ),
+                  child: const Text('Reject'),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: ElevatedButton(
+                  onPressed: _isUpdating
+                      ? null
+                      : () {
+                          Navigator.pop(context);
+                          _approvePartner(partner);
+                        },
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: yellow,
+                    foregroundColor: Colors.black,
+                  ),
+                  child: const Text('Approve'),
+                ),
+              ),
+            ],
+          ),
+        ],
+      );
+    }
+
+    if (partner.applicationStatus ==
+        RestaurantPartnerApplicationStatus.rejected) {
+      return SizedBox(
+        width: double.infinity,
+        child: ElevatedButton.icon(
+          onPressed: _isUpdating
+              ? null
+              : () {
+                  Navigator.pop(context);
+                  _resetApplicationForReview(partner);
+                },
+          icon: const Icon(Icons.restart_alt),
+          label: const Text('Reset for Review'),
+          style: ElevatedButton.styleFrom(
+            backgroundColor: Colors.blueAccent,
+            foregroundColor: Colors.white,
+          ),
+        ),
+      );
+    }
+    if (partner.applicationStatus ==
+            RestaurantPartnerApplicationStatus.suspended ||
+        partner.isBlocked) {
+      return SizedBox(
+        width: double.infinity,
+        child: ElevatedButton(
+          onPressed: _isUpdating
+              ? null
+              : () {
+                  Navigator.pop(context);
+                  _runAction(
+                    () => _partnerService.restorePartner(
+                      partner.partnerId,
+                      reviewedBy: _currentAdminId,
+                    ),
+                    'Restaurant restored.',
+                  );
+                },
+          style: ElevatedButton.styleFrom(
+            backgroundColor: Colors.greenAccent,
+            foregroundColor: Colors.black,
+          ),
+          child: const Text('Restore Restaurant'),
+        ),
+      );
+    }
+
+    if (partner.applicationStatus ==
+        RestaurantPartnerApplicationStatus.approved) {
+      return Column(
+        children: <Widget>[
+          SizedBox(
+            width: double.infinity,
+            child: ElevatedButton(
+              onPressed: _isUpdating
+                  ? null
+                  : () {
+                      Navigator.pop(context);
+                      _updateCommission(partner);
+                    },
+              style: ElevatedButton.styleFrom(
+                backgroundColor: yellow,
+                foregroundColor: Colors.black,
+              ),
+              child: const Text('Update Commission'),
+            ),
+          ),
+          const SizedBox(height: 10),
+          SizedBox(
+            width: double.infinity,
+            child: OutlinedButton(
+              onPressed: _isUpdating
+                  ? null
+                  : () {
+                      Navigator.pop(context);
+                      _suspendPartner(partner);
+                    },
+              style: OutlinedButton.styleFrom(
+                foregroundColor:
+                    Colors.redAccent,
+                side: const BorderSide(
+                  color: Colors.redAccent,
+                ),
+              ),
+              child: const Text('Suspend Restaurant'),
+            ),
+          ),
+        ],
+      );
+    }
+
+    return const SizedBox.shrink();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: background,
+      appBar: AppBar(
+        backgroundColor: background,
+        title: const Text(
+          'Restaurant Management',
+          style: TextStyle(
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+      ),
+      body: SafeArea(
+        child: StreamBuilder<
+            List<RestaurantPartnerModel>>(
+          stream:
+              _partnerService.watchAllApplications(),
+          builder: (
+            BuildContext context,
+            AsyncSnapshot<
+                    List<RestaurantPartnerModel>>
+                snapshot,
+          ) {
+            if (snapshot.connectionState ==
+                    ConnectionState.waiting &&
+                !snapshot.hasData) {
+              return const Center(
+                child: CircularProgressIndicator(
+                  color: yellow,
+                ),
+              );
+            }
+
+            if (snapshot.hasError) {
+              return _buildErrorState();
+            }
+
+            final List<RestaurantPartnerModel>
+                allPartners =
+                snapshot.data ??
+                    const <
+                        RestaurantPartnerModel>[];
+
+            final List<RestaurantPartnerModel>
+                visiblePartners =
+                _filterPartners(allPartners);
+
+            return Column(
+              children: <Widget>[
+                _buildSummary(allPartners),
+                _buildSearchField(),
+                _buildFilters(allPartners),
+                Expanded(
+                  child: visiblePartners.isEmpty
+                      ? _buildEmptyState()
+                      : RefreshIndicator(
+                          color: yellow,
+                          onRefresh: () async {
+                            setState(() {});
+                          },
+                          child: ListView.separated(
+                            physics:
+                                const AlwaysScrollableScrollPhysics(),
+                            padding:
+                                const EdgeInsets.fromLTRB(
+                              16,
+                              10,
+                              16,
+                              30,
+                            ),
+                            itemCount:
+                                visiblePartners.length,
+                            separatorBuilder: (
+                              BuildContext context,
+                              int index,
+                            ) =>
+                                const SizedBox(
+                              height: 12,
+                            ),
+                            itemBuilder: (
+                              BuildContext context,
+                              int index,
+                            ) {
+                              final RestaurantPartnerModel
+                                  partner =
+                                  visiblePartners[index];
+
+                              return _RestaurantAdminCard(
+                                partner: partner,
+                                isUpdating:
+                                    _isUpdating,
+                                onTap: () =>
+                                    _showPartnerDetails(
+                                  partner,
+                                ),
+                                onApprove:
+                                    partner.applicationStatus ==
+                                                RestaurantPartnerApplicationStatus
+                                                    .pending ||
+                                            partner.applicationStatus ==
+                                                RestaurantPartnerApplicationStatus
+                                                    .underReview
+                                        ? () =>
+                                            _approvePartner(
+                                              partner,
+                                            )
+                                        : null,
+                                onReject:
+                                    partner.applicationStatus ==
+                                                RestaurantPartnerApplicationStatus
+                                                    .pending ||
+                                            partner.applicationStatus ==
+                                                RestaurantPartnerApplicationStatus
+                                                    .underReview
+                                        ? () =>
+                                            _rejectPartner(
+                                              partner,
+                                            )
+                                        : null,
+                                onSuspend:
+                                    partner.applicationStatus ==
+                                            RestaurantPartnerApplicationStatus
+                                                .approved
+                                        ? () =>
+                                            _suspendPartner(
+                                              partner,
+                                            )
+                                        : null,
+                                onRestore:
+                                    partner.applicationStatus ==
+                                                RestaurantPartnerApplicationStatus
+                                                    .suspended ||
+                                            partner.isBlocked
+                                        ? () =>
+                                            _runAction(
+                                              () =>
+                                                  _partnerService
+                                                      .restorePartner(
+                                                partner.partnerId,
+                                                reviewedBy:
+                                                    _currentAdminId,
+                                              ),
+                                              'Restaurant restored.',
+                                            )
+                                        : null,
+                                onCommission:
+                                    partner.applicationStatus ==
+                                            RestaurantPartnerApplicationStatus
+                                                .approved
+                                        ? () =>
+                                            _updateCommission(
+                                              partner,
+                                            )
+                                        : null,
+                              );
+                            },
+                          ),
+                        ),
+                ),
+              ],
+            );
+          },
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSummary(
+    List<RestaurantPartnerModel> partners,
+  ) {
+    final int pending = _countForFilter(
+      partners,
+      _RestaurantAdminFilter.pending,
+    );
+
+    final int approved = _countForFilter(
+      partners,
+      _RestaurantAdminFilter.approved,
+    );
+
+    return Container(
+      margin: const EdgeInsets.fromLTRB(
+        16,
+        14,
+        16,
+        10,
+      ),
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: yellow,
+        borderRadius: BorderRadius.circular(21),
+      ),
+      child: Row(
+        children: <Widget>[
+          const CircleAvatar(
+            radius: 29,
+            backgroundColor: Colors.black,
+            child: Icon(
+              Icons.storefront_outlined,
+              color: yellow,
+              size: 31,
+            ),
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment:
+                  CrossAxisAlignment.start,
+              children: <Widget>[
+                const Text(
+                  'Restaurant Partners',
+                  style: TextStyle(
+                    color: Colors.black,
+                    fontSize: 20,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  '$pending pending Ã¢â‚¬Â¢ $approved approved',
+                  style: const TextStyle(
+                    color: Colors.black87,
+                    fontSize: 12,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Text(
+            '${partners.length}',
+            style: const TextStyle(
+              color: Colors.black,
+              fontSize: 24,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSearchField() {
+    return Padding(
+      padding: const EdgeInsets.symmetric(
+        horizontal: 16,
+      ),
+      child: TextField(
+        controller: _searchController,
+        onChanged: (String value) {
+          setState(() {
+            _searchText = value;
+          });
+        },
+        decoration: InputDecoration(
+          hintText:
+              'Search restaurant, owner, phone or CNIC',
+          prefixIcon: const Icon(
+            Icons.search,
+            color: yellow,
+          ),
+          suffixIcon: _searchText.isEmpty
+              ? null
+              : IconButton(
+                  onPressed: () {
+                    _searchController.clear();
+
+                    setState(() {
+                      _searchText = '';
+                    });
+                  },
+                  icon: const Icon(Icons.close),
+                ),
+          filled: true,
+          fillColor: cardColor,
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(16),
+            borderSide: BorderSide.none,
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildFilters(
+    List<RestaurantPartnerModel> partners,
+  ) {
+    final List<_RestaurantFilterItem> filters =
+        <_RestaurantFilterItem>[
+      const _RestaurantFilterItem(
+        filter: _RestaurantAdminFilter.all,
+        label: 'All',
+      ),
+      const _RestaurantFilterItem(
+        filter: _RestaurantAdminFilter.pending,
+        label: 'Pending',
+      ),
+      const _RestaurantFilterItem(
+        filter: _RestaurantAdminFilter.approved,
+        label: 'Approved',
+      ),
+      const _RestaurantFilterItem(
+        filter: _RestaurantAdminFilter.rejected,
+        label: 'Rejected',
+      ),
+      const _RestaurantFilterItem(
+        filter:
+            _RestaurantAdminFilter.suspended,
+        label: 'Suspended',
+      ),
+    ];
+
+    return SizedBox(
+      height: 58,
+      child: ListView.separated(
+        padding: const EdgeInsets.symmetric(
+          horizontal: 16,
+          vertical: 8,
+        ),
+        scrollDirection: Axis.horizontal,
+        itemCount: filters.length,
+        separatorBuilder: (
+          BuildContext context,
+          int index,
+        ) =>
+            const SizedBox(width: 8),
+        itemBuilder: (
+          BuildContext context,
+          int index,
+        ) {
+          final _RestaurantFilterItem item =
+              filters[index];
+
+          final bool selected =
+              _selectedFilter == item.filter;
+
+          final int count = _countForFilter(
+            partners,
+            item.filter,
+          );
+
+          return ChoiceChip(
+            label: Text(
+              '${item.label} ($count)',
+            ),
+            selected: selected,
+            onSelected: (_) {
+              setState(() {
+                _selectedFilter = item.filter;
+              });
+            },
+            selectedColor: yellow,
+            backgroundColor: cardColor,
+            checkmarkColor: Colors.black,
+            labelStyle: TextStyle(
+              color: selected
+                  ? Colors.black
+                  : Colors.white,
+              fontWeight: FontWeight.bold,
+            ),
+            side: BorderSide.none,
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _buildEmptyState() {
+    return const Center(
+      child: Padding(
+        padding: EdgeInsets.all(30),
+        child: Column(
+          mainAxisAlignment:
+              MainAxisAlignment.center,
+          children: <Widget>[
+            Icon(
+              Icons.storefront_outlined,
+              color: yellow,
+              size: 76,
+            ),
+            SizedBox(height: 16),
+            Text(
+              'No restaurants found',
+              style: TextStyle(
+                fontSize: 21,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            SizedBox(height: 8),
+            Text(
+              'Restaurant applications matching this filter will appear here.',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                color: Colors.grey,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildErrorState() {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(30),
+        child: Column(
+          mainAxisAlignment:
+              MainAxisAlignment.center,
+          children: <Widget>[
+            const Icon(
+              Icons.cloud_off,
+              color: Colors.redAccent,
+              size: 72,
+            ),
+            const SizedBox(height: 16),
+            const Text(
+              'Unable to load restaurants',
+              style: TextStyle(
+                fontSize: 21,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              'Check Firestore connection, rules and indexes.',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                color: Colors.grey,
+              ),
+            ),
+            const SizedBox(height: 18),
+            ElevatedButton(
+              onPressed: () {
+                setState(() {});
+              },
+              style: ElevatedButton.styleFrom(
+                backgroundColor: yellow,
+                foregroundColor: Colors.black,
+              ),
+              child: const Text('Try Again'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _detailsCard({
+    required String title,
+    required List<Widget> children,
+  }) {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: const Color(0xFF252525),
+        borderRadius: BorderRadius.circular(17),
+      ),
+      child: Column(
+        crossAxisAlignment:
+            CrossAxisAlignment.start,
+        children: <Widget>[
+          Text(
+            title,
+            style: const TextStyle(
+              color: yellow,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          const SizedBox(height: 13),
+          ...children,
+        ],
+      ),
+    );
+  }
+
+  Widget _documentLine(
+    String title,
+    String path,
+  ) {
+    final bool available =
+        path.trim().isNotEmpty;
+
+    return Padding(
+      padding: const EdgeInsets.only(
+        bottom: 9,
+      ),
+      child: Row(
+        children: <Widget>[
+          Icon(
+            available
+                ? Icons.check_circle_outline
+                : Icons.error_outline,
+            color: available
+                ? Colors.greenAccent
+                : Colors.orangeAccent,
+            size: 19,
+          ),
+          const SizedBox(width: 9),
+          Expanded(child: Text(title)),
+          Text(
+            available ? 'Available' : 'Missing',
+            style: TextStyle(
+              color: available
+                  ? Colors.greenAccent
+                  : Colors.orangeAccent,
+              fontSize: 11,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  static String _statusText(
+    RestaurantPartnerApplicationStatus status,
+  ) {
+    switch (status) {
+      case RestaurantPartnerApplicationStatus.draft:
+        return 'Draft';
+      case RestaurantPartnerApplicationStatus.pending:
+        return 'Pending';
+      case RestaurantPartnerApplicationStatus.underReview:
+        return 'Under Review';
+      case RestaurantPartnerApplicationStatus.approved:
+        return 'Approved';
+      case RestaurantPartnerApplicationStatus.rejected:
+        return 'Rejected';
+      case RestaurantPartnerApplicationStatus.suspended:
+        return 'Suspended';
+    }
+  }
+
+  static Color _statusColor(
+    RestaurantPartnerApplicationStatus status,
+  ) {
+    switch (status) {
+      case RestaurantPartnerApplicationStatus.draft:
+        return Colors.grey;
+      case RestaurantPartnerApplicationStatus.pending:
+      case RestaurantPartnerApplicationStatus.underReview:
+        return Colors.orangeAccent;
+      case RestaurantPartnerApplicationStatus.approved:
+        return Colors.greenAccent;
+      case RestaurantPartnerApplicationStatus.rejected:
+        return Colors.redAccent;
+      case RestaurantPartnerApplicationStatus.suspended:
+        return Colors.deepOrangeAccent;
+    }
+  }
+}
+
+class _RestaurantAdminCard extends StatelessWidget {
+  const _RestaurantAdminCard({
+    required this.partner,
+    required this.isUpdating,
+    required this.onTap,
+    required this.onApprove,
+    required this.onReject,
+    required this.onSuspend,
+    required this.onRestore,
+    required this.onCommission,
+  });
+
+  static const Color yellow = Color(0xFFFFD60A);
+  static const Color cardColor = Color(0xFF1A1A1A);
+
+  final RestaurantPartnerModel partner;
+  final bool isUpdating;
+  final VoidCallback onTap;
+  final VoidCallback? onApprove;
+  final VoidCallback? onReject;
+  final VoidCallback? onSuspend;
+  final VoidCallback? onRestore;
+  final VoidCallback? onCommission;
+
+  @override
+  Widget build(BuildContext context) {
+    final Color statusColor =
+        _FoodRestaurantManagementScreenState
+            ._statusColor(
+      partner.applicationStatus,
+    );
+
+    return Material(
+      color: cardColor,
+      borderRadius: BorderRadius.circular(19),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(19),
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment:
+                CrossAxisAlignment.start,
+            children: <Widget>[
+              Row(
+                children: <Widget>[
+                  CircleAvatar(
+                    backgroundColor:
+                        statusColor.withValues(
+                      alpha: 0.14,
+                    ),
+                    child: const Icon(
+                      Icons.storefront_outlined,
+                      color: yellow,
+                    ),
+                  ),
+                  const SizedBox(width: 11),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment:
+                          CrossAxisAlignment.start,
+                      children: <Widget>[
+                        Text(
+                          partner.restaurantName,
+                          maxLines: 1,
+                          overflow:
+                              TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            fontSize: 16,
+                            fontWeight:
+                                FontWeight.bold,
+                          ),
+                        ),
+                        const SizedBox(height: 3),
+                        Text(
+                          '${partner.ownerName} Ã¢â‚¬Â¢ ${partner.city}',
+                          style: const TextStyle(
+                            color: Colors.grey,
+                            fontSize: 11,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  Container(
+                    padding:
+                        const EdgeInsets.symmetric(
+                      horizontal: 9,
+                      vertical: 5,
+                    ),
+                    decoration: BoxDecoration(
+                      color:
+                          statusColor.withValues(
+                        alpha: 0.12,
+                      ),
+                      borderRadius:
+                          BorderRadius.circular(20),
+                    ),
+                    child: Text(
+                      _FoodRestaurantManagementScreenState
+                          ._statusText(
+                        partner.applicationStatus,
+                      ),
+                      style: TextStyle(
+                        color: statusColor,
+                        fontSize: 10,
+                        fontWeight:
+                            FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 13),
+              Text(
+                '${partner.restaurantType} Ã¢â‚¬Â¢ ${partner.categories.join(', ')}',
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  color: Colors.grey,
+                  fontSize: 11,
+                ),
+              ),
+              const SizedBox(height: 12),
+              Wrap(
+                spacing: 8,
+                runSpacing: 7,
+                children: <Widget>[
+                  _tag(
+                    Icons.star_outline,
+                    partner.rating.toStringAsFixed(1),
+                  ),
+                  _tag(
+                    Icons.receipt_long_outlined,
+                    '${partner.totalOrders} orders',
+                  ),
+                  _tag(
+                    Icons.percent,
+                    '${partner.commissionPercentage.toStringAsFixed(0)}% commission',
+                  ),
+                  if (partner.isBlocked)
+                    _tag(
+                      Icons.block,
+                      'Blocked',
+                      warning: true,
+                    ),
+                ],
+              ),
+              if (onApprove != null ||
+                  onReject != null ||
+                  onSuspend != null ||
+                  onRestore != null ||
+                  onCommission != null) ...<Widget>[
+                const SizedBox(height: 14),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: <Widget>[
+                    if (onReject != null)
+                      OutlinedButton(
+                        onPressed:
+                            isUpdating ? null : onReject,
+                        style:
+                            OutlinedButton.styleFrom(
+                          foregroundColor:
+                              Colors.redAccent,
+                          side: const BorderSide(
+                            color: Colors.redAccent,
+                          ),
+                        ),
+                        child: const Text('Reject'),
+                      ),
+                    if (onApprove != null)
+                      ElevatedButton(
+                        onPressed:
+                            isUpdating ? null : onApprove,
+                        style:
+                            ElevatedButton.styleFrom(
+                          backgroundColor: yellow,
+                          foregroundColor:
+                              Colors.black,
+                        ),
+                        child: const Text('Approve'),
+                      ),
+                    if (onCommission != null)
+                      OutlinedButton(
+                        onPressed:
+                            isUpdating
+                                ? null
+                                : onCommission,
+                        style:
+                            OutlinedButton.styleFrom(
+                          foregroundColor: yellow,
+                          side: const BorderSide(
+                            color: yellow,
+                          ),
+                        ),
+                        child: const Text('Commission'),
+                      ),
+                    if (onSuspend != null)
+                      OutlinedButton(
+                        onPressed:
+                            isUpdating
+                                ? null
+                                : onSuspend,
+                        style:
+                            OutlinedButton.styleFrom(
+                          foregroundColor:
+                              Colors.redAccent,
+                          side: const BorderSide(
+                            color: Colors.redAccent,
+                          ),
+                        ),
+                        child: const Text('Suspend'),
+                      ),
+                    if (onRestore != null)
+                      ElevatedButton(
+                        onPressed:
+                            isUpdating
+                                ? null
+                                : onRestore,
+                        style:
+                            ElevatedButton.styleFrom(
+                          backgroundColor:
+                              Colors.greenAccent,
+                          foregroundColor:
+                              Colors.black,
+                        ),
+                        child: const Text('Restore'),
+                      ),
+                  ],
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  static Widget _tag(
+    IconData icon,
+    String text, {
+    bool warning = false,
+  }) {
+    return Container(
+      padding: const EdgeInsets.symmetric(
+        horizontal: 8,
+        vertical: 5,
+      ),
+      decoration: BoxDecoration(
+        color: warning
+            ? Colors.red.withValues(alpha: 0.12)
+            : const Color(0xFF272727),
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: <Widget>[
+          Icon(
+            icon,
+            color: warning
+                ? Colors.redAccent
+                : yellow,
+            size: 13,
+          ),
+          const SizedBox(width: 4),
+          Text(
+            text,
+            style: TextStyle(
+              color: warning
+                  ? Colors.redAccent
+                  : Colors.grey,
+              fontSize: 10,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _InfoRow extends StatelessWidget {
+  const _InfoRow({
+    required this.label,
+    required this.value,
+  });
+
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      crossAxisAlignment:
+          CrossAxisAlignment.start,
+      children: <Widget>[
+        Expanded(
+          child: Text(
+            label,
+            style: const TextStyle(
+              color: Colors.grey,
+            ),
+          ),
+        ),
+        const SizedBox(width: 12),
+        Flexible(
+          child: Text(
+            value.trim().isEmpty ? 'Ã¢â‚¬â€' : value,
+            textAlign: TextAlign.right,
+            style: const TextStyle(
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _RestaurantFilterItem {
+  const _RestaurantFilterItem({
+    required this.filter,
+    required this.label,
+  });
+
+  final _RestaurantAdminFilter filter;
+  final String label;
+}

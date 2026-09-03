@@ -1,0 +1,642 @@
+// lib/food/restaurant_partner/widgets/food_variant_addon_editor.dart
+// =============================================================
+// SWAT RIDE - FOOD DELIVERY
+// Restaurant Partner Variant & Add-on Editor
+//
+// Connected with:
+// - RestaurantFoodVariantModel
+// - RestaurantFoodAddOnModel
+//
+// This widget is reusable inside Add/Edit Food Item screens.
+// =============================================================
+
+import 'package:flutter/material.dart';
+
+import '../models/food_item_model.dart';
+
+class FoodVariantAddonEditor extends StatelessWidget {
+  const FoodVariantAddonEditor({
+    required this.variants,
+    required this.addOns,
+    required this.onVariantsChanged,
+    required this.onAddOnsChanged,
+    super.key,
+  });
+
+  static const Color yellow = Color(0xFFFFD60A);
+  static const Color cardColor = Color(0xFF1A1A1A);
+
+  final List<RestaurantFoodVariantModel> variants;
+  final List<RestaurantFoodAddOnModel> addOns;
+
+  final ValueChanged<List<RestaurantFoodVariantModel>> onVariantsChanged;
+
+  final ValueChanged<List<RestaurantFoodAddOnModel>> onAddOnsChanged;
+
+  Future<void> _openVariantDialog(
+    BuildContext context, {
+    RestaurantFoodVariantModel? existing,
+    int? editIndex,
+  }) async {
+    final TextEditingController nameController = TextEditingController(
+      text: existing?.name ?? '',
+    );
+
+    final TextEditingController priceController = TextEditingController(
+      text: existing == null ? '' : existing.price.toStringAsFixed(0),
+    );
+
+    bool isDefault = existing?.isDefault ?? variants.isEmpty;
+    bool isAvailable = existing?.isAvailable ?? true;
+
+    final RestaurantFoodVariantModel?
+    result = await showDialog<RestaurantFoodVariantModel>(
+      context: context,
+      builder: (BuildContext dialogContext) {
+        return StatefulBuilder(
+          builder:
+              (
+                BuildContext context,
+                void Function(void Function()) setDialogState,
+              ) {
+                return AlertDialog(
+                  backgroundColor: cardColor,
+                  title: Text(
+                    existing == null ? 'Add Variant' : 'Edit Variant',
+                  ),
+                  content: SingleChildScrollView(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: <Widget>[
+                        TextField(
+                          controller: nameController,
+                          decoration: _dialogDecoration(
+                            label: 'Variant name',
+                            hint: 'Small, Medium, Large',
+                            icon: Icons.tune,
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        TextField(
+                          controller: priceController,
+                          keyboardType: const TextInputType.numberWithOptions(
+                            decimal: true,
+                          ),
+                          decoration: _dialogDecoration(
+                            label: 'Price',
+                            hint: '0',
+                            icon: Icons.payments_outlined,
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        SwitchListTile(
+                          contentPadding: EdgeInsets.zero,
+                          value: isDefault,
+                          activeThumbColor: yellow,
+                          title: const Text('Default variant'),
+                          subtitle: const Text(
+                            'Selected automatically for customers',
+                            style: TextStyle(color: Colors.grey, fontSize: 11),
+                          ),
+                          onChanged: (bool value) {
+                            setDialogState(() {
+                              isDefault = value;
+                            });
+                          },
+                        ),
+                        SwitchListTile(
+                          contentPadding: EdgeInsets.zero,
+                          value: isAvailable,
+                          activeThumbColor: yellow,
+                          title: const Text('Available'),
+                          onChanged: (bool value) {
+                            setDialogState(() {
+                              isAvailable = value;
+                            });
+                          },
+                        ),
+                      ],
+                    ),
+                  ),
+                  actions: <Widget>[
+                    TextButton(
+                      onPressed: () => Navigator.pop(dialogContext),
+                      child: const Text('Cancel'),
+                    ),
+                    ElevatedButton(
+                      onPressed: () {
+                        final String name = nameController.text.trim();
+
+                        final double? price = double.tryParse(
+                          priceController.text.trim(),
+                        );
+
+                        if (name.isEmpty || price == null || price < 0) {
+                          ScaffoldMessenger.of(context)
+                            ..hideCurrentSnackBar()
+                            ..showSnackBar(
+                              const SnackBar(
+                                content: Text(
+                                  'Enter a valid variant name and price.',
+                                ),
+                              ),
+                            );
+                          return;
+                        }
+
+                        Navigator.pop(
+                          dialogContext,
+                          RestaurantFoodVariantModel(
+                            id:
+                                existing?.id ??
+                                DateTime.now().microsecondsSinceEpoch
+                                    .toString(),
+                            name: name,
+                            price: price,
+                            isDefault: isDefault,
+                            isAvailable: isAvailable,
+                            sortOrder: existing?.sortOrder ?? variants.length,
+                          ),
+                        );
+                      },
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: yellow,
+                        foregroundColor: Colors.black,
+                      ),
+                      child: Text(existing == null ? 'Add' : 'Update'),
+                    ),
+                  ],
+                );
+              },
+        );
+      },
+    );
+
+    nameController.dispose();
+    priceController.dispose();
+
+    if (result == null) {
+      return;
+    }
+
+    final List<RestaurantFoodVariantModel> updated =
+        List<RestaurantFoodVariantModel>.from(variants);
+
+    if (result.isDefault) {
+      for (int index = 0; index < updated.length; index++) {
+        updated[index] = updated[index].copyWith(isDefault: false);
+      }
+    }
+
+    if (editIndex == null) {
+      updated.add(result);
+    } else {
+      updated[editIndex] = result;
+    }
+
+    onVariantsChanged(updated);
+  }
+
+  Future<void> _openAddOnDialog(
+    BuildContext context, {
+    RestaurantFoodAddOnModel? existing,
+    int? editIndex,
+  }) async {
+    final TextEditingController nameController = TextEditingController(
+      text: existing?.name ?? '',
+    );
+
+    final TextEditingController priceController = TextEditingController(
+      text: existing == null ? '' : existing.price.toStringAsFixed(0),
+    );
+
+    final TextEditingController quantityController = TextEditingController(
+      text: (existing?.maximumQuantity ?? 1).toString(),
+    );
+
+    bool isRequired = existing?.isRequired ?? false;
+    bool isAvailable = existing?.isAvailable ?? true;
+
+    final RestaurantFoodAddOnModel?
+    result = await showDialog<RestaurantFoodAddOnModel>(
+      context: context,
+      builder: (BuildContext dialogContext) {
+        return StatefulBuilder(
+          builder:
+              (
+                BuildContext context,
+                void Function(void Function()) setDialogState,
+              ) {
+                return AlertDialog(
+                  backgroundColor: cardColor,
+                  title: Text(existing == null ? 'Add Extra' : 'Edit Extra'),
+                  content: SingleChildScrollView(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: <Widget>[
+                        TextField(
+                          controller: nameController,
+                          decoration: _dialogDecoration(
+                            label: 'Add-on name',
+                            hint: 'Extra cheese',
+                            icon: Icons.add_circle_outline,
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        TextField(
+                          controller: priceController,
+                          keyboardType: const TextInputType.numberWithOptions(
+                            decimal: true,
+                          ),
+                          decoration: _dialogDecoration(
+                            label: 'Price',
+                            hint: '0',
+                            icon: Icons.payments_outlined,
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        TextField(
+                          controller: quantityController,
+                          keyboardType: TextInputType.number,
+                          decoration: _dialogDecoration(
+                            label: 'Maximum quantity',
+                            hint: '1',
+                            icon: Icons.numbers,
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        SwitchListTile(
+                          contentPadding: EdgeInsets.zero,
+                          value: isRequired,
+                          activeThumbColor: yellow,
+                          title: const Text('Required add-on'),
+                          onChanged: (bool value) {
+                            setDialogState(() {
+                              isRequired = value;
+                            });
+                          },
+                        ),
+                        SwitchListTile(
+                          contentPadding: EdgeInsets.zero,
+                          value: isAvailable,
+                          activeThumbColor: yellow,
+                          title: const Text('Available'),
+                          onChanged: (bool value) {
+                            setDialogState(() {
+                              isAvailable = value;
+                            });
+                          },
+                        ),
+                      ],
+                    ),
+                  ),
+                  actions: <Widget>[
+                    TextButton(
+                      onPressed: () => Navigator.pop(dialogContext),
+                      child: const Text('Cancel'),
+                    ),
+                    ElevatedButton(
+                      onPressed: () {
+                        final String name = nameController.text.trim();
+
+                        final double? price = double.tryParse(
+                          priceController.text.trim(),
+                        );
+
+                        final int? maximumQuantity = int.tryParse(
+                          quantityController.text.trim(),
+                        );
+
+                        if (name.isEmpty ||
+                            price == null ||
+                            price < 0 ||
+                            maximumQuantity == null ||
+                            maximumQuantity < 1) {
+                          ScaffoldMessenger.of(context)
+                            ..hideCurrentSnackBar()
+                            ..showSnackBar(
+                              const SnackBar(
+                                content: Text('Enter valid add-on details.'),
+                              ),
+                            );
+                          return;
+                        }
+
+                        Navigator.pop(
+                          dialogContext,
+                          RestaurantFoodAddOnModel(
+                            id:
+                                existing?.id ??
+                                DateTime.now().microsecondsSinceEpoch
+                                    .toString(),
+                            name: name,
+                            price: price,
+                            isRequired: isRequired,
+                            isAvailable: isAvailable,
+                            maximumQuantity: maximumQuantity,
+                            sortOrder: existing?.sortOrder ?? addOns.length,
+                          ),
+                        );
+                      },
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: yellow,
+                        foregroundColor: Colors.black,
+                      ),
+                      child: Text(existing == null ? 'Add' : 'Update'),
+                    ),
+                  ],
+                );
+              },
+        );
+      },
+    );
+
+    nameController.dispose();
+    priceController.dispose();
+    quantityController.dispose();
+
+    if (result == null) {
+      return;
+    }
+
+    final List<RestaurantFoodAddOnModel> updated =
+        List<RestaurantFoodAddOnModel>.from(addOns);
+
+    if (editIndex == null) {
+      updated.add(result);
+    } else {
+      updated[editIndex] = result;
+    }
+
+    onAddOnsChanged(updated);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: <Widget>[
+        _sectionCard(
+          title: 'Variants',
+          subtitle: 'Example: Small, Medium and Large',
+          icon: Icons.tune,
+          addLabel: 'Add Variant',
+          onAdd: () => _openVariantDialog(context),
+          children: variants.isEmpty
+              ? <Widget>[
+                  _emptyState(
+                    icon: Icons.tune,
+                    message:
+                        'No variants added. The normal food price will be used.',
+                  ),
+                ]
+              : List<Widget>.generate(variants.length, (int index) {
+                  final RestaurantFoodVariantModel variant = variants[index];
+
+                  return _editorTile(
+                    title: variant.name,
+                    subtitle:
+                        'Rs. ${variant.price.toStringAsFixed(0)}'
+                        '${variant.isDefault ? ' ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â¢ Default' : ''}',
+                    active: variant.isAvailable,
+                    onEdit: () => _openVariantDialog(
+                      context,
+                      existing: variant,
+                      editIndex: index,
+                    ),
+                    onDelete: () {
+                      final List<RestaurantFoodVariantModel> updated =
+                          List<RestaurantFoodVariantModel>.from(variants)
+                            ..removeAt(index);
+
+                      if (updated.isNotEmpty &&
+                          !updated.any(
+                            (RestaurantFoodVariantModel item) => item.isDefault,
+                          )) {
+                        updated[0] = updated[0].copyWith(isDefault: true);
+                      }
+
+                      onVariantsChanged(updated);
+                    },
+                  );
+                }),
+        ),
+        const SizedBox(height: 16),
+        _sectionCard(
+          title: 'Add-ons',
+          subtitle: 'Example: Extra cheese, sauces and drinks',
+          icon: Icons.add_box_outlined,
+          addLabel: 'Add Extra',
+          onAdd: () => _openAddOnDialog(context),
+          children: addOns.isEmpty
+              ? <Widget>[
+                  _emptyState(
+                    icon: Icons.add_box_outlined,
+                    message: 'No add-ons added for this food item.',
+                  ),
+                ]
+              : List<Widget>.generate(addOns.length, (int index) {
+                  final RestaurantFoodAddOnModel addOn = addOns[index];
+
+                  return _editorTile(
+                    title: addOn.name,
+                    subtitle:
+                        '+ Rs. ${addOn.price.toStringAsFixed(0)}'
+                        '${addOn.isRequired ? ' ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â¢ Required' : ''}'
+                        ' ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â¢ Max ${addOn.maximumQuantity}',
+                    active: addOn.isAvailable,
+                    onEdit: () => _openAddOnDialog(
+                      context,
+                      existing: addOn,
+                      editIndex: index,
+                    ),
+                    onDelete: () {
+                      final List<RestaurantFoodAddOnModel> updated =
+                          List<RestaurantFoodAddOnModel>.from(addOns)
+                            ..removeAt(index);
+
+                      onAddOnsChanged(updated);
+                    },
+                  );
+                }),
+        ),
+      ],
+    );
+  }
+
+  Widget _sectionCard({
+    required String title,
+    required String subtitle,
+    required IconData icon,
+    required String addLabel,
+    required VoidCallback onAdd,
+    required List<Widget> children,
+  }) {
+    return Container(
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: cardColor,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: Colors.white10),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Row(
+            children: <Widget>[
+              CircleAvatar(
+                backgroundColor: yellow.withValues(alpha: 0.12),
+                child: Icon(icon, color: yellow),
+              ),
+              const SizedBox(width: 11),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: <Widget>[
+                    Text(
+                      title,
+                      style: const TextStyle(
+                        fontSize: 17,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    Text(
+                      subtitle,
+                      style: const TextStyle(color: Colors.grey, fontSize: 11),
+                    ),
+                  ],
+                ),
+              ),
+              TextButton.icon(
+                onPressed: onAdd,
+                icon: const Icon(Icons.add, color: yellow),
+                label: Text(
+                  addLabel,
+                  style: const TextStyle(
+                    color: yellow,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 14),
+          ...children,
+        ],
+      ),
+    );
+  }
+
+  Widget _editorTile({
+    required String title,
+    required String subtitle,
+    required bool active,
+    required VoidCallback onEdit,
+    required VoidCallback onDelete,
+  }) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 9),
+      decoration: BoxDecoration(
+        color: const Color(0xFF252525),
+        borderRadius: BorderRadius.circular(15),
+      ),
+      child: ListTile(
+        leading: CircleAvatar(
+          backgroundColor: active
+              ? Colors.green.withValues(alpha: 0.15)
+              : Colors.grey.withValues(alpha: 0.15),
+          child: Icon(
+            active ? Icons.check : Icons.block,
+            color: active ? Colors.greenAccent : Colors.grey,
+          ),
+        ),
+        title: Text(title, style: const TextStyle(fontWeight: FontWeight.bold)),
+        subtitle: Text(
+          subtitle,
+          style: const TextStyle(color: Colors.grey, fontSize: 11),
+        ),
+        trailing: PopupMenuButton<String>(
+          color: cardColor,
+          onSelected: (String value) {
+            if (value == 'edit') {
+              onEdit();
+            } else if (value == 'delete') {
+              onDelete();
+            }
+          },
+          itemBuilder: (BuildContext context) {
+            return const <PopupMenuEntry<String>>[
+              PopupMenuItem<String>(
+                value: 'edit',
+                child: Row(
+                  children: <Widget>[
+                    Icon(Icons.edit_outlined, color: yellow),
+                    SizedBox(width: 10),
+                    Text('Edit'),
+                  ],
+                ),
+              ),
+              PopupMenuItem<String>(
+                value: 'delete',
+                child: Row(
+                  children: <Widget>[
+                    Icon(Icons.delete_outline, color: Colors.redAccent),
+                    SizedBox(width: 10),
+                    Text('Delete'),
+                  ],
+                ),
+              ),
+            ];
+          },
+        ),
+      ),
+    );
+  }
+
+  Widget _emptyState({required IconData icon, required String message}) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: const Color(0xFF252525),
+        borderRadius: BorderRadius.circular(15),
+      ),
+      child: Column(
+        children: <Widget>[
+          Icon(icon, color: Colors.grey, size: 34),
+          const SizedBox(height: 8),
+          Text(
+            message,
+            textAlign: TextAlign.center,
+            style: const TextStyle(
+              color: Colors.grey,
+              fontSize: 12,
+              height: 1.4,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  static InputDecoration _dialogDecoration({
+    required String label,
+    required String hint,
+    required IconData icon,
+  }) {
+    return InputDecoration(
+      labelText: label,
+      hintText: hint,
+      prefixIcon: Icon(icon, color: yellow),
+      filled: true,
+      fillColor: const Color(0xFF252525),
+      border: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(14),
+        borderSide: BorderSide.none,
+      ),
+      focusedBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(14),
+        borderSide: const BorderSide(color: yellow),
+      ),
+    );
+  }
+}

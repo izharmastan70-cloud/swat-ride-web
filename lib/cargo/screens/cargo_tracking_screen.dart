@@ -1,0 +1,825 @@
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/material.dart';
+
+import '../../feedback/models/feedback_model.dart';
+import '../../feedback/screens/complaint_screen.dart';
+import '../../feedback/screens/submit_feedback_screen.dart';
+
+import '../models/cargo_booking_model.dart';
+import '../services/cargo_booking_service.dart';
+import '../../safety/models/safety_models.dart';
+import '../../safety/screens/safety_center_screen.dart';
+
+class CargoTrackingScreen extends StatelessWidget {
+  const CargoTrackingScreen({super.key, required this.bookingId});
+
+  final String bookingId;
+
+  static const Color _yellow = Color(0xFFFFD60A);
+  static const Color _background = Color(0xFF0D0D0D);
+  static const Color _card = Color(0xFF1A1A1A);
+
+  @override
+  Widget build(BuildContext context) {
+    final CargoBookingService bookingService = CargoBookingService();
+
+    return Scaffold(
+      backgroundColor: _background,
+      appBar: AppBar(
+        backgroundColor: _background,
+        title: const Text('Track Cargo'),
+        centerTitle: true,
+      ),
+      body: StreamBuilder<CargoBookingModel?>(
+        stream: bookingService.watchBooking(bookingId),
+        builder: (context, snapshot) {
+          if (snapshot.connectionState == ConnectionState.waiting &&
+              !snapshot.hasData) {
+            return const Center(child: CircularProgressIndicator());
+          }
+
+          if (snapshot.hasError) {
+            return _message(
+              icon: Icons.error_outline,
+              title: 'Could not load booking',
+              subtitle: snapshot.error.toString(),
+            );
+          }
+
+          final CargoBookingModel? booking = snapshot.data;
+
+          if (booking == null) {
+            return _message(
+              icon: Icons.inventory_2_outlined,
+              title: 'Booking not found',
+              subtitle: 'This Cargo booking could not be found.',
+            );
+          }
+
+          return ListView(
+            padding: const EdgeInsets.all(16),
+            children: [
+              _statusCard(booking),
+
+              if (booking.status != CargoBookingModel.delivered &&
+                  booking.status != CargoBookingModel.cancelled)
+                OutlinedButton.icon(
+                  onPressed: () {
+                    _openUniversalSafetyCenter(context, booking);
+                  },
+                  icon: const Icon(Icons.shield_outlined),
+                  label: const Text(
+                    'SAFETY & SOS',
+                    style: TextStyle(fontWeight: FontWeight.w800),
+                  ),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: Colors.redAccent,
+                    side: const BorderSide(color: Colors.redAccent),
+                  ),
+                ),
+
+              if (booking.status != CargoBookingModel.delivered &&
+                  booking.status != CargoBookingModel.cancelled)
+                const SizedBox(height: 16),
+
+              const SizedBox(height: 16),
+
+              _bookingCard(booking),
+
+              const SizedBox(height: 16),
+
+              _progressCard(booking),
+
+              const SizedBox(height: 20),
+
+              if (_canCancel(booking.status))
+                OutlinedButton.icon(
+                  onPressed: () {
+                    _showCancelDialog(context, bookingService, booking);
+                  },
+                  icon: const Icon(Icons.cancel_outlined),
+                  label: const Text('Cancel Cargo Booking'),
+                ),
+
+              if (booking.status == CargoBookingModel.cancelled)
+                _message(
+                  icon: Icons.cancel_outlined,
+                  title: 'Booking Cancelled',
+                  subtitle:
+                      booking.cancellationReason ??
+                      'This Cargo booking was cancelled.',
+                ),
+
+              if (booking.status == CargoBookingModel.delivered) ...<Widget>[
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    onPressed: () => _openDeliveryFeedback(context, booking),
+                    icon: const Icon(Icons.star_rounded),
+                    label: const Text('Rate Delivery Experience'),
+                    style: OutlinedButton.styleFrom(foregroundColor: _yellow),
+                  ),
+                ),
+                const SizedBox(height: 10),
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    onPressed: () => _openDeliveryComplaint(context, booking),
+                    icon: const Icon(Icons.support_agent_rounded),
+                    label: const Text('Report Delivery Problem'),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: Colors.redAccent,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 12),
+              ],
+              if (booking.status == CargoBookingModel.delivered)
+                _message(
+                  icon: Icons.check_circle_outline,
+                  title: 'Cargo Delivered',
+                  subtitle: 'Your Cargo booking has been completed.',
+                ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  bool _isParcelBooking(CargoBookingModel booking) {
+    return booking.serviceType == CargoBookingModel.parcel;
+  }
+
+  FeedbackServiceType _feedbackServiceType(CargoBookingModel booking) {
+    return _isParcelBooking(booking)
+        ? FeedbackServiceType.parcel
+        : FeedbackServiceType.cargo;
+  }
+
+  FeedbackTargetType _feedbackTargetType(CargoBookingModel booking) {
+    final driverId = booking.driverId?.trim() ?? '';
+    if (driverId.isEmpty) {
+      return FeedbackTargetType.service;
+    }
+    return _isParcelBooking(booking)
+        ? FeedbackTargetType.parcelRider
+        : FeedbackTargetType.cargoDriver;
+  }
+
+  String _feedbackTargetId(CargoBookingModel booking) {
+    final driverId = booking.driverId?.trim() ?? '';
+    if (driverId.isNotEmpty) {
+      return driverId;
+    }
+    return _isParcelBooking(booking)
+        ? 'swat_ride_parcel_service'
+        : 'swat_ride_cargo_service';
+  }
+
+  String _feedbackTargetName(CargoBookingModel booking) {
+    final driverId = booking.driverId?.trim() ?? '';
+    if (driverId.isNotEmpty) {
+      return _isParcelBooking(booking)
+          ? 'Assigned Parcel Rider'
+          : 'Assigned Cargo Driver';
+    }
+    return _isParcelBooking(booking)
+        ? 'SWAT RIDE Parcel Service'
+        : 'SWAT RIDE Cargo Service';
+  }
+
+  Future<void> _openDeliveryFeedback(
+    BuildContext context,
+    CargoBookingModel booking,
+  ) async {
+    final user = FirebaseAuth.instance.currentUser;
+    final reviewerId = user?.uid.trim() ?? '';
+    if (reviewerId.isEmpty) {
+      _showFeedbackMessage(context, 'Please sign in to submit feedback.');
+      return;
+    }
+    if (booking.status != CargoBookingModel.delivered) {
+      _showFeedbackMessage(context, 'Feedback is available after delivery.');
+      return;
+    }
+    if (booking.customerId.trim().isNotEmpty &&
+        booking.customerId.trim() != reviewerId) {
+      _showFeedbackMessage(context, 'Only the booking customer can rate it.');
+      return;
+    }
+
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute<void>(
+        builder: (context) => SubmitFeedbackScreen(
+          serviceType: _feedbackServiceType(booking),
+          targetType: _feedbackTargetType(booking),
+          sourceId: booking.bookingId,
+          sourceReference: 'Delivery ${booking.bookingId}',
+          reviewerId: reviewerId,
+          reviewerName: user?.displayName?.trim() ?? '',
+          reviewerPhotoUrl: user?.photoURL?.trim() ?? '',
+          targetId: _feedbackTargetId(booking),
+          targetName: _feedbackTargetName(booking),
+          serviceCompleted: true,
+        ),
+      ),
+    );
+  }
+
+  Future<void> _openDeliveryComplaint(
+    BuildContext context,
+    CargoBookingModel booking,
+  ) async {
+    final user = FirebaseAuth.instance.currentUser;
+    final reporterId = user?.uid.trim() ?? '';
+    if (reporterId.isEmpty) {
+      _showFeedbackMessage(context, 'Please sign in to report a problem.');
+      return;
+    }
+    if (booking.customerId.trim().isNotEmpty &&
+        booking.customerId.trim() != reporterId) {
+      _showFeedbackMessage(context, 'Only the booking customer can report it.');
+      return;
+    }
+
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute<void>(
+        builder: (context) => ComplaintScreen(
+          serviceType: _feedbackServiceType(booking),
+          sourceId: booking.bookingId,
+          sourceReference: 'Delivery ${booking.bookingId}',
+          reporterId: reporterId,
+          reporterName: user?.displayName?.trim() ?? '',
+          reporterPhone: user?.phoneNumber?.trim() ?? '',
+          targetType: _feedbackTargetType(booking),
+          targetId: _feedbackTargetId(booking),
+          targetName: _feedbackTargetName(booking),
+        ),
+      ),
+    );
+  }
+
+  void _showFeedbackMessage(BuildContext context, String message) {
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(content: Text(message), behavior: SnackBarBehavior.floating),
+      );
+  }
+
+  void _openUniversalSafetyCenter(
+    BuildContext context,
+    CargoBookingModel booking,
+  ) {
+    final SafetyPersonSnapshot? driver =
+        booking.driverId == null || booking.driverId!.trim().isEmpty
+        ? null
+        : SafetyPersonSnapshot(
+            userId: booking.driverId!,
+            role: booking.serviceType == CargoBookingModel.parcel
+                ? SafetyUserRole.parcelDriver
+                : SafetyUserRole.cargoDriver,
+            extraData: <String, dynamic>{'driverId': booking.driverId!},
+          );
+
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (BuildContext context) {
+          return SafetyCenterScreen(
+            contextData: SafetyContext(
+              serviceType: booking.serviceType == CargoBookingModel.parcel
+                  ? SafetyServiceType.parcelDelivery
+                  : SafetyServiceType.cargoDelivery,
+              referenceId: booking.bookingId,
+              initiatedByUserId: booking.customerId,
+              initiatedByRole: booking.serviceType == CargoBookingModel.parcel
+                  ? SafetyUserRole.parcelCustomer
+                  : SafetyUserRole.cargoCustomer,
+              sourcePage: SafetySourcePage.cargoTracking,
+              referenceStatus: booking.status,
+              primaryPerson: driver,
+              serviceTitle: 'Cargo Safety',
+              serviceSubtitle: _serviceName(booking.serviceType),
+              paymentMethod: booking.paymentMethod ?? '',
+              metadata: <String, dynamic>{
+                'bookingId': booking.bookingId,
+                'customerId': booking.customerId,
+                'driverId': booking.driverId ?? '',
+                'serviceType': booking.serviceType,
+                'vehicleType': booking.vehicleType ?? '',
+                'pickupAddress': booking.pickupAddress ?? '',
+                'dropAddress': booking.dropAddress ?? '',
+                'shopName': booking.shopName ?? '',
+                'shopAddress': booking.shopAddress ?? '',
+                'totalFare': booking.totalFare,
+                'expectedItemAmount': booking.expectedItemAmount,
+                'advancePaid': booking.advancePaid,
+
+                // Receiver phone, item instructions,
+                // private credentials and other unnecessary
+                // personal information are intentionally
+                // excluded from Safety metadata.
+                //
+                // Pickup/drop GPS coordinates are not
+                // available in CargoBookingModel yet,
+                // therefore no fake SafetyLocation is used.
+              },
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _statusCard(CargoBookingModel booking) {
+    return Container(
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: _card,
+        borderRadius: BorderRadius.circular(18),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 54,
+            height: 54,
+            decoration: BoxDecoration(
+              color: _yellow.withValues(alpha: 0.12),
+              borderRadius: BorderRadius.circular(16),
+            ),
+            child: Icon(_statusIcon(booking.status), color: _yellow, size: 30),
+          ),
+
+          const SizedBox(width: 14),
+
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  _statusTitle(booking.status),
+                  style: const TextStyle(
+                    fontSize: 19,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(height: 5),
+                Text(
+                  _statusSubtitle(booking.status, booking.serviceType),
+                  style: const TextStyle(
+                    color: Colors.grey,
+                    fontSize: 12,
+                    height: 1.4,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _bookingCard(CargoBookingModel booking) {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: _card,
+        borderRadius: BorderRadius.circular(18),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'Booking Details',
+            style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold),
+          ),
+
+          const SizedBox(height: 14),
+
+          _row('Booking ID', booking.bookingId),
+
+          _row('Service', _serviceName(booking.serviceType)),
+
+          _row('Vehicle', booking.vehicleType ?? '-'),
+
+          _row('Pickup', booking.pickupAddress ?? '-'),
+
+          _row('Delivery', booking.dropAddress ?? '-'),
+
+          if (booking.driverId != null) _row('Driver', booking.driverId!),
+
+          if (booking.paymentMethod != null)
+            _row('Payment', booking.paymentMethod!),
+        ],
+      ),
+    );
+  }
+
+  Widget _progressCard(CargoBookingModel booking) {
+    final List<_CargoStep> steps = _stepsForBooking(booking);
+
+    final int currentIndex = _currentStepIndex(booking.status, steps);
+
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: _card,
+        borderRadius: BorderRadius.circular(18),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'Delivery Progress',
+            style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold),
+          ),
+
+          const SizedBox(height: 16),
+
+          for (int i = 0; i < steps.length; i++)
+            _stepTile(
+              steps[i],
+              completed: i <= currentIndex,
+              last: i == steps.length - 1,
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _stepTile(
+    _CargoStep step, {
+    required bool completed,
+    required bool last,
+  }) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Column(
+          children: [
+            Container(
+              width: 30,
+              height: 30,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: completed ? _yellow : Colors.grey.shade800,
+              ),
+              child: Icon(
+                completed ? Icons.check : step.icon,
+                size: 17,
+                color: completed ? Colors.black : Colors.grey,
+              ),
+            ),
+
+            if (!last)
+              Container(
+                width: 2,
+                height: 42,
+                color: completed ? _yellow : Colors.grey.shade800,
+              ),
+          ],
+        ),
+
+        const SizedBox(width: 12),
+
+        Expanded(
+          child: Padding(
+            padding: const EdgeInsets.only(top: 5),
+            child: Text(
+              step.title,
+              style: TextStyle(
+                fontWeight: completed ? FontWeight.bold : FontWeight.normal,
+                color: completed ? Colors.white : Colors.grey,
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _row(String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 90,
+            child: Text(
+              label,
+              style: const TextStyle(color: Colors.grey, fontSize: 12),
+            ),
+          ),
+          Expanded(
+            child: Text(
+              value,
+              style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _message({
+    required IconData icon,
+    required String title,
+    required String subtitle,
+  }) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(28),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 48, color: _yellow),
+            const SizedBox(height: 14),
+            Text(
+              title,
+              textAlign: TextAlign.center,
+              style: const TextStyle(fontSize: 19, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 7),
+            Text(
+              subtitle,
+              textAlign: TextAlign.center,
+              style: const TextStyle(color: Colors.grey),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _showCancelDialog(
+    BuildContext context,
+    CargoBookingService bookingService,
+    CargoBookingModel booking,
+  ) async {
+    final TextEditingController controller = TextEditingController();
+
+    final bool? confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          title: const Text('Cancel Cargo Booking'),
+          content: TextField(
+            controller: controller,
+            maxLines: 3,
+            decoration: const InputDecoration(
+              labelText: 'Cancellation reason',
+              hintText: 'Tell us why you are cancelling',
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () {
+                Navigator.pop(dialogContext, false);
+              },
+              child: const Text('Keep Booking'),
+            ),
+            TextButton(
+              onPressed: () {
+                Navigator.pop(dialogContext, true);
+              },
+              child: const Text('Cancel Booking'),
+            ),
+          ],
+        );
+      },
+    );
+
+    if (confirmed != true) {
+      controller.dispose();
+      return;
+    }
+
+    final String reason = controller.text.trim();
+
+    controller.dispose();
+
+    try {
+      await bookingService.cancelBooking(
+        bookingId: booking.bookingId,
+        reason: reason.isEmpty ? 'Cancelled by customer' : reason,
+      );
+
+      if (!context.mounted) {
+        return;
+      }
+
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Cargo booking cancelled.')));
+    } catch (error) {
+      if (!context.mounted) {
+        return;
+      }
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not cancel booking: $error')),
+      );
+    }
+  }
+
+  bool _canCancel(String status) {
+    return status == CargoBookingModel.searching ||
+        status == CargoBookingModel.driverAssigned ||
+        status == CargoBookingModel.driverArriving;
+  }
+
+  List<_CargoStep> _stepsForBooking(CargoBookingModel booking) {
+    if (booking.serviceType == CargoBookingModel.buyForMe) {
+      return const <_CargoStep>[
+        _CargoStep(
+          status: CargoBookingModel.searching,
+          title: 'Searching for driver',
+          icon: Icons.search,
+        ),
+        _CargoStep(
+          status: CargoBookingModel.driverAssigned,
+          title: 'Driver assigned',
+          icon: Icons.person_pin_circle_outlined,
+        ),
+        _CargoStep(
+          status: CargoBookingModel.driverArriving,
+          title: 'Driver going to shop',
+          icon: Icons.directions_bike_outlined,
+        ),
+        _CargoStep(
+          status: CargoBookingModel.shopping,
+          title: 'Driver buying your items',
+          icon: Icons.shopping_bag_outlined,
+        ),
+        _CargoStep(
+          status: CargoBookingModel.onTheWay,
+          title: 'Items on the way',
+          icon: Icons.local_shipping_outlined,
+        ),
+        _CargoStep(
+          status: CargoBookingModel.delivered,
+          title: 'Delivered',
+          icon: Icons.check_circle_outline,
+        ),
+      ];
+    }
+
+    return const <_CargoStep>[
+      _CargoStep(
+        status: CargoBookingModel.searching,
+        title: 'Searching for driver',
+        icon: Icons.search,
+      ),
+      _CargoStep(
+        status: CargoBookingModel.driverAssigned,
+        title: 'Driver assigned',
+        icon: Icons.person_pin_circle_outlined,
+      ),
+      _CargoStep(
+        status: CargoBookingModel.driverArriving,
+        title: 'Driver arriving',
+        icon: Icons.directions_car_outlined,
+      ),
+      _CargoStep(
+        status: CargoBookingModel.pickedUp,
+        title: 'Cargo picked up',
+        icon: Icons.inventory_2_outlined,
+      ),
+      _CargoStep(
+        status: CargoBookingModel.onTheWay,
+        title: 'Cargo on the way',
+        icon: Icons.local_shipping_outlined,
+      ),
+      _CargoStep(
+        status: CargoBookingModel.delivered,
+        title: 'Delivered',
+        icon: Icons.check_circle_outline,
+      ),
+    ];
+  }
+
+  int _currentStepIndex(String status, List<_CargoStep> steps) {
+    final int index = steps.indexWhere((step) => step.status == status);
+
+    return index;
+  }
+
+  String _statusTitle(String status) {
+    switch (status) {
+      case CargoBookingModel.searching:
+        return 'Searching for Cargo Driver';
+
+      case CargoBookingModel.driverAssigned:
+        return 'Driver Assigned';
+
+      case CargoBookingModel.driverArriving:
+        return 'Driver Arriving';
+
+      case CargoBookingModel.pickedUp:
+        return 'Cargo Picked Up';
+
+      case CargoBookingModel.shopping:
+        return 'Driver Shopping';
+
+      case CargoBookingModel.onTheWay:
+        return 'On The Way';
+
+      case CargoBookingModel.delivered:
+        return 'Delivered';
+
+      case CargoBookingModel.cancelled:
+        return 'Cancelled';
+
+      default:
+        return 'Cargo Booking';
+    }
+  }
+
+  String _statusSubtitle(String status, String serviceType) {
+    switch (status) {
+      case CargoBookingModel.searching:
+        return 'We are looking for a suitable Cargo driver.';
+
+      case CargoBookingModel.driverAssigned:
+        return 'A driver has accepted your Cargo booking.';
+
+      case CargoBookingModel.driverArriving:
+        return serviceType == CargoBookingModel.buyForMe
+            ? 'The driver is heading to the shop.'
+            : 'The driver is heading to the pickup location.';
+
+      case CargoBookingModel.pickedUp:
+        return 'Your Cargo has been collected.';
+
+      case CargoBookingModel.shopping:
+        return 'The driver is purchasing the requested items.';
+
+      case CargoBookingModel.onTheWay:
+        return 'Your delivery is on the way.';
+
+      case CargoBookingModel.delivered:
+        return 'Your delivery has reached its destination.';
+
+      case CargoBookingModel.cancelled:
+        return 'This booking has been cancelled.';
+
+      default:
+        return 'Cargo status is being updated.';
+    }
+  }
+
+  String _serviceName(String type) {
+    switch (type) {
+      case CargoBookingModel.parcel:
+        return 'Send Parcel';
+      case CargoBookingModel.goods:
+        return 'Move Goods';
+      case CargoBookingModel.shifting:
+        return 'House Shifting';
+      case CargoBookingModel.pickupMyItem:
+        return 'Pickup My Item';
+      case CargoBookingModel.buyForMe:
+        return 'Buy For Me';
+      default:
+        return 'Cargo';
+    }
+  }
+
+  IconData _statusIcon(String status) {
+    switch (status) {
+      case CargoBookingModel.searching:
+        return Icons.search;
+      case CargoBookingModel.driverAssigned:
+        return Icons.person_pin_circle_outlined;
+      case CargoBookingModel.driverArriving:
+        return Icons.directions_car_outlined;
+      case CargoBookingModel.pickedUp:
+        return Icons.inventory_2_outlined;
+      case CargoBookingModel.shopping:
+        return Icons.shopping_bag_outlined;
+      case CargoBookingModel.onTheWay:
+        return Icons.local_shipping_outlined;
+      case CargoBookingModel.delivered:
+        return Icons.check_circle_outline;
+      case CargoBookingModel.cancelled:
+        return Icons.cancel_outlined;
+      default:
+        return Icons.local_shipping_outlined;
+    }
+  }
+}
+
+class _CargoStep {
+  const _CargoStep({
+    required this.status,
+    required this.title,
+    required this.icon,
+  });
+
+  final String status;
+  final String title;
+  final IconData icon;
+}

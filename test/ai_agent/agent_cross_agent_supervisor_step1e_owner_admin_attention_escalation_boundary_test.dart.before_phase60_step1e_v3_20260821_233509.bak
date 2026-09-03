@@ -1,0 +1,416 @@
+import 'package:flutter_test/flutter_test.dart';
+
+import 'package:swat_ride/ai_agent/constants/agent_cross_agent_supervisor_attention_constants.dart';
+import 'package:swat_ride/ai_agent/constants/agent_cross_agent_supervisor_contract_constants.dart';
+import 'package:swat_ride/ai_agent/constants/agent_cross_agent_supervisor_coordination_constants.dart';
+import 'package:swat_ride/ai_agent/constants/agent_cross_agent_supervisor_conflict_constants.dart';
+import 'package:swat_ride/ai_agent/models/agent_cross_agent_supervisor_attention_request.dart';
+import 'package:swat_ride/ai_agent/models/agent_cross_agent_supervisor_conflict_assessment.dart';
+import 'package:swat_ride/ai_agent/models/agent_cross_agent_supervisor_conflict_finding.dart';
+import 'package:swat_ride/ai_agent/models/agent_cross_agent_supervisor_coordination_decision.dart';
+import 'package:swat_ride/ai_agent/models/agent_cross_agent_supervisor_security_snapshot.dart';
+import 'package:swat_ride/ai_agent/services/agent_cross_agent_supervisor_attention_policy.dart';
+import 'package:swat_ride/ai_agent/services/agent_cross_agent_supervisor_attention_service.dart';
+import 'package:swat_ride/ai_agent/services/agent_cross_agent_supervisor_owner_admin_escalation_policy.dart';
+
+void main() {
+  const AgentCrossAgentSupervisorAttentionPolicy attentionPolicy =
+      AgentCrossAgentSupervisorAttentionPolicy();
+
+  const AgentCrossAgentSupervisorOwnerAdminEscalationPolicy escalationPolicy =
+      AgentCrossAgentSupervisorOwnerAdminEscalationPolicy();
+
+  const AgentCrossAgentSupervisorAttentionService service =
+      AgentCrossAgentSupervisorAttentionService();
+
+  AgentCrossAgentSupervisorSecuritySnapshot security({
+    bool restricted = false,
+    bool ownerAuthority = true,
+  }) {
+    return AgentCrossAgentSupervisorSecuritySnapshot(
+      permissionDecisionRef: 'permission:1',
+      approvalDecisionRef: 'approval:1',
+      runtimeGateDecisionRef: 'runtime:1',
+      guardianSecurityDecisionRef: 'guardian:1',
+      ownerSuperAdminControlRef: 'owner:1',
+      masterAiControlRef: 'master:1',
+      emergencyStopDecisionRef: 'emergency:1',
+      costBudgetDecisionRef: 'budget:1',
+      mandatoryAuditDecisionRef: 'audit:1',
+      permissionSatisfied: true,
+      approvalSatisfied: true,
+      runtimeGateSatisfied: true,
+      guardianSecuritySatisfied: true,
+      ownerSuperAdminControlSatisfied: true,
+      masterAiControlSatisfied: true,
+      emergencyStopClear: true,
+      costBudgetSatisfied: true,
+      mandatoryAuditSatisfied: true,
+      restrictedAction: restricted,
+      ownerAdminAuthorityPresent: ownerAuthority,
+    );
+  }
+
+  AgentCrossAgentSupervisorConflictAssessment cleanConflict() {
+    return AgentCrossAgentSupervisorConflictAssessment(
+      status: AgentCrossAgentSupervisorDecisionStatus.observeOnly,
+      findings: const <AgentCrossAgentSupervisorConflictFinding>[],
+      recommendHold: false,
+      recommendStop: false,
+      escalateOwnerAdmin: false,
+      reasonCodes: const <String>['clean'],
+    );
+  }
+
+  AgentCrossAgentSupervisorConflictAssessment conflict({bool stop = false}) {
+    return AgentCrossAgentSupervisorConflictAssessment(
+      status: stop
+          ? AgentCrossAgentSupervisorDecisionStatus.recommendStopAndEscalate
+          : AgentCrossAgentSupervisorDecisionStatus.recommendHoldAndEscalate,
+      findings: const <AgentCrossAgentSupervisorConflictFinding>[
+        AgentCrossAgentSupervisorConflictFinding(
+          type: AgentCrossAgentConflictType.conflictingOutcome,
+          primaryClaimId: 'claim:1',
+          relatedClaimId: 'claim:2',
+          reasonCode: 'conflict',
+        ),
+      ],
+      recommendHold: !stop,
+      recommendStop: stop,
+      escalateOwnerAdmin: true,
+      reasonCodes: const <String>['conflict'],
+    );
+  }
+
+  AgentCrossAgentSupervisorCoordinationDecision ownerRecommended() {
+    return AgentCrossAgentSupervisorCoordinationDecision(
+      status: AgentCrossAgentOwnershipStatus.ownerRecommended,
+      taskId: 'task:1',
+      priorityClass: AgentCrossAgentCoordinationPriority.normalOperational,
+      recommendedOwnerAgentId: 'ride_agent',
+      recommendHold: false,
+      escalationRecommended: false,
+      reasonCodes: const <String>['owner_recommended'],
+    );
+  }
+
+  AgentCrossAgentSupervisorCoordinationDecision coordinationHold(
+    String status,
+  ) {
+    return AgentCrossAgentSupervisorCoordinationDecision(
+      status: status,
+      taskId: 'task:1',
+      priorityClass: AgentCrossAgentCoordinationPriority.normalOperational,
+      recommendedOwnerAgentId: null,
+      recommendHold: true,
+      escalationRecommended: true,
+      reasonCodes: const <String>['hold'],
+    );
+  }
+
+  AgentCrossAgentSupervisorAttentionRequest request({
+    AgentCrossAgentSupervisorSecuritySnapshot? securitySnapshot,
+    AgentCrossAgentSupervisorConflictAssessment? conflictAssessment,
+    AgentCrossAgentSupervisorCoordinationDecision? coordinationDecision,
+    int failures = 0,
+    bool suspicious = false,
+    bool unsafe = false,
+    bool unclearAuthority = false,
+    bool mandatoryReview = false,
+  }) {
+    return AgentCrossAgentSupervisorAttentionRequest(
+      requestId: 'attention:req:1',
+      taskId: 'task:1',
+      sourceAgentId: 'ride_agent',
+      securitySnapshot: securitySnapshot ?? security(),
+      conflictAssessment: conflictAssessment ?? cleanConflict(),
+      coordinationDecision: coordinationDecision ?? ownerRecommended(),
+      repeatedFailureCount: failures,
+      suspiciousActivityDetected: suspicious,
+      unsafeActionDetected: unsafe,
+      unclearAuthority: unclearAuthority,
+      mandatoryOwnerAdminReview: mandatoryReview,
+    );
+  }
+
+  group('Phase 60 Step 1E Owner/Admin attention boundary', () {
+    test('3 attention levels are locked', () {
+      expect(AgentCrossAgentSupervisorAttentionLevel.values.length, 3);
+    });
+
+    test('8 attention reasons are locked', () {
+      expect(AgentCrossAgentSupervisorAttentionReason.values.length, 8);
+    });
+
+    test('clean task needs no attention', () {
+      final result = service.evaluate(request());
+
+      expect(
+        result.assessment.level,
+        AgentCrossAgentSupervisorAttentionLevel.none,
+      );
+      expect(result.assessment.ownerAdminAttentionRequired, false);
+      expect(result.handoff, isNull);
+    });
+
+    test('restricted work without Owner/Admin authority => HOLD attention', () {
+      final result = service.evaluate(
+        request(
+          securitySnapshot: security(restricted: true, ownerAuthority: false),
+        ),
+      );
+
+      expect(
+        result.assessment.level,
+        AgentCrossAgentSupervisorAttentionLevel.ownerAdminReview,
+      );
+      expect(result.assessment.recommendHold, true);
+      expect(result.assessment.ownerAdminAttentionRequired, true);
+      expect(result.handoff, isNotNull);
+      expect(
+        result.assessment.reasons,
+        contains(
+          AgentCrossAgentSupervisorAttentionReason.missingOwnerAdminAuthority,
+        ),
+      );
+    });
+
+    test('Step 1C conflict => Owner/Admin review', () {
+      final result = service.evaluate(request(conflictAssessment: conflict()));
+
+      expect(result.assessment.recommendHold, true);
+      expect(result.assessment.ownerAdminAttentionRequired, true);
+      expect(
+        result.assessment.reasons,
+        contains(AgentCrossAgentSupervisorAttentionReason.conflictOrWrongWork),
+      );
+    });
+
+    test('Step 1C STOP wrong-work => urgent security attention', () {
+      final result = service.evaluate(
+        request(conflictAssessment: conflict(stop: true)),
+      );
+
+      expect(
+        result.assessment.level,
+        AgentCrossAgentSupervisorAttentionLevel.urgentSecurity,
+      );
+      expect(result.assessment.recommendStop, true);
+      expect(result.assessment.ownerAdminAttentionRequired, true);
+    });
+
+    test('ambiguous owner => HOLD attention', () {
+      final result = service.evaluate(
+        request(
+          coordinationDecision: coordinationHold(
+            AgentCrossAgentOwnershipStatus.holdAmbiguousOwner,
+          ),
+        ),
+      );
+
+      expect(result.assessment.recommendHold, true);
+      expect(
+        result.assessment.reasons,
+        contains(AgentCrossAgentSupervisorAttentionReason.ambiguousOwner),
+      );
+    });
+
+    test('no eligible owner => HOLD attention', () {
+      final result = service.evaluate(
+        request(
+          coordinationDecision: coordinationHold(
+            AgentCrossAgentOwnershipStatus.holdNoEligibleOwner,
+          ),
+        ),
+      );
+
+      expect(result.assessment.recommendHold, true);
+      expect(
+        result.assessment.reasons,
+        contains(AgentCrossAgentSupervisorAttentionReason.noEligibleOwner),
+      );
+    });
+
+    test('repeated failures threshold triggers attention', () {
+      final result = service.evaluate(request(failures: 3));
+
+      expect(result.assessment.ownerAdminAttentionRequired, true);
+      expect(result.assessment.recommendHold, true);
+      expect(
+        result.assessment.reasons,
+        contains(AgentCrossAgentSupervisorAttentionReason.repeatedFailure),
+      );
+    });
+
+    test('below repeated-failure threshold stays clean', () {
+      final result = service.evaluate(request(failures: 2));
+
+      expect(
+        result.assessment.level,
+        AgentCrossAgentSupervisorAttentionLevel.none,
+      );
+    });
+
+    test('suspicious activity => urgent STOP attention', () {
+      final result = service.evaluate(request(suspicious: true));
+
+      expect(
+        result.assessment.level,
+        AgentCrossAgentSupervisorAttentionLevel.urgentSecurity,
+      );
+      expect(result.assessment.recommendStop, true);
+      expect(result.handoff, isNotNull);
+    });
+
+    test('unsafe action => urgent STOP attention', () {
+      final result = service.evaluate(request(unsafe: true));
+
+      expect(result.assessment.recommendStop, true);
+      expect(
+        result.assessment.reasons,
+        contains(AgentCrossAgentSupervisorAttentionReason.unsafeAction),
+      );
+    });
+
+    test('unclear authority => HOLD review, never invented authority', () {
+      final result = service.evaluate(request(unclearAuthority: true));
+
+      expect(
+        result.assessment.level,
+        AgentCrossAgentSupervisorAttentionLevel.ownerAdminReview,
+      );
+      expect(result.assessment.recommendHold, true);
+      expect(result.handoff, isNotNull);
+    });
+
+    test('mandatory Owner/Admin review produces attention', () {
+      final result = service.evaluate(request(mandatoryReview: true));
+
+      expect(result.assessment.ownerAdminAttentionRequired, true);
+      expect(result.assessment.recommendHold, true);
+    });
+
+    test('attention request contains metadata only', () {
+      final value = request();
+
+      expect(value.containsRawUserMessage, false);
+      expect(value.containsRawConversation, false);
+      expect(value.containsRawProviderResponse, false);
+      expect(value.containsPrivatePayload, false);
+      expect(value.containsRawApprovalToken, false);
+      expect(value.containsRawPermissionToken, false);
+      expect(value.asksSupervisorToGrantAuthority, false);
+      expect(value.asksSupervisorToCreateApproval, false);
+      expect(value.asksSupervisorToSendNotification, false);
+    });
+
+    test('attention assessment is recommendation-only', () {
+      final value = attentionPolicy.assess(request());
+
+      expect(value.recommendationOnly, true);
+      expect(value.securityAuthorityAlwaysAboveSupervisor, true);
+      expect(value.grantsPermission, false);
+      expect(value.createsApproval, false);
+      expect(value.consumesApproval, false);
+      expect(value.manufacturesOwnerAuthority, false);
+      expect(value.expandsScope, false);
+      expect(value.authorizesExecution, false);
+      expect(value.executesBusinessAction, false);
+    });
+
+    test('assessment cannot notify/persist/mutate', () {
+      final value = attentionPolicy.assess(request());
+
+      expect(value.sendsNotification, false);
+      expect(value.persistsAssessment, false);
+      expect(value.mutatesTask, false);
+      expect(value.mutatesRouting, false);
+      expect(value.modifiesSecurityEngine, false);
+    });
+
+    test('escalation handoff is metadata, not authority', () {
+      final assessment = attentionPolicy.assess(
+        request(unclearAuthority: true),
+      );
+
+      final handoff = escalationPolicy.prepare(
+        request: request(unclearAuthority: true),
+        assessment: assessment,
+      );
+
+      expect(handoff, isNotNull);
+      expect(handoff!.metadataOnly, true);
+      expect(handoff.recipientAuthorityIsOwnerOrAdmin, true);
+      expect(handoff.handoffIsNotApproval, true);
+      expect(handoff.handoffIsNotPermission, true);
+      expect(handoff.handoffDoesNotAuthorizeExecution, true);
+      expect(handoff.containsRawPrompt, false);
+      expect(handoff.containsRawConversation, false);
+      expect(handoff.containsRawPrivatePayload, false);
+      expect(handoff.containsRawApprovalToken, false);
+      expect(handoff.containsRawPermissionToken, false);
+    });
+
+    test('clean assessment creates no escalation handoff', () {
+      final assessment = attentionPolicy.assess(request());
+
+      final handoff = escalationPolicy.prepare(
+        request: request(),
+        assessment: assessment,
+      );
+
+      expect(handoff, isNull);
+    });
+
+    test('escalation policy does not send/persist/execute', () {
+      expect(escalationPolicy.opaqueMetadataOnly, true);
+      expect(escalationPolicy.handoffCannotActAsApproval, true);
+      expect(escalationPolicy.handoffCannotActAsPermission, true);
+      expect(escalationPolicy.handoffCannotAuthorizeExecution, true);
+      expect(
+        escalationPolicy.ownerAdminMustActThroughAuthoritativeControls,
+        true,
+      );
+      expect(escalationPolicy.sendsNotificationHere, false);
+      expect(escalationPolicy.persistsHandoffHere, false);
+      expect(escalationPolicy.mutatesTaskHere, false);
+      expect(escalationPolicy.executesBusinessActionHere, false);
+      expect(escalationPolicy.modifiesSecurityEngineHere, false);
+    });
+
+    test('attention policy does not take later Step 1F ownership', () {
+      expect(attentionPolicy.repeatedFailureCanRequireAttention, true);
+      expect(attentionPolicy.retryLoopSuppressionImplementedHere, false);
+      expect(attentionPolicy.notificationDeliveryImplementedHere, false);
+      expect(attentionPolicy.persistenceImplementedHere, false);
+    });
+
+    test('service authority boundaries remain locked', () {
+      expect(service.attentionRecommendationOnly, true);
+      expect(service.escalationMetadataOnly, true);
+      expect(service.securityAuthorityAlwaysAboveSupervisor, true);
+      expect(service.supervisorNeverBecomesOwnerAdmin, true);
+      expect(service.supervisorCannotManufactureAuthority, true);
+      expect(service.supervisorCannotGrantPermission, true);
+      expect(service.supervisorCannotCreateOrConsumeApproval, true);
+      expect(service.supervisorCannotExpandScope, true);
+      expect(service.supervisorCannotExecuteBusinessAction, false);
+    });
+
+    test('service cannot notify/persist/mutate security/task', () {
+      expect(service.notificationDeliveryImplementedHere, false);
+      expect(service.persistenceImplementedHere, false);
+      expect(service.taskMutationImplementedHere, false);
+      expect(service.supervisorCannotModifySecurityEngine, true);
+    });
+
+    test('core app failure isolation remains mandatory', () {
+      expect(service.coreAppContinuesIfAttentionLayerFails, true);
+    });
+
+    test('Step 1F and 1G remain separate', () {
+      expect(service.step1FRetryLoopFailureIsolationSeparate, true);
+      expect(service.step1GFinalAdversarialSeparate, true);
+    });
+  });
+}

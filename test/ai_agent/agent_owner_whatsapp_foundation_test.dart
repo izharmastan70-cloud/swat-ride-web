@@ -1,0 +1,291 @@
+import 'package:flutter_test/flutter_test.dart';
+
+import 'package:swat_ride/ai_agent/models/agent_owner_whatsapp_foundation.dart';
+
+void main() {
+  group('Phase 46 Owner WhatsApp security foundation', () {
+    const AgentOwnerWhatsAppFoundation foundation =
+        AgentOwnerWhatsAppFoundation();
+
+    test('Owner WhatsApp master and service controls default OFF', () {
+      const AgentOwnerWhatsAppControlSettings settings =
+          AgentOwnerWhatsAppControlSettings();
+
+      expect(settings.enabled, isFalse);
+      expect(settings.reportsEnabled, isFalse);
+      expect(settings.operationalCommandsEnabled, isFalse);
+      expect(settings.financialCommandsEnabled, isFalse);
+      expect(settings.accountSecurityCommandsEnabled, isFalse);
+      expect(settings.anyAdministrativeCommandEnabled, isFalse);
+    });
+
+    test('WhatsApp message and phone match never grant Owner authority', () {
+      expect(foundation.messageGrantsAuthority, isFalse);
+      expect(foundation.phoneNumberMatchAloneIsAuthority, isFalse);
+      expect(foundation.requiresLinkedOwnerAccount, isTrue);
+    });
+
+    test('Customer WhatsApp privileges never inherit into Owner channel', () {
+      expect(foundation.customerPrivilegeInheritanceAllowed, isFalse);
+      expect(
+        AgentOwnerWhatsAppFoundation.roleId,
+        isNot(AgentOwnerWhatsAppFoundation.customerWhatsAppRoleId),
+      );
+    });
+
+    test('Emergency WhatsApp authority remains separate', () {
+      expect(foundation.emergencyAuthorityIncluded, isFalse);
+      expect(
+        AgentOwnerWhatsAppFoundation.roleId,
+        isNot(AgentOwnerWhatsAppFoundation.emergencyWhatsAppRoleId),
+      );
+    });
+
+    test('linked identity is enough for read but not consequential action', () {
+      final DateTime verifiedAt = DateTime.utc(2026, 8, 18, 0, 0);
+      final DateTime now = DateTime.utc(2026, 8, 18, 0, 5);
+
+      final AgentOwnerWhatsAppSessionBinding binding =
+          AgentOwnerWhatsAppSessionBinding(
+            principalType: AgentOwnerWhatsAppPrincipalType.owner,
+            principalUid: 'owner_uid_1',
+            whatsappBindingId: 'binding_ref_1',
+            conversationId: 'conversation_1',
+            senderBindingId: 'sender_hash_1',
+            sessionId: 'session_1',
+            verificationLevel:
+                AgentOwnerWhatsAppVerificationLevel.linkedAccount,
+            verifiedAt: verifiedAt,
+            expiresAt: verifiedAt.add(const Duration(minutes: 15)),
+          );
+
+      expect(
+        binding.canReadOwnerData(
+          now: now,
+          expectedConversationId: 'conversation_1',
+          expectedSenderBindingId: 'sender_hash_1',
+          expectedSessionId: 'session_1',
+        ),
+        isTrue,
+      );
+
+      expect(
+        binding.canRequestConsequentialAction(
+          now: now,
+          expectedConversationId: 'conversation_1',
+          expectedSenderBindingId: 'sender_hash_1',
+          expectedSessionId: 'session_1',
+        ),
+        isFalse,
+      );
+    });
+
+    test('strong re-auth is required for consequential action request', () {
+      final DateTime verifiedAt = DateTime.utc(2026, 8, 18, 0, 0);
+      final DateTime now = DateTime.utc(2026, 8, 18, 0, 5);
+
+      final AgentOwnerWhatsAppSessionBinding binding =
+          AgentOwnerWhatsAppSessionBinding(
+            principalType: AgentOwnerWhatsAppPrincipalType.superAdmin,
+            principalUid: 'super_admin_uid_1',
+            whatsappBindingId: 'binding_ref_2',
+            conversationId: 'conversation_2',
+            senderBindingId: 'sender_hash_2',
+            sessionId: 'session_2',
+            verificationLevel: AgentOwnerWhatsAppVerificationLevel.strongReauth,
+            verifiedAt: verifiedAt,
+            expiresAt: verifiedAt.add(const Duration(minutes: 10)),
+          );
+
+      expect(
+        binding.canRequestConsequentialAction(
+          now: now,
+          expectedConversationId: 'conversation_2',
+          expectedSenderBindingId: 'sender_hash_2',
+          expectedSessionId: 'session_2',
+        ),
+        isTrue,
+      );
+    });
+
+    test('sender conversation or session mismatch fails closed', () {
+      final DateTime verifiedAt = DateTime.utc(2026, 8, 18, 0, 0);
+      final DateTime now = DateTime.utc(2026, 8, 18, 0, 1);
+
+      final AgentOwnerWhatsAppSessionBinding binding =
+          AgentOwnerWhatsAppSessionBinding(
+            principalType: AgentOwnerWhatsAppPrincipalType.owner,
+            principalUid: 'owner_uid_2',
+            whatsappBindingId: 'binding_ref_3',
+            conversationId: 'conversation_3',
+            senderBindingId: 'sender_hash_3',
+            sessionId: 'session_3',
+            verificationLevel: AgentOwnerWhatsAppVerificationLevel.strongReauth,
+            verifiedAt: verifiedAt,
+            expiresAt: verifiedAt.add(const Duration(minutes: 10)),
+          );
+
+      expect(
+        binding.canReadOwnerData(
+          now: now,
+          expectedConversationId: 'wrong_conversation',
+          expectedSenderBindingId: 'sender_hash_3',
+          expectedSessionId: 'session_3',
+        ),
+        isFalse,
+      );
+
+      expect(
+        binding.canReadOwnerData(
+          now: now,
+          expectedConversationId: 'conversation_3',
+          expectedSenderBindingId: 'wrong_sender',
+          expectedSessionId: 'session_3',
+        ),
+        isFalse,
+      );
+
+      expect(
+        binding.canReadOwnerData(
+          now: now,
+          expectedConversationId: 'conversation_3',
+          expectedSenderBindingId: 'sender_hash_3',
+          expectedSessionId: 'wrong_session',
+        ),
+        isFalse,
+      );
+    });
+
+    test('expired Owner WhatsApp session fails closed', () {
+      final DateTime verifiedAt = DateTime.utc(2026, 8, 18, 0, 0);
+
+      final AgentOwnerWhatsAppSessionBinding binding =
+          AgentOwnerWhatsAppSessionBinding(
+            principalType: AgentOwnerWhatsAppPrincipalType.owner,
+            principalUid: 'owner_uid_3',
+            whatsappBindingId: 'binding_ref_4',
+            conversationId: 'conversation_4',
+            senderBindingId: 'sender_hash_4',
+            sessionId: 'session_4',
+            verificationLevel: AgentOwnerWhatsAppVerificationLevel.strongReauth,
+            verifiedAt: verifiedAt,
+            expiresAt: verifiedAt.add(const Duration(minutes: 5)),
+          );
+
+      expect(
+        binding.canReadOwnerData(
+          now: verifiedAt.add(const Duration(minutes: 6)),
+          expectedConversationId: 'conversation_4',
+          expectedSenderBindingId: 'sender_hash_4',
+          expectedSessionId: 'session_4',
+        ),
+        isFalse,
+      );
+    });
+
+    test(
+      'read report stays behind verified backend permission runtime and audit',
+      () {
+        final AgentOwnerWhatsAppCommandPolicy policy = foundation.policyFor(
+          isReadOnlyReport: true,
+          changesBusinessOrAdminState: false,
+          permanentlyForbidden: false,
+        );
+
+        expect(policy.commandClass, AgentOwnerWhatsAppCommandClass.readReport);
+        expect(policy.requiresVerifiedBackendFacts, isTrue);
+        expect(policy.requiresPermissionEngine, isTrue);
+        expect(policy.requiresRuntimeGate, isTrue);
+        expect(policy.requiresApprovalEngine, isFalse);
+        expect(policy.requiresAudit, isTrue);
+        expect(policy.requiresStrongReauth, isFalse);
+        expect(policy.mayExecuteDirectly, isFalse);
+      },
+    );
+
+    test('consequential command requires approval and strong re-auth', () {
+      final AgentOwnerWhatsAppCommandPolicy policy = foundation.policyFor(
+        isReadOnlyReport: false,
+        changesBusinessOrAdminState: true,
+        permanentlyForbidden: false,
+      );
+
+      expect(
+        policy.commandClass,
+        AgentOwnerWhatsAppCommandClass.consequentialAction,
+      );
+      expect(policy.requiresPermissionEngine, isTrue);
+      expect(policy.requiresRuntimeGate, isTrue);
+      expect(policy.requiresApprovalEngine, isTrue);
+      expect(policy.requiresAudit, isTrue);
+      expect(policy.requiresStrongReauth, isTrue);
+      expect(policy.mayExecuteDirectly, isFalse);
+    });
+
+    test('unknown or forbidden command fails closed', () {
+      final AgentOwnerWhatsAppCommandPolicy unknownPolicy = foundation
+          .policyFor(
+            isReadOnlyReport: false,
+            changesBusinessOrAdminState: false,
+            permanentlyForbidden: false,
+          );
+
+      final AgentOwnerWhatsAppCommandPolicy forbiddenPolicy = foundation
+          .policyFor(
+            isReadOnlyReport: false,
+            changesBusinessOrAdminState: false,
+            permanentlyForbidden: true,
+          );
+
+      expect(
+        unknownPolicy.commandClass,
+        AgentOwnerWhatsAppCommandClass.forbidden,
+      );
+      expect(
+        forbiddenPolicy.commandClass,
+        AgentOwnerWhatsAppCommandClass.forbidden,
+      );
+      expect(unknownPolicy.mayExecuteDirectly, isFalse);
+      expect(forbiddenPolicy.mayExecuteDirectly, isFalse);
+    });
+
+    test('credential fields are blocked from Owner WhatsApp workflow', () {
+      expect(foundation.isReservedCredentialField('OTP'), isTrue);
+      expect(foundation.isReservedCredentialField('password'), isTrue);
+      expect(foundation.isReservedCredentialField('card_number'), isTrue);
+      expect(foundation.isReservedCredentialField('access-token'), isTrue);
+      expect(foundation.isReservedCredentialField('private_key'), isTrue);
+      expect(foundation.isReservedCredentialField('reportType'), isFalse);
+    });
+
+    test('low-cost provider order remains Structured Free Local Paid', () {
+      expect(
+        foundation.providerPriority,
+        const <AgentOwnerWhatsAppProviderTier>[
+          AgentOwnerWhatsAppProviderTier.structuredBackend,
+          AgentOwnerWhatsAppProviderTier.freeAi,
+          AgentOwnerWhatsAppProviderTier.localAi,
+          AgentOwnerWhatsAppProviderTier.paidAi,
+        ],
+      );
+    });
+
+    test(
+      'foundation exposes zero execution transport payment or deploy authority',
+      () {
+        expect(foundation.mayExecuteBusinessWrite, isFalse);
+        expect(foundation.mayChangeAdminSetting, isFalse);
+        expect(foundation.mayChargePayment, isFalse);
+        expect(foundation.maySendWhatsApp, isFalse);
+        expect(foundation.mayDeploy, isFalse);
+        expect(foundation.requiresPermissionEngine, isTrue);
+        expect(foundation.requiresRuntimeGate, isTrue);
+        expect(
+          foundation.requiresApprovalEngineForConsequentialActions,
+          isTrue,
+        );
+        expect(foundation.requiresAudit, isTrue);
+      },
+    );
+  });
+}

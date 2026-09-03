@@ -1,0 +1,60 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+
+import {
+  LIVE_EXECUTOR_CONTRACT,
+  LIVE_EXECUTOR_DEFAULTS,
+  assertLiveExecutorDefaultDisarmed,
+  executeAtomicMigration,
+  executeTrustedBootstrap,
+} from '../src/trusted_admin_sdk_executor.mjs';
+
+test('trusted live executor is default-disarmed', () => {
+  assert.equal(assertLiveExecutorDefaultDisarmed(), true);
+  assert.equal(LIVE_EXECUTOR_DEFAULTS.executionArmed, false);
+
+  for (const [name, value] of Object.entries(LIVE_EXECUTOR_DEFAULTS)) {
+    if (name.startsWith('allow')) {
+      assert.equal(value, false, `${name} must default false`);
+    }
+  }
+});
+
+test('bootstrap blocks before Admin SDK dynamic import when not armed', async () => {
+  await assert.rejects(
+    executeTrustedBootstrap({
+      approvalId: 'not-used',
+      expectedBindingSha256: 'a'.repeat(64),
+      migrationIdSha256: 'b'.repeat(64),
+      actorReferenceSha256: 'c'.repeat(64),
+    }),
+    /bootstrap_execution_not_armed/,
+  );
+});
+
+test('migration blocks before Admin SDK dynamic import when not armed', async () => {
+  await assert.rejects(
+    executeAtomicMigration({
+      approvalId: 'not-used',
+      expectedBindingSha256: 'a'.repeat(64),
+      migrationIdSha256: 'b'.repeat(64),
+      actorReferenceSha256: 'c'.repeat(64),
+    }),
+    /migration_execution_not_armed/,
+  );
+});
+
+test('executor contract preserves post-migration fail-closed boundaries', () => {
+  assert.equal(LIVE_EXECUTOR_CONTRACT.bootstrapConsumesApproval, false);
+  assert.equal(LIVE_EXECUTOR_CONTRACT.migrationConsumesApproval, true);
+  assert.equal(LIVE_EXECUTOR_CONTRACT.migrationCreatesRoleEnabled, false);
+  assert.equal(LIVE_EXECUTOR_CONTRACT.migrationReleasesHold, false);
+  assert.equal(LIVE_EXECUTOR_CONTRACT.writesOldGuard, false);
+  assert.equal(LIVE_EXECUTOR_CONTRACT.writesOldArmingToken, false);
+  assert.equal(LIVE_EXECUTOR_CONTRACT.writesOldActivationReceipt, false);
+  assert.equal(LIVE_EXECUTOR_CONTRACT.repositoryAttachAuthorized, false);
+  assert.equal(LIVE_EXECUTOR_CONTRACT.repositoryArmAuthorized, false);
+  assert.equal(LIVE_EXECUTOR_CONTRACT.firstIncidentWriteAuthorized, false);
+  assert.equal(LIVE_EXECUTOR_CONTRACT.suggestOnlyAuthorized, false);
+  assert.equal(LIVE_EXECUTOR_CONTRACT.autoAuthorized, false);
+});

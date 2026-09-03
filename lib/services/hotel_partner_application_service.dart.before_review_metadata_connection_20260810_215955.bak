@@ -1,0 +1,814 @@
+﻿import 'package:cloud_firestore/cloud_firestore.dart';
+
+import '../models/hotel_partner_application.dart';
+import 'hotel_service_control_service.dart';
+
+class HotelPartnerApplicationService {
+  HotelPartnerApplicationService({
+    FirebaseFirestore? firestore,
+  }) : _firestore =
+            firestore ?? FirebaseFirestore.instance;
+
+  final FirebaseFirestore _firestore;
+
+  static const String applicationsCollection =
+      'hotel_partner_applications';
+
+  static const String hotelsCollection =
+      'hotels';
+
+  static const String notificationsCollection =
+      'notifications';
+
+  static const String userRolesCollection =
+      'user_roles';
+
+  // =========================================================
+  // USER: CREATE OR SAVE DRAFT
+  // =========================================================
+
+  Future<String> saveDraft(
+    HotelPartnerApplication application,
+  ) async {
+    final Map<String, dynamic> data = {
+      ...application.toMap(),
+      'applicationStatus': 'draft',
+      'isCustomerAccessEnabled': true,
+      'updatedAt':
+          FieldValue.serverTimestamp(),
+    };
+
+    if (application.id.trim().isNotEmpty) {
+      await _firestore
+          .collection(applicationsCollection)
+          .doc(application.id)
+          .set(
+            data,
+            SetOptions(merge: true),
+          );
+
+      return application.id;
+    }
+
+    final DocumentReference<Map<String, dynamic>>
+        document = await _firestore
+            .collection(applicationsCollection)
+            .add({
+      ...data,
+      'createdAt':
+          FieldValue.serverTimestamp(),
+    });
+
+    return document.id;
+  }
+
+  // =========================================================
+  // USER: SUBMIT APPLICATION
+  // =========================================================
+
+  Future<String> submitApplication(
+    HotelPartnerApplication application,
+  ) async {
+    final HotelServiceDecision decision =
+        await HotelServiceControlService(
+      firestore: _firestore,
+    ).canSubmitPartnerApplication();
+
+    if (!decision.isAllowed) {
+      throw StateError(decision.message);
+    }
+
+    _validateForSubmission(application);
+
+    final Map<String, dynamic> data = {
+      ...application.toMap(),
+      'applicationStatus': 'submitted',
+      'isCustomerAccessEnabled': true,
+      'adminId': '',
+      'adminNote': '',
+      'rejectionReason': '',
+      'updatedAt':
+          FieldValue.serverTimestamp(),
+      'submittedAt':
+          FieldValue.serverTimestamp(),
+    };
+
+    String applicationId;
+
+    if (application.id.trim().isNotEmpty) {
+      applicationId = application.id;
+
+      await _firestore
+          .collection(applicationsCollection)
+          .doc(applicationId)
+          .set(
+            data,
+            SetOptions(merge: true),
+          );
+    } else {
+      final DocumentReference<Map<String, dynamic>>
+          document = await _firestore
+              .collection(applicationsCollection)
+              .add({
+        ...data,
+        'createdAt':
+            FieldValue.serverTimestamp(),
+      });
+
+      applicationId = document.id;
+    }
+
+    await _createUserNotification(
+      userId: application.applicantUserId,
+      title: 'Hotel application submitted',
+      message:
+          'Your hotel partner application has been submitted for admin review.',
+      type: 'hotel_application_submitted',
+      referenceId: applicationId,
+    );
+
+    return applicationId;
+  }
+
+  // =========================================================
+  // USER: GET APPLICATION
+  // =========================================================
+
+  Future<HotelPartnerApplication?>
+      getApplicationById(
+    String applicationId,
+  ) async {
+    final DocumentSnapshot<Map<String, dynamic>>
+        snapshot = await _firestore
+            .collection(applicationsCollection)
+            .doc(applicationId)
+            .get();
+
+    if (!snapshot.exists ||
+        snapshot.data() == null) {
+      return null;
+    }
+
+    return HotelPartnerApplication.fromMap(
+      snapshot.data()!,
+      snapshot.id,
+    );
+  }
+
+  Future<HotelPartnerApplication?>
+      getUserLatestApplication(
+    String userId,
+  ) async {
+    final QuerySnapshot<Map<String, dynamic>>
+        snapshot = await _firestore
+            .collection(applicationsCollection)
+            .where(
+              'applicantUserId',
+              isEqualTo: userId,
+            )
+            .orderBy(
+              'updatedAt',
+              descending: true,
+            )
+            .limit(1)
+            .get();
+
+    if (snapshot.docs.isEmpty) {
+      return null;
+    }
+
+    final QueryDocumentSnapshot<
+            Map<String, dynamic>>
+        document = snapshot.docs.first;
+
+    return HotelPartnerApplication.fromMap(
+      document.data(),
+      document.id,
+    );
+  }
+
+  Stream<HotelPartnerApplication?>
+      userApplicationStream(
+    String userId,
+  ) {
+    return _firestore
+        .collection(applicationsCollection)
+        .where(
+          'applicantUserId',
+          isEqualTo: userId,
+        )
+        .orderBy(
+          'updatedAt',
+          descending: true,
+        )
+        .limit(1)
+        .snapshots()
+        .map(
+          (snapshot) {
+            if (snapshot.docs.isEmpty) {
+              return null;
+            }
+
+            final QueryDocumentSnapshot<
+                    Map<String, dynamic>>
+                document = snapshot.docs.first;
+
+            return HotelPartnerApplication.fromMap(
+              document.data(),
+              document.id,
+            );
+          },
+        );
+  }
+
+  // =========================================================
+  // USER: UPDATE AFTER CHANGES REQUESTED
+  // =========================================================
+
+  Future<void> updateRequestedChanges(
+    HotelPartnerApplication application,
+  ) async {
+    if (application.id.trim().isEmpty) {
+      throw ArgumentError(
+        'Application ID is required.',
+      );
+    }
+
+    _validateForSubmission(application);
+
+    await _firestore
+        .collection(applicationsCollection)
+        .doc(application.id)
+        .update({
+      ...application.toMap(),
+      'applicationStatus': 'submitted',
+      'adminNote': '',
+      'rejectionReason': '',
+      'updatedAt':
+          FieldValue.serverTimestamp(),
+      'resubmittedAt':
+          FieldValue.serverTimestamp(),
+    });
+
+    await _createUserNotification(
+      userId: application.applicantUserId,
+      title: 'Hotel application resubmitted',
+      message:
+          'Your updated hotel application has been sent for review.',
+      type: 'hotel_application_resubmitted',
+      referenceId: application.id,
+    );
+  }
+
+  // =========================================================
+  // ADMIN: APPLICATION LISTS
+  // =========================================================
+
+  Stream<List<HotelPartnerApplication>>
+      adminApplicationsStream({
+    String? status,
+  }) {
+    Query<Map<String, dynamic>> query =
+        _firestore
+            .collection(applicationsCollection);
+
+    if (status != null &&
+        status.trim().isNotEmpty) {
+      query = query.where(
+        'applicationStatus',
+        isEqualTo: status.trim(),
+      );
+    }
+
+    return query
+        .orderBy(
+          'updatedAt',
+          descending: true,
+        )
+        .snapshots()
+        .map(
+          (snapshot) => snapshot.docs
+              .map(
+                (doc) =>
+                    HotelPartnerApplication.fromMap(
+                  doc.data(),
+                  doc.id,
+                ),
+              )
+              .toList(),
+        );
+  }
+
+  // =========================================================
+  // ADMIN: MARK UNDER REVIEW
+  // =========================================================
+
+  Future<void> adminStartReview({
+    required String applicationId,
+    required String adminId,
+  }) async {
+    final HotelPartnerApplication application =
+        await _requireApplication(
+      applicationId,
+    );
+
+    await _firestore
+        .collection(applicationsCollection)
+        .doc(applicationId)
+        .update({
+      'applicationStatus': 'under_review',
+      'adminId': adminId,
+      'updatedAt':
+          FieldValue.serverTimestamp(),
+      'reviewStartedAt':
+          FieldValue.serverTimestamp(),
+    });
+
+    await _createUserNotification(
+      userId: application.applicantUserId,
+      title: 'Application under review',
+      message:
+          'SWAT RIDE admin has started reviewing your hotel application.',
+      type: 'hotel_application_under_review',
+      referenceId: applicationId,
+    );
+  }
+
+  // =========================================================
+  // ADMIN: REQUEST CHANGES
+  // =========================================================
+
+  Future<void> adminRequestChanges({
+    required String applicationId,
+    required String adminId,
+    required String note,
+  }) async {
+    final String cleanNote = note.trim();
+
+    if (cleanNote.isEmpty) {
+      throw ArgumentError(
+        'Admin change note is required.',
+      );
+    }
+
+    final HotelPartnerApplication application =
+        await _requireApplication(
+      applicationId,
+    );
+
+    await _firestore
+        .collection(applicationsCollection)
+        .doc(applicationId)
+        .update({
+      'applicationStatus':
+          'changes_requested',
+      'adminId': adminId,
+      'adminNote': cleanNote,
+      'rejectionReason': '',
+      'updatedAt':
+          FieldValue.serverTimestamp(),
+    });
+
+    await _createUserNotification(
+      userId: application.applicantUserId,
+      title: 'Changes requested',
+      message: cleanNote,
+      type:
+          'hotel_application_changes_requested',
+      referenceId: applicationId,
+    );
+  }
+
+  // =========================================================
+  // ADMIN: REJECT APPLICATION
+  // =========================================================
+
+  Future<void> adminRejectApplication({
+    required String applicationId,
+    required String adminId,
+    required String reason,
+  }) async {
+    final String cleanReason = reason.trim();
+
+    if (cleanReason.isEmpty) {
+      throw ArgumentError(
+        'Rejection reason is required.',
+      );
+    }
+
+    final HotelPartnerApplication application =
+        await _requireApplication(
+      applicationId,
+    );
+
+    await _firestore
+        .collection(applicationsCollection)
+        .doc(applicationId)
+        .update({
+      'applicationStatus': 'rejected',
+      'adminId': adminId,
+      'rejectionReason': cleanReason,
+      'adminNote': '',
+      'updatedAt':
+          FieldValue.serverTimestamp(),
+      'rejectedAt':
+          FieldValue.serverTimestamp(),
+    });
+
+    await _createUserNotification(
+      userId: application.applicantUserId,
+      title: 'Hotel application rejected',
+      message: cleanReason,
+      type: 'hotel_application_rejected',
+      referenceId: applicationId,
+    );
+  }
+
+  // =========================================================
+  // ADMIN: APPROVE APPLICATION
+  // =========================================================
+
+  Future<String> adminApproveApplication({
+    required String applicationId,
+    required String adminId,
+  }) async {
+    final HotelPartnerApplication application =
+        await _requireApplication(
+      applicationId,
+    );
+
+    if (application.applicationStatus ==
+        'approved') {
+      if (application.hotelId.isNotEmpty) {
+        return application.hotelId;
+      }
+
+      throw StateError(
+        'Application is approved but hotel ID is missing.',
+      );
+    }
+
+    final DocumentReference<Map<String, dynamic>>
+        hotelRef = _firestore
+            .collection(hotelsCollection)
+            .doc();
+
+    final DocumentReference<Map<String, dynamic>>
+        applicationRef = _firestore
+            .collection(applicationsCollection)
+            .doc(applicationId);
+
+    final DocumentReference<Map<String, dynamic>>
+        roleRef = _firestore
+            .collection(userRolesCollection)
+            .doc(application.applicantUserId);
+
+    final WriteBatch batch =
+        _firestore.batch();
+
+    batch.set(
+      hotelRef,
+      {
+        'ownerUserId':
+            application.applicantUserId,
+        'partnerApplicationId':
+            applicationId,
+        'name': application.hotelName,
+        'location': application.location,
+        'address': application.address,
+        'latitude': application.latitude,
+        'longitude': application.longitude,
+        'category': application.category,
+        'description':
+            application.description,
+        'facilities':
+            application.facilities,
+        'phoneNumber':
+            application.hotelPhone,
+        'totalRooms':
+            application.totalRooms,
+        'pricePerNight':
+            application.minimumRoomPrice,
+        'checkInTime':
+            application.checkInTime,
+        'checkOutTime':
+            application.checkOutTime,
+        'imageUrl': application.imageUrls
+                .isNotEmpty
+            ? application.imageUrls.first
+            : '',
+        'imageUrls':
+            application.imageUrls,
+        'rating': 0.0,
+        'isFeatured': false,
+        'isActive': true,
+        'createdAt':
+            FieldValue.serverTimestamp(),
+        'updatedAt':
+            FieldValue.serverTimestamp(),
+      },
+    );
+
+    batch.update(
+      applicationRef,
+      {
+        'applicationStatus': 'approved',
+        'hotelId': hotelRef.id,
+        'adminId': adminId,
+        'adminNote': '',
+        'rejectionReason': '',
+        'approvedAt':
+            FieldValue.serverTimestamp(),
+        'updatedAt':
+            FieldValue.serverTimestamp(),
+      },
+    );
+
+    // Customer access remains enabled. Hotel Partner is an
+    // additional role, not a replacement for customer access.
+    batch.set(
+      roleRef,
+      {
+        'userId': application.applicantUserId,
+        'customer': true,
+        'hotelPartner': true,
+        'hotelIds':
+            FieldValue.arrayUnion([
+          hotelRef.id,
+        ]),
+        'updatedAt':
+            FieldValue.serverTimestamp(),
+      },
+      SetOptions(merge: true),
+    );
+
+    await batch.commit();
+
+    await _createUserNotification(
+      userId: application.applicantUserId,
+      title: 'Hotel application approved',
+      message:
+          'Your hotel has been approved. Hotel Partner Dashboard is now available.',
+      type: 'hotel_application_approved',
+      referenceId: applicationId,
+    );
+
+    return hotelRef.id;
+  }
+
+  // =========================================================
+  // ADMIN: SUSPEND / REACTIVATE PARTNER ROLE
+  // =========================================================
+  //
+  // Suspending the partner role does not disable the user's
+  // normal customer account.
+  //
+  // =========================================================
+
+  Future<void> adminSuspendPartner({
+    required String applicationId,
+    required String adminId,
+    required String reason,
+  }) async {
+    final String cleanReason = reason.trim();
+
+    if (cleanReason.isEmpty) {
+      throw ArgumentError(
+        'Suspension reason is required.',
+      );
+    }
+
+    final HotelPartnerApplication application =
+        await _requireApplication(
+      applicationId,
+    );
+
+    final WriteBatch batch =
+        _firestore.batch();
+
+    batch.update(
+      _firestore
+          .collection(applicationsCollection)
+          .doc(applicationId),
+      {
+        'applicationStatus': 'suspended',
+        'adminId': adminId,
+        'adminNote': cleanReason,
+        'updatedAt':
+            FieldValue.serverTimestamp(),
+      },
+    );
+
+    batch.set(
+      _firestore
+          .collection(userRolesCollection)
+          .doc(application.applicantUserId),
+      {
+        'customer': true,
+        'hotelPartner': false,
+        'updatedAt':
+            FieldValue.serverTimestamp(),
+      },
+      SetOptions(merge: true),
+    );
+
+    await batch.commit();
+
+    await _createUserNotification(
+      userId: application.applicantUserId,
+      title: 'Hotel Partner access suspended',
+      message: cleanReason,
+      type: 'hotel_partner_suspended',
+      referenceId: applicationId,
+    );
+  }
+
+  Future<void> adminReactivatePartner({
+    required String applicationId,
+    required String adminId,
+  }) async {
+    final HotelPartnerApplication application =
+        await _requireApplication(
+      applicationId,
+    );
+
+    final WriteBatch batch =
+        _firestore.batch();
+
+    batch.update(
+      _firestore
+          .collection(applicationsCollection)
+          .doc(applicationId),
+      {
+        'applicationStatus': 'approved',
+        'adminId': adminId,
+        'adminNote': '',
+        'updatedAt':
+            FieldValue.serverTimestamp(),
+      },
+    );
+
+    batch.set(
+      _firestore
+          .collection(userRolesCollection)
+          .doc(application.applicantUserId),
+      {
+        'customer': true,
+        'hotelPartner': true,
+        'updatedAt':
+            FieldValue.serverTimestamp(),
+      },
+      SetOptions(merge: true),
+    );
+
+    await batch.commit();
+
+    await _createUserNotification(
+      userId: application.applicantUserId,
+      title: 'Hotel Partner access restored',
+      message:
+          'Your Hotel Partner Dashboard access has been restored.',
+      type: 'hotel_partner_reactivated',
+      referenceId: applicationId,
+    );
+  }
+
+  // =========================================================
+  // APPLICATION DELETE
+  // =========================================================
+
+  Future<void> deleteDraftApplication({
+    required String applicationId,
+    required String userId,
+  }) async {
+    final HotelPartnerApplication application =
+        await _requireApplication(
+      applicationId,
+    );
+
+    if (application.applicantUserId != userId) {
+      throw StateError(
+        'You cannot delete another user application.',
+      );
+    }
+
+    if (application.applicationStatus !=
+        'draft') {
+      throw StateError(
+        'Only draft applications can be deleted.',
+      );
+    }
+
+    await _firestore
+        .collection(applicationsCollection)
+        .doc(applicationId)
+        .delete();
+  }
+
+  // =========================================================
+  // PRIVATE HELPERS
+  // =========================================================
+
+  Future<HotelPartnerApplication>
+      _requireApplication(
+    String applicationId,
+  ) async {
+    final HotelPartnerApplication? application =
+        await getApplicationById(
+      applicationId,
+    );
+
+    if (application == null) {
+      throw StateError(
+        'Hotel partner application not found.',
+      );
+    }
+
+    return application;
+  }
+
+  void _validateForSubmission(
+    HotelPartnerApplication application,
+  ) {
+    if (application.applicantUserId
+        .trim()
+        .isEmpty) {
+      throw ArgumentError(
+        'Applicant user ID is required.',
+      );
+    }
+
+    if (application.ownerName.trim().isEmpty) {
+      throw ArgumentError(
+        'Owner name is required.',
+      );
+    }
+
+    if (application.ownerPhone.trim().isEmpty) {
+      throw ArgumentError(
+        'Owner phone number is required.',
+      );
+    }
+
+    if (application.ownerCnic.trim().isEmpty) {
+      throw ArgumentError(
+        'Owner CNIC is required.',
+      );
+    }
+
+    if (application.hotelName.trim().isEmpty) {
+      throw ArgumentError(
+        'Hotel name is required.',
+      );
+    }
+
+    if (application.location.trim().isEmpty) {
+      throw ArgumentError(
+        'Hotel location is required.',
+      );
+    }
+
+    if (application.totalRooms <= 0) {
+      throw ArgumentError(
+        'Total rooms must be greater than zero.',
+      );
+    }
+
+    if (application.minimumRoomPrice < 0) {
+      throw ArgumentError(
+        'Room price cannot be negative.',
+      );
+    }
+  }
+
+  Future<void> _createUserNotification({
+    required String userId,
+    required String title,
+    required String message,
+    required String type,
+    required String referenceId,
+  }) async {
+    if (userId.trim().isEmpty) {
+      return;
+    }
+
+    await _firestore
+        .collection(notificationsCollection)
+        .add({
+      'userId': userId,
+      'title': title,
+      'message': message,
+      'type': type,
+      'referenceId': referenceId,
+      'isRead': false,
+      'createdAt':
+          FieldValue.serverTimestamp(),
+    });
+
+    // REAL PUSH NOTIFICATION CODE - KEEP FOR LATER
+    //
+    // Cloud Functions / FCM will send the push notification.
+    // Firestore in-app notification is already stored here.
+  }
+}
+

@@ -1,0 +1,55 @@
+import '../constants/agent_provider_quality_signal_constants.dart';
+import '../models/agent_provider_quality_signal.dart';
+import '../models/agent_provider_quality_sample_window.dart';
+
+class AgentProviderQualitySignalPolicy {
+  const AgentProviderQualitySignalPolicy();
+
+  AgentProviderQualitySampleWindow evaluateWindow(
+    AgentProviderQualitySignal signal,
+  ) {
+    signal.validateStructure();
+
+    return AgentProviderQualitySampleWindow(
+      sampleCount: signal.sampleCount,
+      ageHours: signal.ageHours,
+    );
+  }
+
+  bool trustedAndPrivacySafe(AgentProviderQualitySignal signal) {
+    try {
+      signal.validateStructure();
+    } catch (_) {
+      return false;
+    }
+
+    return signal.trustedObservation &&
+        signal.privacySafeMetadata &&
+        signal.capabilityEligible &&
+        signal.privacyEligible &&
+        !signal.hardSafetyViolation;
+  }
+
+  bool get trustedObservedMetadataRequired => true;
+  bool get privacySafeMetadataRequired => true;
+  bool get rawPromptForbidden => true;
+  bool get rawConversationForbidden => true;
+  bool get rawProviderResponseForbidden => true;
+  bool get privatePayloadForbidden => true;
+  bool get objectiveAndSubjectiveSignalsRemainSeparated => true;
+  bool get smallSampleStrongPreferenceForbidden => true;
+  bool get staleEvidenceStrongPreferenceForbidden => true;
+  bool get safetyViolationAlwaysQualityIneligible => true;
+
+  bool get providerInvocationImplementedHere => false;
+  bool get providerEnableDisableImplementedHere => false;
+  bool get budgetMutationImplementedHere => false;
+  bool get secretMutationImplementedHere => false;
+  bool get modelDeploymentImplementedHere => false;
+  bool get persistenceImplementedHere => false;
+
+  bool get grantsPermission => false;
+  bool get consumesApproval => false;
+  bool get expandsScope => false;
+  bool get executesBusinessAction => false;
+}

@@ -1,0 +1,397 @@
+{
+    "projectId":  "swat-ride-v2",
+    "rolloutStage":  "MONITOR_ONLY",
+    "freshTrustedLiveInventoryRead":  true,
+    "freshOwnerVerified":  true,
+    "ownerApprovalBound":  true,
+    "ownerApprovalId":  "offline-test-owner-approval",
+    "ownerApprovalBindingSha256":  "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "currentControlFingerprintSha256":  "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "oldGuardImmutable":  true,
+    "oldArmingTokenImmutable":  true,
+    "oldActivationReceiptImmutable":  true,
+    "existingActivationTokenReuseAllowed":  false,
+    "repositoryAttachAuthorized":  false,
+    "repositoryArmAuthorized":  false,
+    "firstIncidentWriteAuthorized":  false,
+    "authorizesSuggestOnly":  false,
+    "authorizesAuto":  false,
+    "expectedCurrentInventoryFingerprintSha256":  "5c01350e9eb34eaad664f48adb7e1986032984787c7f8722287e06a6e14517e7",
+    "expectedProposedInventoryFingerprintSha256":  "a03f13df007570871481e9e25d72e279692f6f40dd432cc02c76c9f2e867b898",
+    "currentRoles":  [
+                         {
+                             "roleId":  "existing_role_01",
+                             "module":  "module_01",
+                             "enabled":  true,
+                             "mode":  "MONITOR_ONLY",
+                             "allowedActions":  [
+                                                    "read"
+                                                ],
+                             "approvalRequiredActions":  [
+
+                                                         ],
+                             "forbiddenActions":  [
+
+                                                  ],
+                             "aiClass":  "FREE_AI",
+                             "privacyLevel":  "INTERNAL"
+                         },
+                         {
+                             "roleId":  "existing_role_02",
+                             "module":  "module_02",
+                             "enabled":  true,
+                             "mode":  "MONITOR_ONLY",
+                             "allowedActions":  [
+                                                    "read"
+                                                ],
+                             "approvalRequiredActions":  [
+
+                                                         ],
+                             "forbiddenActions":  [
+
+                                                  ],
+                             "aiClass":  "FREE_AI",
+                             "privacyLevel":  "INTERNAL"
+                         },
+                         {
+                             "roleId":  "existing_role_03",
+                             "module":  "module_03",
+                             "enabled":  true,
+                             "mode":  "MONITOR_ONLY",
+                             "allowedActions":  [
+                                                    "read"
+                                                ],
+                             "approvalRequiredActions":  [
+
+                                                         ],
+                             "forbiddenActions":  [
+
+                                                  ],
+                             "aiClass":  "FREE_AI",
+                             "privacyLevel":  "INTERNAL"
+                         },
+                         {
+                             "roleId":  "existing_role_04",
+                             "module":  "module_04",
+                             "enabled":  true,
+                             "mode":  "MONITOR_ONLY",
+                             "allowedActions":  [
+                                                    "read"
+                                                ],
+                             "approvalRequiredActions":  [
+
+                                                         ],
+                             "forbiddenActions":  [
+
+                                                  ],
+                             "aiClass":  "FREE_AI",
+                             "privacyLevel":  "INTERNAL"
+                         },
+                         {
+                             "roleId":  "existing_role_05",
+                             "module":  "module_05",
+                             "enabled":  true,
+                             "mode":  "MONITOR_ONLY",
+                             "allowedActions":  [
+                                                    "read"
+                                                ],
+                             "approvalRequiredActions":  [
+
+                                                         ],
+                             "forbiddenActions":  [
+
+                                                  ],
+                             "aiClass":  "FREE_AI",
+                             "privacyLevel":  "INTERNAL"
+                         },
+                         {
+                             "roleId":  "existing_role_06",
+                             "module":  "module_06",
+                             "enabled":  true,
+                             "mode":  "MONITOR_ONLY",
+                             "allowedActions":  [
+                                                    "read"
+                                                ],
+                             "approvalRequiredActions":  [
+
+                                                         ],
+                             "forbiddenActions":  [
+
+                                                  ],
+                             "aiClass":  "FREE_AI",
+                             "privacyLevel":  "INTERNAL"
+                         },
+                         {
+                             "roleId":  "existing_role_07",
+                             "module":  "module_07",
+                             "enabled":  true,
+                             "mode":  "MONITOR_ONLY",
+                             "allowedActions":  [
+                                                    "read"
+                                                ],
+                             "approvalRequiredActions":  [
+
+                                                         ],
+                             "forbiddenActions":  [
+
+                                                  ],
+                             "aiClass":  "FREE_AI",
+                             "privacyLevel":  "INTERNAL"
+                         },
+                         {
+                             "roleId":  "existing_role_08",
+                             "module":  "module_08",
+                             "enabled":  true,
+                             "mode":  "MONITOR_ONLY",
+                             "allowedActions":  [
+                                                    "read"
+                                                ],
+                             "approvalRequiredActions":  [
+
+                                                         ],
+                             "forbiddenActions":  [
+
+                                                  ],
+                             "aiClass":  "FREE_AI",
+                             "privacyLevel":  "INTERNAL"
+                         },
+                         {
+                             "roleId":  "existing_role_09",
+                             "module":  "module_09",
+                             "enabled":  true,
+                             "mode":  "MONITOR_ONLY",
+                             "allowedActions":  [
+                                                    "read"
+                                                ],
+                             "approvalRequiredActions":  [
+
+                                                         ],
+                             "forbiddenActions":  [
+
+                                                  ],
+                             "aiClass":  "FREE_AI",
+                             "privacyLevel":  "INTERNAL"
+                         },
+                         {
+                             "roleId":  "existing_role_10",
+                             "module":  "module_10",
+                             "enabled":  true,
+                             "mode":  "MONITOR_ONLY",
+                             "allowedActions":  [
+                                                    "read"
+                                                ],
+                             "approvalRequiredActions":  [
+
+                                                         ],
+                             "forbiddenActions":  [
+
+                                                  ],
+                             "aiClass":  "FREE_AI",
+                             "privacyLevel":  "INTERNAL"
+                         },
+                         {
+                             "roleId":  "existing_role_11",
+                             "module":  "module_11",
+                             "enabled":  true,
+                             "mode":  "MONITOR_ONLY",
+                             "allowedActions":  [
+                                                    "read"
+                                                ],
+                             "approvalRequiredActions":  [
+
+                                                         ],
+                             "forbiddenActions":  [
+
+                                                  ],
+                             "aiClass":  "FREE_AI",
+                             "privacyLevel":  "INTERNAL"
+                         },
+                         {
+                             "roleId":  "existing_role_12",
+                             "module":  "module_12",
+                             "enabled":  true,
+                             "mode":  "MONITOR_ONLY",
+                             "allowedActions":  [
+                                                    "read"
+                                                ],
+                             "approvalRequiredActions":  [
+
+                                                         ],
+                             "forbiddenActions":  [
+
+                                                  ],
+                             "aiClass":  "FREE_AI",
+                             "privacyLevel":  "INTERNAL"
+                         },
+                         {
+                             "roleId":  "existing_role_13",
+                             "module":  "module_13",
+                             "enabled":  true,
+                             "mode":  "MONITOR_ONLY",
+                             "allowedActions":  [
+                                                    "read"
+                                                ],
+                             "approvalRequiredActions":  [
+
+                                                         ],
+                             "forbiddenActions":  [
+
+                                                  ],
+                             "aiClass":  "FREE_AI",
+                             "privacyLevel":  "INTERNAL"
+                         },
+                         {
+                             "roleId":  "existing_role_14",
+                             "module":  "module_14",
+                             "enabled":  true,
+                             "mode":  "MONITOR_ONLY",
+                             "allowedActions":  [
+                                                    "read"
+                                                ],
+                             "approvalRequiredActions":  [
+
+                                                         ],
+                             "forbiddenActions":  [
+
+                                                  ],
+                             "aiClass":  "FREE_AI",
+                             "privacyLevel":  "INTERNAL"
+                         },
+                         {
+                             "roleId":  "existing_role_15",
+                             "module":  "module_15",
+                             "enabled":  true,
+                             "mode":  "MONITOR_ONLY",
+                             "allowedActions":  [
+                                                    "read"
+                                                ],
+                             "approvalRequiredActions":  [
+
+                                                         ],
+                             "forbiddenActions":  [
+
+                                                  ],
+                             "aiClass":  "FREE_AI",
+                             "privacyLevel":  "INTERNAL"
+                         },
+                         {
+                             "roleId":  "existing_role_16",
+                             "module":  "module_16",
+                             "enabled":  true,
+                             "mode":  "MONITOR_ONLY",
+                             "allowedActions":  [
+                                                    "read"
+                                                ],
+                             "approvalRequiredActions":  [
+
+                                                         ],
+                             "forbiddenActions":  [
+
+                                                  ],
+                             "aiClass":  "FREE_AI",
+                             "privacyLevel":  "INTERNAL"
+                         },
+                         {
+                             "roleId":  "existing_role_17",
+                             "module":  "module_17",
+                             "enabled":  true,
+                             "mode":  "MONITOR_ONLY",
+                             "allowedActions":  [
+                                                    "read"
+                                                ],
+                             "approvalRequiredActions":  [
+
+                                                         ],
+                             "forbiddenActions":  [
+
+                                                  ],
+                             "aiClass":  "FREE_AI",
+                             "privacyLevel":  "INTERNAL"
+                         },
+                         {
+                             "roleId":  "existing_role_18",
+                             "module":  "module_18",
+                             "enabled":  true,
+                             "mode":  "MONITOR_ONLY",
+                             "allowedActions":  [
+                                                    "read"
+                                                ],
+                             "approvalRequiredActions":  [
+
+                                                         ],
+                             "forbiddenActions":  [
+
+                                                  ],
+                             "aiClass":  "FREE_AI",
+                             "privacyLevel":  "INTERNAL"
+                         },
+                         {
+                             "roleId":  "existing_role_19",
+                             "module":  "module_19",
+                             "enabled":  true,
+                             "mode":  "MONITOR_ONLY",
+                             "allowedActions":  [
+                                                    "read"
+                                                ],
+                             "approvalRequiredActions":  [
+
+                                                         ],
+                             "forbiddenActions":  [
+
+                                                  ],
+                             "aiClass":  "FREE_AI",
+                             "privacyLevel":  "INTERNAL"
+                         },
+                         {
+                             "roleId":  "existing_role_20",
+                             "module":  "module_20",
+                             "enabled":  true,
+                             "mode":  "MONITOR_ONLY",
+                             "allowedActions":  [
+                                                    "read"
+                                                ],
+                             "approvalRequiredActions":  [
+
+                                                         ],
+                             "forbiddenActions":  [
+
+                                                  ],
+                             "aiClass":  "FREE_AI",
+                             "privacyLevel":  "INTERNAL"
+                         },
+                         {
+                             "roleId":  "existing_role_21",
+                             "module":  "module_21",
+                             "enabled":  true,
+                             "mode":  "MONITOR_ONLY",
+                             "allowedActions":  [
+                                                    "read"
+                                                ],
+                             "approvalRequiredActions":  [
+
+                                                         ],
+                             "forbiddenActions":  [
+
+                                                  ],
+                             "aiClass":  "FREE_AI",
+                             "privacyLevel":  "INTERNAL"
+                         },
+                         {
+                             "roleId":  "existing_role_22",
+                             "module":  "module_22",
+                             "enabled":  true,
+                             "mode":  "MONITOR_ONLY",
+                             "allowedActions":  [
+                                                    "read"
+                                                ],
+                             "approvalRequiredActions":  [
+
+                                                         ],
+                             "forbiddenActions":  [
+
+                                                  ],
+                             "aiClass":  "FREE_AI",
+                             "privacyLevel":  "INTERNAL"
+                         }
+                     ]
+}

@@ -1,0 +1,186 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
+
+import '../../help/models/help_video_tutorial_model.dart';
+
+class SuperAdminVideoTutorialService {
+  SuperAdminVideoTutorialService({FirebaseFirestore? firestore})
+    : _firestore = firestore ?? FirebaseFirestore.instance;
+
+  static const String collectionName = 'help_video_tutorials';
+
+  final FirebaseFirestore _firestore;
+
+  CollectionReference<Map<String, dynamic>> get _collection =>
+      _firestore.collection(collectionName);
+
+  Stream<List<HelpVideoTutorialModel>> watchTutorials() {
+    return _collection.snapshots().map((snapshot) {
+      final List<HelpVideoTutorialModel> tutorials = snapshot.docs
+          .map(
+            (document) => HelpVideoTutorialModel.fromMap(
+              id: document.id,
+              map: document.data(),
+            ),
+          )
+          .toList();
+
+      tutorials.sort((first, second) {
+        final int orderCompare = first.displayOrder.compareTo(
+          second.displayOrder,
+        );
+
+        if (orderCompare != 0) {
+          return orderCompare;
+        }
+
+        return first.title.toLowerCase().compareTo(second.title.toLowerCase());
+      });
+
+      return tutorials;
+    });
+  }
+
+  Future<void> createTutorial({
+    required String title,
+    required String description,
+    required String videoUrl,
+    required String category,
+    required int displayOrder,
+    required bool isEnabled,
+    required String adminId,
+  }) async {
+    final String normalizedAdminId = adminId.trim();
+
+    if (normalizedAdminId.isEmpty) {
+      throw ArgumentError('Super Admin ID is required.');
+    }
+
+    final Map<String, dynamic> data = _validatedData(
+      title: title,
+      description: description,
+      videoUrl: videoUrl,
+      category: category,
+      displayOrder: displayOrder,
+      isEnabled: isEnabled,
+    );
+
+    await _collection.add(<String, dynamic>{
+      ...data,
+      'createdAt': FieldValue.serverTimestamp(),
+      'createdBy': normalizedAdminId,
+      'updatedAt': FieldValue.serverTimestamp(),
+      'updatedBy': normalizedAdminId,
+    });
+  }
+
+  Future<void> updateTutorial({
+    required String tutorialId,
+    required String title,
+    required String description,
+    required String videoUrl,
+    required String category,
+    required int displayOrder,
+    required bool isEnabled,
+    required String adminId,
+  }) async {
+    final String normalizedId = tutorialId.trim();
+    final String normalizedAdminId = adminId.trim();
+
+    if (normalizedId.isEmpty) {
+      throw ArgumentError('Tutorial ID is required.');
+    }
+
+    if (normalizedAdminId.isEmpty) {
+      throw ArgumentError('Super Admin ID is required.');
+    }
+
+    final Map<String, dynamic> data = _validatedData(
+      title: title,
+      description: description,
+      videoUrl: videoUrl,
+      category: category,
+      displayOrder: displayOrder,
+      isEnabled: isEnabled,
+    );
+
+    await _collection.doc(normalizedId).update(<String, dynamic>{
+      ...data,
+      'updatedAt': FieldValue.serverTimestamp(),
+      'updatedBy': normalizedAdminId,
+    });
+  }
+
+  Future<void> setEnabled({
+    required String tutorialId,
+    required bool isEnabled,
+    required String adminId,
+  }) async {
+    final String normalizedId = tutorialId.trim();
+    final String normalizedAdminId = adminId.trim();
+
+    if (normalizedId.isEmpty) {
+      throw ArgumentError('Tutorial ID is required.');
+    }
+
+    if (normalizedAdminId.isEmpty) {
+      throw ArgumentError('Super Admin ID is required.');
+    }
+
+    await _collection.doc(normalizedId).update(<String, dynamic>{
+      'isEnabled': isEnabled,
+      'updatedAt': FieldValue.serverTimestamp(),
+      'updatedBy': normalizedAdminId,
+    });
+  }
+
+  Map<String, dynamic> _validatedData({
+    required String title,
+    required String description,
+    required String videoUrl,
+    required String category,
+    required int displayOrder,
+    required bool isEnabled,
+  }) {
+    final String normalizedTitle = title.trim();
+    final String normalizedDescription = description.trim();
+    final String normalizedVideoUrl = videoUrl.trim();
+    final String normalizedCategory = category.trim().isEmpty
+        ? 'general'
+        : category.trim();
+
+    if (normalizedTitle.isEmpty) {
+      throw ArgumentError('Tutorial title is required.');
+    }
+
+    if (!_isSafeVideoUrl(normalizedVideoUrl)) {
+      throw ArgumentError('A valid HTTPS video URL is required.');
+    }
+
+    if (displayOrder < 0) {
+      throw ArgumentError('Display order cannot be negative.');
+    }
+
+    return <String, dynamic>{
+      'title': normalizedTitle,
+      'description': normalizedDescription,
+      'videoUrl': normalizedVideoUrl,
+      'category': normalizedCategory,
+      'displayOrder': displayOrder,
+      'isEnabled': isEnabled,
+    };
+  }
+
+  bool _isSafeVideoUrl(String value) {
+    final Uri? uri = Uri.tryParse(value.trim());
+
+    if (uri == null) {
+      return false;
+    }
+
+    if (uri.scheme.toLowerCase() != 'https') {
+      return false;
+    }
+
+    return uri.host.trim().isNotEmpty;
+  }
+}

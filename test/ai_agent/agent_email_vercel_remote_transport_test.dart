@@ -1,0 +1,178 @@
+import 'package:flutter_test/flutter_test.dart';
+import 'package:swat_ride/ai_agent/models/agent_email_ephemeral_auth_token.dart';
+import 'package:swat_ride/ai_agent/models/agent_email_remote_transport_config.dart';
+import 'package:swat_ride/ai_agent/models/agent_email_remote_transport_request.dart';
+import 'package:swat_ride/ai_agent/models/agent_email_transport_handoff.dart';
+import 'package:swat_ride/ai_agent/services/agent_email_vercel_remote_transport.dart';
+
+void main() {
+  AgentEmailRemoteTransportConfig config({
+    bool enabled = false,
+    String endpointUrl = '',
+    String providerId = AgentEmailProviderId.brevo,
+  }) {
+    return AgentEmailRemoteTransportConfig(
+      providerId: providerId,
+      serverBoundaryId: AgentEmailServerBoundaryId.vercelServerless,
+      enabled: enabled,
+      endpointUrl: endpointUrl,
+      providerApiKeySecretName: 'BREVO_API_KEY',
+      firebaseAdminCredentialSecretName: 'FIREBASE_SERVICE_ACCOUNT_JSON',
+      requiresFirebaseIdToken: true,
+      requiresServerApprovalRecheck: true,
+      requiresVerifiedSenderIdentity: true,
+      credentialSource: AgentEmailCredentialSource.serverSensitiveEnvironment,
+      ownerConfigurable: true,
+    );
+  }
+
+  AgentEmailTransportHandoff handoff({
+    String providerId = AgentEmailProviderId.brevo,
+  }) {
+    return AgentEmailTransportHandoff(
+      handoffId: 'handoff_f3c',
+      authorizationRequestId: 'auth_f3c',
+      approvalId: 'approval_f3c',
+      draftId: 'draft_f3c',
+      bindingAlgorithm: 'CANONICAL_JSON_SHA256_BASE64URL_V2',
+      bindingFingerprint: 'synthetic_fingerprint',
+      senderIdentityId: 'sender_primary',
+      providerId: providerId,
+      fromAddress: 'support@swatride.example',
+      to: const <String>['customer@example.com'],
+      cc: const <String>[],
+      bcc: const <String>[],
+      subject: 'Verified update',
+      bodyText: 'Synthetic body.',
+      attachmentIds: const <String>[],
+      createdAt: DateTime.utc(2026, 8, 17, 7, 15),
+    );
+  }
+
+  const AgentEmailEphemeralAuthToken token = AgentEmailEphemeralAuthToken(
+    firebaseIdToken: 'synthetic.firebase.id.token',
+    issuedForUserId: 'owner_test',
+  );
+
+  test(
+    'ephemeral Firebase ID token redacts itself and is never persistable',
+    () {
+      token.validate();
+
+      expect(token.hasToken, isTrue);
+      expect(token.mayPersist, isFalse);
+      expect(token.mayLogValue, isFalse);
+      expect(token.mayExposeInSafeMap, isFalse);
+      expect(token.toString(), contains('[REDACTED]'));
+      expect(token.toString(), isNot(contains('synthetic.firebase.id.token')));
+
+      final Map<String, dynamic> safe = token.toSafeMetadata();
+
+      expect(safe['firebaseIdTokenPresent'], isTrue);
+      expect(safe['firebaseIdTokenValueIncluded'], isFalse);
+      expect(safe.values, isNot(contains('synthetic.firebase.id.token')));
+    },
+  );
+
+  test('disabled adapter cannot build authenticated request', () {
+    final AgentEmailVercelRemoteTransport transport =
+        AgentEmailVercelRemoteTransport(config: config(enabled: false));
+
+    expect(
+      () => transport.buildRequest(handoff: handoff(), authToken: token),
+      throwsA(isA<AgentEmailVercelRemoteTransportException>()),
+    );
+
+    expect(transport.enabled, isFalse);
+    expect(transport.liveSendCapable, isFalse);
+    expect(transport.httpExecutionAvailable, isFalse);
+    expect(transport.directProviderExecutionAvailable, isFalse);
+  });
+
+  test('enabled contract can build pure authenticated request envelope', () {
+    final AgentEmailVercelRemoteTransport transport =
+        AgentEmailVercelRemoteTransport(
+          config: config(
+            enabled: true,
+            endpointUrl: 'https://example.vercel.app/api/email/send',
+          ),
+        );
+
+    final AgentEmailRemoteTransportRequest request = transport.buildRequest(
+      handoff: handoff(),
+      authToken: token,
+      createdAt: DateTime.utc(2026, 8, 17, 7, 20),
+    );
+
+    expect(request.requiresAuthorizationHeader, isTrue);
+    expect(request.containsProviderApiKey, isFalse);
+    expect(request.containsFirebaseAdminCredential, isFalse);
+    expect(request.networkExecutionPerformed, isFalse);
+    expect(request.mayPersistAuthToken, isFalse);
+    expect(request.mayLogAuthToken, isFalse);
+
+    final Map<String, dynamic> safe = request.toSafeMetadata();
+
+    expect(safe['authTokenValueIncluded'], isFalse);
+    expect(safe['providerApiKeyIncluded'], isFalse);
+    expect(safe['firebaseAdminCredentialIncluded'], isFalse);
+    expect(safe.toString(), isNot(contains('synthetic.firebase.id.token')));
+
+    final Map<String, String> headers = request.buildEphemeralHeaders();
+
+    expect(headers['Authorization'], 'Bearer synthetic.firebase.id.token');
+    expect(headers['X-Swat-Ride-Approval-Id'], 'approval_f3c');
+  });
+
+  test('provider mismatch fails closed before request envelope', () {
+    final AgentEmailVercelRemoteTransport transport =
+        AgentEmailVercelRemoteTransport(
+          config: config(
+            enabled: true,
+            endpointUrl: 'https://example.vercel.app/api/email/send',
+          ),
+        );
+
+    expect(
+      () => transport.buildRequest(
+        handoff: handoff(providerId: AgentEmailProviderId.resend),
+        authToken: token,
+      ),
+      throwsA(isA<AgentEmailVercelRemoteTransportException>()),
+    );
+  });
+
+  test('deliver never performs HTTP even when config is enabled', () async {
+    final AgentEmailVercelRemoteTransport transport =
+        AgentEmailVercelRemoteTransport(
+          config: config(
+            enabled: true,
+            endpointUrl: 'https://example.vercel.app/api/email/send',
+          ),
+        );
+
+    final receipt = await transport.deliver(handoff());
+
+    expect(transport.liveSendCapable, isFalse);
+    expect(transport.httpExecutionAvailable, isFalse);
+    expect(transport.providerSecretAvailableToFlutter, isFalse);
+    expect(transport.firebaseAdminCredentialAvailableToFlutter, isFalse);
+    expect(receipt.attempted, isFalse);
+    expect(receipt.acceptedOrDelivered, isFalse);
+  });
+
+  test('invalid non-HTTPS endpoint fails through config validation', () {
+    final AgentEmailVercelRemoteTransport transport =
+        AgentEmailVercelRemoteTransport(
+          config: config(
+            enabled: true,
+            endpointUrl: 'http://example.com/api/email/send',
+          ),
+        );
+
+    expect(
+      () => transport.buildRequest(handoff: handoff(), authToken: token),
+      throwsA(anything),
+    );
+  });
+}

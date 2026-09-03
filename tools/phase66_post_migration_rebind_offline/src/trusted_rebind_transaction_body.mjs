@@ -1,0 +1,2470 @@
+
+
+
+import {
+
+
+
+  POST_MIGRATION_REBIND_CONTRACT as C,
+
+
+
+  POST_MIGRATION_REBIND_DEFAULTS,
+
+
+
+  POST_MIGRATION_REBIND_WRITE_ORDER,
+
+
+
+} from './rebind_contract.mjs';
+
+
+
+
+
+
+
+function fail(code) {
+
+
+
+  throw new Error(code);
+
+
+
+}
+
+
+
+
+
+
+
+function lower(value) {
+
+
+
+  return String(value ?? '').trim().toLowerCase();
+
+
+
+}
+
+
+
+
+
+
+
+function text(value) {
+
+
+
+  return String(value ?? '').trim();
+
+
+
+}
+
+
+
+
+
+
+
+function isSha256(value) {
+
+
+
+  return /^[a-f0-9]{64}$/.test(lower(value));
+
+
+
+}
+
+
+
+
+
+
+
+function canonical(value) {
+
+
+
+  if (Array.isArray(value)) {
+
+
+
+    return value.map(canonical);
+
+
+
+  }
+
+
+
+
+
+
+
+  if (value && typeof value === 'object') {
+
+
+
+    return Object.fromEntries(
+
+
+
+      Object.keys(value)
+
+
+
+        .sort()
+
+
+
+        .map((key) => [key, canonical(value[key])]),
+
+
+
+    );
+
+
+
+  }
+
+
+
+
+
+
+
+  return value;
+
+
+
+}
+
+
+
+
+
+
+
+function exactObjectEqual(left, right) {
+
+
+
+  return JSON.stringify(canonical(left)) === JSON.stringify(canonical(right));
+
+
+
+}
+
+
+
+
+
+
+
+function snapshotData(snapshot, label) {
+
+
+
+  if (!snapshot || snapshot.exists !== true) {
+
+
+
+    fail(`${label}_missing`);
+
+
+
+  }
+
+
+
+
+
+
+
+  const value = snapshot.data?.();
+
+
+
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+
+
+
+    fail(`${label}_data_invalid`);
+
+
+
+  }
+
+
+
+
+
+
+
+  return value;
+
+
+
+}
+
+
+
+
+
+
+
+function timestampMillis(value, label) {
+
+
+
+  if (value && typeof value.toMillis === 'function') {
+
+
+
+    const millis = value.toMillis();
+
+
+
+    if (Number.isFinite(millis)) return millis;
+
+
+
+  }
+
+
+
+
+
+
+
+  if (value instanceof Date) {
+
+
+
+    const millis = value.getTime();
+
+
+
+    if (Number.isFinite(millis)) return millis;
+
+
+
+  }
+
+
+
+
+
+
+
+  if (Number.isFinite(value)) return Number(value);
+
+
+
+
+
+
+
+  fail(`${label}_timestamp_invalid`);
+
+
+
+}
+
+
+
+
+
+
+
+function refId(ref, label) {
+
+
+
+  const id = text(ref?.id);
+
+
+
+  if (!id) fail(`${label}_reference_id_missing`);
+
+
+
+  return id;
+
+
+
+}
+
+
+
+
+
+
+
+function expectedApprovalScope(request) {
+
+
+
+  return {
+
+
+
+    operation: C.operation,
+
+
+
+    postMigrationSnapshotSha256: C.lockedPostMigrationSnapshotSha256,
+
+
+
+    roleInventoryFingerprintSha256:
+
+
+
+      C.lockedRoleInventoryFingerprintSha256,
+
+
+
+    postMigrationControlStateFingerprintSha256:
+
+      lower(request.postMigrationControlStateFingerprintSha256),
+
+    rebindPlanFingerprintSha256:
+
+      lower(request.rebindPlanFingerprintSha256),
+
+    roleCount: C.targetRoleCount,
+
+
+
+    currentAuthorityManifestRevision: C.currentAuthorityManifestRevision,
+
+
+
+    targetAuthorityManifestRevision: C.targetAuthorityManifestRevision,
+
+
+
+    currentGuardRevision: C.currentGuardRevision,
+
+
+
+    targetGuardRevision: C.targetGuardRevision,
+
+
+
+    targetRoleId: C.targetRoleId,
+
+
+
+    targetModule: C.targetModule,
+
+
+
+    targetActionId: C.targetActionId,
+
+
+
+    requestedRolloutStage: C.rolloutStage,
+
+
+
+    migrationApprovalId: request.migrationApprovalId,
+
+
+
+    freshOwnerVerifiedAtApproval: true,
+
+
+
+    explicitOwnerApproval: true,
+
+
+
+    selfApprovalAllowed: false,
+
+
+
+    migrationApprovalReuseAllowed: false,
+
+
+
+    oldArmingTokenReuseAllowed: false,
+
+
+
+    roleEnableAuthorized: false,
+
+
+
+    migrationHoldReleaseAuthorized: false,
+
+
+
+    repositoryAttachAuthorized: false,
+
+
+
+    repositoryArmAuthorized: false,
+
+
+
+    firstIncidentWriteAuthorized: false,
+
+
+
+    authorizesSuggestOnly: false,
+
+
+
+    authorizesAuto: false,
+
+
+
+  };
+
+
+
+}
+
+
+
+
+
+
+
+function validateRequest(request) {
+
+
+
+  if (!request || typeof request !== 'object') fail('rebind_request_missing');
+
+
+
+
+
+
+
+  for (const [name, value] of Object.entries({
+
+
+
+    requesterReferenceSha256: request.requesterReferenceSha256,
+
+
+
+    ownerApproverReferenceSha256: request.ownerApproverReferenceSha256,
+
+
+
+    postMigrationControlStateFingerprintSha256:
+
+
+
+      request.postMigrationControlStateFingerprintSha256,
+
+
+
+    rebindPlanFingerprintSha256: request.rebindPlanFingerprintSha256,
+
+
+
+    freshTokenIdSha256: request.freshTokenIdSha256,
+
+
+
+    receiptIdSha256: request.receiptIdSha256,
+
+
+
+  })) {
+
+
+
+    if (!isSha256(value)) fail(`${name}_invalid`);
+
+
+
+  }
+
+
+
+
+
+
+
+  if (
+
+
+
+    lower(request.requesterReferenceSha256) ===
+
+
+
+    lower(request.ownerApproverReferenceSha256)
+
+
+
+  ) {
+
+
+
+    fail('requester_owner_self_approval_forbidden');
+
+
+
+  }
+
+
+
+
+
+
+
+  if (!text(request.approvalId) || !text(request.migrationApprovalId)) {
+
+
+
+    fail('approval_identifier_missing');
+
+
+
+  }
+
+
+
+
+
+
+
+  if (request.approvalId === request.migrationApprovalId) {
+
+
+
+    fail('migration_approval_reuse_forbidden');
+
+
+
+  }
+
+
+
+
+
+
+
+  if (!Number.isInteger(request.nowMs)) fail('now_ms_invalid');
+
+
+
+
+
+
+
+  const issuedAtMs = timestampMillis(request.issuedAt, 'fresh_token_issued_at');
+
+
+
+  const expiresAtMs = timestampMillis(request.expiresAt, 'fresh_token_expires_at');
+
+
+
+
+
+
+
+  if (
+
+
+
+    issuedAtMs > request.nowMs ||
+
+
+
+    expiresAtMs <= request.nowMs ||
+
+
+
+    expiresAtMs <= issuedAtMs ||
+
+
+
+    expiresAtMs - issuedAtMs > C.maxFreshTokenValidityMs
+
+
+
+  ) {
+
+
+
+    fail('fresh_token_ttl_invalid');
+
+
+
+  }
+
+
+
+
+
+
+
+  validateNewGuard(request.newGuard, request);
+
+
+
+}
+
+
+
+
+
+
+
+function validateNewGuard(guard, request) {
+
+
+
+  if (!guard || typeof guard !== 'object') fail('new_guard_missing');
+
+
+
+
+
+
+
+  const exact =
+
+
+
+    guard.enabled === true &&
+
+
+
+    guard.guardVersion === C.guardVersion &&
+
+
+
+    guard.revision === C.targetGuardRevision &&
+
+
+
+    guard.targetStage === C.rolloutStage &&
+
+
+
+    guard.runtimeMonitorOnlyOverlayEnforced === true &&
+
+
+
+    guard.noAutoBusinessWriteBoundaryEnforced === true &&
+
+
+
+    guard.appChatOnly === true &&
+
+
+
+    guard.autoTrafficPercent === 0 &&
+
+
+
+    guard.businessWriteTrafficPercent === 0 &&
+
+
+
+    guard.externalChannelsEnabled === false &&
+
+
+
+    lower(guard.controlStateFingerprintSha256) ===
+
+
+
+      lower(request.postMigrationControlStateFingerprintSha256) &&
+
+
+
+    lower(guard.planFingerprintSha256) ===
+
+
+
+      lower(request.rebindPlanFingerprintSha256) &&
+
+
+
+    guard.roleCount === C.targetRoleCount &&
+
+
+
+    guard.ownerApprovalId === request.approvalId &&
+
+
+
+    lower(guard.actorReferenceSha256) ===
+
+
+
+      lower(request.ownerApproverReferenceSha256);
+
+
+
+
+
+
+
+  if (!exact) fail('new_guard_not_exact_post_migration_monitor_only');
+
+
+
+}
+
+
+
+
+
+
+
+function validateApproval(approval, request) {
+
+
+
+  const nowMs = request.nowMs;
+
+
+
+  const createdAtMs = timestampMillis(approval.createdAt, 'approval_created_at');
+
+
+
+  const expiresAtMs = timestampMillis(approval.expiresAt, 'approval_expires_at');
+
+
+
+  const decidedAtMs = timestampMillis(approval.decidedAt, 'approval_decided_at');
+
+
+
+
+
+
+
+  if (
+
+
+
+    approval.status !== 'APPROVED' ||
+
+
+
+    approval.approvalId !== request.approvalId ||
+
+
+
+    approval.roleId !== C.targetRoleId ||
+
+
+
+    approval.actionId !== C.targetActionId ||
+
+
+
+    approval.module !== C.targetModule ||
+
+
+
+    approval.consumedAt != null ||
+
+
+
+    approval.requestedBy !==
+
+
+
+      `phase66_rebind_coordinator_sha256:${lower(request.requesterReferenceSha256)}` ||
+
+
+
+    approval.decidedBy !==
+
+
+
+      `phase66_owner_sha256:${lower(request.ownerApproverReferenceSha256)}` ||
+
+
+
+    !exactObjectEqual(approval.actionScope, expectedApprovalScope(request)) ||
+
+
+
+    createdAtMs > decidedAtMs ||
+
+
+
+    decidedAtMs > nowMs ||
+
+
+
+    expiresAtMs <= nowMs ||
+
+
+
+    expiresAtMs - createdAtMs > C.maxApprovalValidityMs ||
+
+
+
+    expiresAtMs - nowMs < C.minimumApprovalRemainingMs
+
+
+
+  ) {
+
+
+
+    fail('rebind_owner_approval_not_exact_fresh_unconsumed');
+
+
+
+  }
+
+
+
+}
+
+
+
+
+
+
+
+function validateHistoricalEvidence({
+
+
+
+  migrationApproval,
+
+
+
+  manifest,
+
+
+
+  hold,
+
+
+
+  master,
+
+
+
+  rollout,
+
+
+
+  guard,
+
+
+
+  role,
+
+
+
+  oldActivation,
+
+
+
+  oldToken,
+
+
+
+  request,
+
+
+
+  refs,
+
+
+
+}) {
+
+
+
+  if (
+
+
+
+    migrationApproval.approvalId !== request.migrationApprovalId ||
+
+
+
+    migrationApproval.status !== 'CONSUMED' ||
+
+
+
+    migrationApproval.consumedAt == null ||
+
+
+
+    migrationApproval.actionScope?.operation !== C.migrationOperation
+
+
+
+  ) {
+
+
+
+    fail('consumed_migration_approval_historical_evidence_invalid');
+
+
+
+  }
+
+
+
+
+
+
+
+  if (
+
+
+
+    manifest.status !== 'ACTIVE' ||
+
+
+
+    manifest.inventoryVersion !== C.inventoryVersion ||
+
+
+
+    manifest.roleCount !== C.targetRoleCount ||
+
+
+
+    lower(manifest.roleProjectionFingerprintSha256) !==
+
+
+
+      C.lockedRoleInventoryFingerprintSha256 ||
+
+
+
+    manifest.revision !== C.currentAuthorityManifestRevision ||
+
+
+
+    manifest.postMigrationRebindRequired !== true
+
+
+
+  ) {
+
+
+
+    fail('authority_manifest_not_exact_pre_rebind_state');
+
+
+
+  }
+
+
+
+
+
+
+
+  if (
+
+
+
+    hold.status !== 'ROLE_DELTA_COMMITTED' ||
+
+
+
+    hold.migrationHoldActive !== true ||
+
+
+
+    hold.committedRoleCount !== C.targetRoleCount ||
+
+
+
+    lower(hold.committedInventoryFingerprintSha256) !==
+
+
+
+      C.lockedRoleInventoryFingerprintSha256 ||
+
+
+
+    hold.authorityManifestRevision !== C.currentAuthorityManifestRevision ||
+
+
+
+    hold.postMigrationRebindRequired !== true ||
+
+
+
+    hold.repositoryAttachAuthorized !== false ||
+
+
+
+    hold.repositoryArmAuthorized !== false ||
+
+
+
+    hold.firstIncidentWriteAuthorized !== false ||
+
+
+
+    hold.authorizesSuggestOnly !== false ||
+
+
+
+    hold.authorizesAuto !== false
+
+
+
+  ) {
+
+
+
+    fail('migration_hold_not_exact_fail_closed_pre_rebind_state');
+
+
+
+  }
+
+
+
+
+
+
+
+  const exactMaster =
+
+
+
+    master.masterEnabled === true &&
+
+
+
+    master.emergencyReadOnly === false &&
+
+
+
+    master.freeAiEnabled === true &&
+
+
+
+    master.localAiEnabled === false &&
+
+
+
+    master.paidCodeAiEnabled === false &&
+
+
+
+    master.paidReasoningEnabled === false &&
+
+
+
+    master.callAgentEnabled === false &&
+
+
+
+    master.emailAgentEnabled === false &&
+
+
+
+    master.customerWhatsAppAgentEnabled === false &&
+
+
+
+    master.ownerWhatsAppAgentEnabled === false &&
+
+
+
+    master.emergencyWhatsAppAgentEnabled === false &&
+
+    master.voiceSuperAdminAgentEnabled === false &&
+
+
+
+    master.approvalEngineEnabled === true &&
+
+
+
+    master.auditLoggingEnabled === true &&
+
+
+
+    master.askBeforePaid === true;
+
+
+
+
+
+
+
+  if (!exactMaster) fail('master_not_exact_monitor_only_target');
+
+
+
+
+
+
+
+  if (
+
+
+
+    rollout.stage !== C.rolloutStage ||
+
+
+
+    rollout.appChatOnly !== true ||
+
+
+
+    rollout.providerClass !== 'FREE_AI_ONLY' ||
+
+
+
+    rollout.autoTrafficPercent !== 0 ||
+
+
+
+    rollout.businessWriteTrafficPercent !== 0 ||
+
+
+
+    rollout.externalChannelsEnabled !== false
+
+
+
+  ) {
+
+
+
+    fail('rollout_not_exact_monitor_only_pre_rebind_state');
+
+
+
+  }
+
+
+
+
+
+
+
+  if (
+
+
+
+    guard.enabled !== true ||
+
+
+
+    guard.guardVersion !== C.guardVersion ||
+
+
+
+    guard.revision !== C.currentGuardRevision ||
+
+
+
+    guard.targetStage !== C.rolloutStage ||
+
+
+
+    guard.runtimeMonitorOnlyOverlayEnforced !== true ||
+
+
+
+    guard.noAutoBusinessWriteBoundaryEnforced !== true ||
+
+
+
+    guard.appChatOnly !== true ||
+
+
+
+    guard.autoTrafficPercent !== 0 ||
+
+
+
+    guard.businessWriteTrafficPercent !== 0 ||
+
+
+
+    guard.externalChannelsEnabled !== false ||
+
+
+
+    guard.roleCount !== C.currentGuardRoleCount ||
+
+
+
+    !isSha256(guard.controlStateFingerprintSha256) ||
+
+
+
+    !isSha256(guard.planFingerprintSha256) ||
+
+
+
+    !isSha256(guard.actorReferenceSha256) ||
+
+
+
+    !text(guard.ownerApprovalId)
+
+
+
+  ) {
+
+
+
+    fail('historical_guard_not_exact_revision2_rolecount22_monitor_only');
+
+
+
+  }
+
+
+
+
+
+
+
+  const exactRole =
+
+
+
+    role.roleId === C.targetRoleId &&
+
+
+
+    role.module === C.targetModule &&
+
+
+
+    role.enabled === false &&
+
+
+
+    role.mode === 'ASK_FIRST' &&
+
+
+
+    exactObjectEqual(role.allowedActions, [C.targetActionId]) &&
+
+
+
+    exactObjectEqual(role.approvalRequiredActions, [C.targetActionId]) &&
+
+
+
+    exactObjectEqual(role.forbiddenActions, []) &&
+
+
+
+    role.aiClass === 'FREE_AI' &&
+
+
+
+    role.privacyLevel === 'HIGHLY_SENSITIVE';
+
+
+
+
+
+
+
+  if (!exactRole) fail('security_incident_role_not_exact_disabled_ask_first');
+
+
+
+
+
+
+
+  if (
+
+
+
+    oldActivation.status !== 'APPLIED' ||
+
+
+
+    oldActivation.targetStage !== C.rolloutStage ||
+
+
+
+    oldActivation.armingTokenConsumed !== true ||
+
+
+
+    oldActivation.guardRevision !== C.currentGuardRevision ||
+
+
+
+    oldToken.status !== 'CONSUMED' ||
+
+
+
+    oldToken.consumedAt == null ||
+
+
+
+    oldToken.targetStage !== C.rolloutStage ||
+
+
+
+    oldToken.guardRevision !== C.currentGuardRevision ||
+
+
+
+    oldToken.roleCount !== C.currentGuardRoleCount
+
+
+
+  ) {
+
+
+
+    fail('historical_activation_token_state_invalid');
+
+
+
+  }
+
+
+
+
+
+
+
+  if (
+
+
+
+    refId(refs.oldActivation, 'old_activation') !== text(rollout.activationId) ||
+
+
+
+    refId(refs.oldToken, 'old_token') !== lower(oldActivation.armingTokenIdSha256) ||
+
+
+
+    lower(oldToken.tokenIdSha256) !== lower(oldActivation.armingTokenIdSha256) ||
+
+
+
+    oldActivation.guardRevision !== guard.revision ||
+
+
+
+    oldToken.guardRevision !== guard.revision ||
+
+
+
+    lower(oldActivation.sourceControlStateFingerprintSha256) !==
+
+
+
+      lower(guard.controlStateFingerprintSha256) ||
+
+
+
+    lower(oldToken.controlStateFingerprintSha256) !==
+
+
+
+      lower(guard.controlStateFingerprintSha256) ||
+
+
+
+    lower(oldActivation.planFingerprintSha256) !==
+
+
+
+      lower(guard.planFingerprintSha256) ||
+
+
+
+    lower(oldToken.planFingerprintSha256) !== lower(guard.planFingerprintSha256) ||
+
+
+
+    lower(oldActivation.actorReferenceSha256) !==
+
+
+
+      lower(guard.actorReferenceSha256) ||
+
+
+
+    lower(oldToken.actorReferenceSha256) !== lower(guard.actorReferenceSha256) ||
+
+
+
+    oldActivation.ownerApprovalId !== guard.ownerApprovalId ||
+
+
+
+    oldToken.ownerApprovalId !== guard.ownerApprovalId
+
+
+
+  ) {
+
+
+
+    fail('historical_guard_token_receipt_binding_mismatch');
+
+
+
+  }
+
+
+
+}
+
+
+
+
+
+
+
+function validateReferenceIds(refs, request) {
+
+
+
+  const exact =
+
+
+
+    refId(refs.approval, 'approval') === request.approvalId &&
+
+
+
+    refId(refs.migrationApproval, 'migration_approval') ===
+
+
+
+      request.migrationApprovalId &&
+
+
+
+    refId(refs.manifest, 'manifest') ===
+
+
+
+      'security_incident_role_inventory_authority_manifest' &&
+
+
+
+    refId(refs.hold, 'hold') ===
+
+
+
+      'security_incident_role_inventory_migration_hold' &&
+
+
+
+    refId(refs.guard, 'guard') === 'production_rollout_guard' &&
+
+
+
+    refId(refs.rollout, 'rollout') === 'production_rollout' &&
+
+
+
+    refId(refs.master, 'master') === 'master' &&
+
+
+
+    refId(refs.role, 'role') === C.targetRoleId &&
+
+
+
+    refId(refs.freshToken, 'fresh_token') === lower(request.freshTokenIdSha256) &&
+
+
+
+    refId(refs.receipt, 'receipt') === lower(request.receiptIdSha256);
+
+
+
+
+
+
+
+  if (!exact) fail('trusted_rebind_reference_binding_mismatch');
+
+
+
+}
+
+
+
+
+
+
+
+function buildTokenPayload(request, serverTimestamp) {
+
+
+
+  return {
+
+
+
+    tokenIdSha256: lower(request.freshTokenIdSha256),
+
+
+
+    status: 'READY',
+
+
+
+    targetStage: C.rolloutStage,
+
+
+
+    actorReferenceSha256: lower(request.ownerApproverReferenceSha256),
+
+
+
+    ownerApprovalId: request.approvalId,
+
+
+
+    planFingerprintSha256: lower(request.rebindPlanFingerprintSha256),
+
+
+
+    controlStateFingerprintSha256:
+
+
+
+      lower(request.postMigrationControlStateFingerprintSha256),
+
+
+
+    guardRevision: C.targetGuardRevision,
+
+
+
+    guardVersion: C.guardVersion,
+
+
+
+    roleCount: C.targetRoleCount,
+
+
+
+    issuedAt: request.issuedAt,
+
+
+
+    expiresAt: request.expiresAt,
+
+
+
+    consumedAt: null,
+
+
+
+    createdAt: serverTimestamp(),
+
+
+
+  };
+
+
+
+}
+
+
+
+
+
+
+
+function buildReceiptPayload(request, serverTimestamp) {
+
+
+
+  return {
+
+
+
+    receiptIdSha256: lower(request.receiptIdSha256),
+
+
+
+    ownerApprovalId: request.approvalId,
+
+
+
+    postMigrationSnapshotSha256: C.lockedPostMigrationSnapshotSha256,
+
+
+
+    roleInventoryFingerprintSha256: C.lockedRoleInventoryFingerprintSha256,
+
+
+
+    roleCount: C.targetRoleCount,
+
+
+
+    authorityManifestRevision: C.targetAuthorityManifestRevision,
+
+
+
+    guardRevision: C.targetGuardRevision,
+
+
+
+    freshArmingTokenIdSha256: lower(request.freshTokenIdSha256),
+
+
+
+    rolloutStage: C.rolloutStage,
+
+
+
+    migrationHoldStillActive: true,
+
+
+
+    securityIncidentRoleStillDisabled: true,
+
+
+
+    repositoryAttachAuthorized: false,
+
+
+
+    repositoryArmAuthorized: false,
+
+
+
+    firstIncidentWriteAuthorized: false,
+
+
+
+    authorizesSuggestOnly: false,
+
+
+
+    authorizesAuto: false,
+
+
+
+    createdAt: serverTimestamp(),
+
+
+
+  };
+
+
+
+}
+
+
+
+
+
+
+
+function buildAuditPayload(request, serverTimestamp) {
+
+
+
+  return {
+
+
+
+    eventType: 'SYSTEM_EVENT',
+
+
+
+    severity: 'WARNING',
+
+
+
+    actorType: 'ADMIN',
+
+
+
+    actorId: lower(request.ownerApproverReferenceSha256),
+
+
+
+    roleId: C.targetRoleId,
+
+
+
+    module: 'ai_core',
+
+
+
+    actionId: 'ai.production_rollout.security_incident.post_migration_rebind',
+
+
+
+    result: 'POST_MIGRATION_REBIND_APPLIED',
+
+
+
+    reason:
+
+
+
+      'Owner-bound post-migration authority manifest and production guard rebound to exact 23-role inventory under active migration hold.',
+
+
+
+    relatedApprovalId: request.approvalId,
+
+
+
+    scope: {
+
+
+
+      roleCount: C.targetRoleCount,
+
+
+
+      authorityManifestRevision: C.targetAuthorityManifestRevision,
+
+
+
+      guardRevision: C.targetGuardRevision,
+
+
+
+      rolloutStage: C.rolloutStage,
+
+
+
+      roleEnabled: false,
+
+
+
+      migrationHoldActive: true,
+
+
+
+    },
+
+
+
+    metadata: {
+
+
+
+      postMigrationSnapshotSha256: C.lockedPostMigrationSnapshotSha256,
+
+
+
+      roleInventoryFingerprintSha256: C.lockedRoleInventoryFingerprintSha256,
+
+
+
+      freshArmingTokenIdSha256: lower(request.freshTokenIdSha256),
+
+
+
+      rebindReceiptIdSha256: lower(request.receiptIdSha256),
+
+
+
+      rawTokenPersisted: false,
+
+
+
+      oldTokenReused: false,
+
+
+
+      securityBypass: false,
+
+
+
+      duplicateAlternateAuthority: false,
+
+
+
+      authorizesSuggestOnly: false,
+
+
+
+      authorizesAuto: false,
+
+
+
+    },
+
+
+
+    createdAt: serverTimestamp(),
+
+
+
+  };
+
+
+
+}
+
+
+
+
+
+
+
+export async function executePostMigrationRebindInCallerTransaction({
+
+
+
+  tx,
+
+
+
+  refs,
+
+
+
+  request,
+
+
+
+  serverTimestamp,
+
+
+
+  executionArmed = POST_MIGRATION_REBIND_DEFAULTS.executionArmed,
+
+
+
+  trustedCallerIntegrated =
+
+
+
+    POST_MIGRATION_REBIND_DEFAULTS.trustedCallerIntegrated,
+
+
+
+}) {
+
+
+
+  if (!executionArmed || !trustedCallerIntegrated) {
+
+
+
+    fail('post_migration_rebind_executor_not_explicitly_armed_and_integrated');
+
+
+
+  }
+
+
+
+
+
+
+
+  if (!tx || typeof tx.get !== 'function') fail('transaction_missing');
+
+
+
+  if (!refs || typeof refs !== 'object') fail('reference_bundle_missing');
+
+
+
+  if (typeof serverTimestamp !== 'function') fail('server_timestamp_factory_missing');
+
+
+
+
+
+
+
+  validateRequest(request);
+
+
+
+  validateReferenceIds(refs, request);
+
+
+
+
+
+
+
+  // ALL READS MUST COMPLETE BEFORE WRITE 1.
+
+
+
+  const approvalSnapshot = await tx.get(refs.approval);
+
+
+
+  const migrationApprovalSnapshot = await tx.get(refs.migrationApproval);
+
+
+
+  const manifestSnapshot = await tx.get(refs.manifest);
+
+
+
+  const holdSnapshot = await tx.get(refs.hold);
+
+
+
+  const masterSnapshot = await tx.get(refs.master);
+
+
+
+  const rolloutSnapshot = await tx.get(refs.rollout);
+
+
+
+  const guardSnapshot = await tx.get(refs.guard);
+
+
+
+  const roleSnapshot = await tx.get(refs.role);
+
+
+
+  const oldActivationSnapshot = await tx.get(refs.oldActivation);
+
+
+
+  const oldTokenSnapshot = await tx.get(refs.oldToken);
+
+
+
+  const freshTokenSnapshot = await tx.get(refs.freshToken);
+
+
+
+  const receiptSnapshot = await tx.get(refs.receipt);
+
+
+
+
+
+
+
+  const approval = snapshotData(approvalSnapshot, 'rebind_approval');
+
+
+
+  const migrationApproval = snapshotData(
+
+
+
+    migrationApprovalSnapshot,
+
+
+
+    'migration_approval',
+
+
+
+  );
+
+
+
+  const manifest = snapshotData(manifestSnapshot, 'authority_manifest');
+
+
+
+  const hold = snapshotData(holdSnapshot, 'migration_hold');
+
+
+
+  const master = snapshotData(masterSnapshot, 'master');
+
+
+
+  const rollout = snapshotData(rolloutSnapshot, 'rollout');
+
+
+
+  const guard = snapshotData(guardSnapshot, 'guard');
+
+
+
+  const role = snapshotData(roleSnapshot, 'security_incident_role');
+
+
+
+  const oldActivation = snapshotData(oldActivationSnapshot, 'old_activation');
+
+
+
+  const oldToken = snapshotData(oldTokenSnapshot, 'old_token');
+
+
+
+
+
+
+
+  if (freshTokenSnapshot?.exists === true) fail('fresh_token_sha_collision');
+
+
+
+  if (receiptSnapshot?.exists === true) fail('rebind_receipt_sha_collision');
+
+
+
+
+
+
+
+  validateApproval(approval, request);
+
+
+
+  validateHistoricalEvidence({
+
+
+
+    migrationApproval,
+
+
+
+    manifest,
+
+
+
+    hold,
+
+
+
+    master,
+
+
+
+    rollout,
+
+
+
+    guard,
+
+
+
+    role,
+
+
+
+    oldActivation,
+
+
+
+    oldToken,
+
+
+
+    request,
+
+
+
+    refs,
+
+
+
+  });
+
+
+
+
+
+
+
+  const manifestReplacement = {
+
+
+
+    ...manifest,
+
+
+
+    status: 'ACTIVE',
+
+
+
+    inventoryVersion: C.inventoryVersion,
+
+
+
+    roleCount: C.targetRoleCount,
+
+
+
+    roleProjectionFingerprintSha256:
+
+
+
+      C.lockedRoleInventoryFingerprintSha256,
+
+
+
+    revision: C.targetAuthorityManifestRevision,
+
+
+
+    postMigrationRebindRequired: false,
+
+
+
+    lastMutation: 'SECURITY_INCIDENT_POST_MIGRATION_REBIND',
+
+
+
+    lastRebindApprovalId: request.approvalId,
+
+
+
+    lastRebindReceiptIdSha256: lower(request.receiptIdSha256),
+
+
+
+    updatedAt: serverTimestamp(),
+
+
+
+  };
+
+
+
+
+
+
+
+  const guardPatch = {
+
+
+
+    ...request.newGuard,
+
+
+
+    controlStateFingerprintSha256:
+
+
+
+      lower(request.newGuard.controlStateFingerprintSha256),
+
+
+
+    planFingerprintSha256: lower(request.newGuard.planFingerprintSha256),
+
+
+
+    actorReferenceSha256: lower(request.newGuard.actorReferenceSha256),
+
+
+
+    updatedAt: serverTimestamp(),
+
+
+
+  };
+
+
+
+
+
+
+
+  const tokenPayload = buildTokenPayload(request, serverTimestamp);
+
+
+
+  const receiptPayload = buildReceiptPayload(request, serverTimestamp);
+
+
+
+  const auditPayload = buildAuditPayload(request, serverTimestamp);
+
+
+
+
+
+
+
+  // WRITE 1: consume the exact fresh rebind Owner approval.
+
+
+
+  tx.update(refs.approval, {
+
+
+
+    status: 'CONSUMED',
+
+
+
+    consumedAt: serverTimestamp(),
+
+
+
+  });
+
+
+
+
+
+
+
+  // WRITE 2: replace authority manifest with revision 3 / exact 23-role rebind.
+
+
+
+  tx.set(refs.manifest, manifestReplacement, { merge: false });
+
+
+
+
+
+
+
+  // WRITE 3: revision 2 -> 3 guard rebind, MONITOR_ONLY and roleCount 23.
+
+
+
+  tx.set(refs.guard, guardPatch, { merge: true });
+
+
+
+
+
+
+
+  // WRITE 4: fresh one-time post-migration token, SHA only, READY/unconsumed.
+
+
+
+  tx.create(refs.freshToken, tokenPayload);
+
+
+
+
+
+
+
+  // WRITE 5: immutable dedicated post-migration rebind receipt.
+
+
+
+  tx.create(refs.receipt, receiptPayload);
+
+
+
+
+
+
+
+  // WRITE 6: immutable audit in the same caller-owned transaction.
+
+
+
+  tx.create(refs.audit, auditPayload);
+
+
+
+
+
+
+
+  return {
+
+
+
+    status: 'POST_MIGRATION_REBIND_APPLIED_FAIL_CLOSED',
+
+
+
+    writeOrder: POST_MIGRATION_REBIND_WRITE_ORDER,
+
+
+
+    approvalConsumed: true,
+
+
+
+    authorityManifestRevision: C.targetAuthorityManifestRevision,
+
+
+
+    guardRevision: C.targetGuardRevision,
+
+
+
+    roleCount: C.targetRoleCount,
+
+
+
+    freshTokenStatus: 'READY',
+
+
+
+    receiptCreated: true,
+
+
+
+    roleEnabled: false,
+
+
+
+    migrationHoldActive: true,
+
+
+
+    migrationHoldReleased: false,
+
+
+
+    repositoryAttached: false,
+
+
+
+    repositoryArmed: false,
+
+
+
+    incidentWritten: false,
+
+
+
+    authorizesSuggestOnly: false,
+
+
+
+    authorizesAuto: false,
+
+
+
+  };
+
+
+
+}
+
+
+
+
+
+
+
+export const POST_MIGRATION_REBIND_TRANSACTION_BODY_CONTRACT = Object.freeze({
+
+
+
+  exactWriteSurfaceCount: 6,
+
+
+
+  allReadsBeforeFirstWriteRequired: true,
+
+
+
+  ownsFirestoreTransaction: false,
+
+
+
+  initializesFirebaseAdmin: false,
+
+
+
+  initializesFirestore: false,
+
+
+
+  defaultExecutionArmed: false,
+
+
+
+  defaultTrustedCallerIntegrated: false,
+
+
+
+  rawTokenAccepted: false,
+
+
+
+  rawTokenPersisted: false,
+
+
+
+  oldTokenReuseAllowed: false,
+
+
+
+  writesMigrationHold: false,
+
+
+
+  writesSecurityIncidentRole: false,
+
+
+
+  roleEnableAuthorized: false,
+
+
+
+  migrationHoldReleaseAuthorized: false,
+
+
+
+  repositoryAttachAuthorized: false,
+
+
+
+  repositoryArmAuthorized: false,
+
+
+
+  firstIncidentWriteAuthorized: false,
+
+
+
+  securityBypassAllowed: false,
+
+
+
+  duplicateAlternateAuthorityAllowed: false,
+
+
+
+  suggestOnlyAuthorized: false,
+
+
+
+  autoAuthorized: false,
+
+
+
+});

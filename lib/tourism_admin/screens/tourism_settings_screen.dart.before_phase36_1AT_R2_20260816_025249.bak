@@ -1,0 +1,1559 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:flutter/material.dart';
+
+class TourismSettingsScreen extends StatefulWidget {
+  const TourismSettingsScreen({
+    super.key,
+  });
+
+  @override
+  State<TourismSettingsScreen> createState() =>
+      _TourismSettingsScreenState();
+}
+
+class _TourismSettingsScreenState
+    extends State<TourismSettingsScreen> {
+  static const Color yellow = Color(0xFFFFD60A);
+  static const Color darkCard = Color(0xFF1A1A1A);
+  static const Color darkBackground = Color(0xFF0D0D0D);
+
+  final FirebaseFirestore _firestore =
+      FirebaseFirestore.instance;
+
+  bool _isSaving = false;
+
+  DocumentReference<Map<String, dynamic>>
+      get _settingsReference =>
+          _firestore
+              .collection('tourism_settings')
+              .doc('global');
+
+  bool bookingEnabled = true;
+  bool instantBookingEnabled = false;
+  bool manualApprovalRequired = true;
+  int maximumAdvanceBookingDays = 180;
+  int minimumAdvanceBookingHours = 6;
+
+  int freeCancellationHours = 24;
+  double cancellationChargePercent = 20;
+  double refundPercent = 80;
+  bool noShowChargeEnabled = true;
+
+  double defaultCommissionPercent = 10;
+  double seasonalMultiplier = 1;
+  double weekendMultiplier = 1;
+  double holidayMultiplier = 1;
+  double minimumBookingPrice = 0;
+
+  bool driverAutoAssign = false;
+  int maximumDailyToursPerDriver = 2;
+  double minimumDriverRating = 3.5;
+
+  bool guideAutoAssign = false;
+  bool featuredGuideEnabled = true;
+  double minimumGuideRating = 3.5;
+  bool guideLanguageMatchingEnabled = true;
+
+  bool featuredPackagesEnabled = true;
+  bool hideFullyBookedPackages = false;
+  bool waitingListEnabled = true;
+  int minimumGroupSize = 1;
+  int maximumGroupSize = 20;
+
+  bool reviewsEnabled = true;
+  bool hideLowRatings = false;
+  bool autoApproveReviews = false;
+
+  bool customerNotificationsEnabled = true;
+  bool driverNotificationsEnabled = true;
+  bool guideNotificationsEnabled = true;
+  bool pushNotificationsEnabled = true;
+  bool emailNotificationsEnabled = false;
+  bool smsNotificationsEnabled = false;
+
+  bool promoCodesEnabled = true;
+  bool loyaltyEnabled = false;
+  bool referralEnabled = false;
+  bool cashbackEnabled = false;
+
+  bool sosEnabled = true;
+  bool liveTrackingEnabled = false;
+  String emergencyContact = '';
+
+  bool aiRecommendationsEnabled = true;
+  bool aiPackageRankingEnabled = true;
+  bool aiDestinationRankingEnabled = true;
+
+  bool cashEnabled = true;
+  bool walletEnabled = false;
+  bool jazzCashEnabled = false;
+  bool easypaisaEnabled = false;
+  bool testingPaymentBypassEnabled = true;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: darkBackground,
+      appBar: AppBar(
+        backgroundColor: darkBackground,
+        elevation: 0,
+        iconTheme: const IconThemeData(
+          color: Colors.white,
+        ),
+        title: const Text(
+          'Tourism Settings',
+          style: TextStyle(
+            color: Colors.white,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+        actions: [
+          IconButton(
+            onPressed:
+                _isSaving ? null : _saveSettings,
+            icon: _isSaving
+                ? const SizedBox(
+                    width: 20,
+                    height: 20,
+                    child:
+                        CircularProgressIndicator(
+                      color: yellow,
+                      strokeWidth: 2,
+                    ),
+                  )
+                : const Icon(
+                    Icons.save_outlined,
+                    color: yellow,
+                  ),
+          ),
+        ],
+      ),
+      body: SafeArea(
+        child: StreamBuilder<
+            DocumentSnapshot<Map<String, dynamic>>>(
+          stream: _settingsReference.snapshots(),
+          builder: (
+            context,
+            AsyncSnapshot<
+                    DocumentSnapshot<
+                        Map<String, dynamic>>>
+                snapshot,
+          ) {
+            if (snapshot.hasData &&
+                snapshot.data!.exists) {
+              _loadSettings(
+                snapshot.data!.data()!,
+              );
+            }
+
+            return ListView(
+              padding:
+                  const EdgeInsets.fromLTRB(
+                16,
+                16,
+                16,
+                30,
+              ),
+              children: [
+                _headerCard(),
+                const SizedBox(height: 16),
+                _section(
+                  title: 'Booking Settings',
+                  icon:
+                      Icons.book_online_outlined,
+                  children: [
+                    _switchTile(
+                      title: 'Tour Booking',
+                      subtitle:
+                          'Enable or disable new tour bookings',
+                      value: bookingEnabled,
+                      onChanged: (value) {
+                        setState(() {
+                          bookingEnabled = value;
+                        });
+                      },
+                    ),
+                    _switchTile(
+                      title: 'Instant Booking',
+                      subtitle:
+                          'Allow booking without admin review',
+                      value:
+                          instantBookingEnabled,
+                      onChanged: (value) {
+                        setState(() {
+                          instantBookingEnabled =
+                              value;
+                        });
+                      },
+                    ),
+                    _switchTile(
+                      title: 'Manual Approval',
+                      subtitle:
+                          'Admin must approve every booking',
+                      value:
+                          manualApprovalRequired,
+                      onChanged: (value) {
+                        setState(() {
+                          manualApprovalRequired =
+                              value;
+                        });
+                      },
+                    ),
+                    _numberTile(
+                      title:
+                          'Maximum Advance Booking Days',
+                      value:
+                          maximumAdvanceBookingDays,
+                      onChanged: (value) {
+                        setState(() {
+                          maximumAdvanceBookingDays =
+                              value;
+                        });
+                      },
+                    ),
+                    _numberTile(
+                      title:
+                          'Minimum Advance Booking Hours',
+                      value:
+                          minimumAdvanceBookingHours,
+                      onChanged: (value) {
+                        setState(() {
+                          minimumAdvanceBookingHours =
+                              value;
+                        });
+                      },
+                    ),
+                  ],
+                ),
+                _section(
+                  title:
+                      'Cancellation & Refund',
+                  icon:
+                      Icons.cancel_outlined,
+                  children: [
+                    _numberTile(
+                      title:
+                          'Free Cancellation Hours',
+                      value:
+                          freeCancellationHours,
+                      onChanged: (value) {
+                        setState(() {
+                          freeCancellationHours =
+                              value;
+                        });
+                      },
+                    ),
+                    _decimalTile(
+                      title:
+                          'Cancellation Charge %',
+                      value:
+                          cancellationChargePercent,
+                      onChanged: (value) {
+                        setState(() {
+                          cancellationChargePercent =
+                              value;
+                        });
+                      },
+                    ),
+                    _decimalTile(
+                      title: 'Refund Percentage',
+                      value: refundPercent,
+                      onChanged: (value) {
+                        setState(() {
+                          refundPercent = value;
+                        });
+                      },
+                    ),
+                    _switchTile(
+                      title: 'No-show Charge',
+                      subtitle:
+                          'Charge customer for confirmed no-show',
+                      value:
+                          noShowChargeEnabled,
+                      onChanged: (value) {
+                        setState(() {
+                          noShowChargeEnabled =
+                              value;
+                        });
+                      },
+                    ),
+                  ],
+                ),
+                _section(
+                  title: 'Pricing',
+                  icon:
+                      Icons.payments_outlined,
+                  children: [
+                    _decimalTile(
+                      title:
+                          'Default Commission %',
+                      value:
+                          defaultCommissionPercent,
+                      onChanged: (value) {
+                        setState(() {
+                          defaultCommissionPercent =
+                              value;
+                        });
+                      },
+                    ),
+                    _decimalTile(
+                      title:
+                          'Seasonal Multiplier',
+                      value:
+                          seasonalMultiplier,
+                      onChanged: (value) {
+                        setState(() {
+                          seasonalMultiplier =
+                              value;
+                        });
+                      },
+                    ),
+                    _decimalTile(
+                      title:
+                          'Weekend Multiplier',
+                      value:
+                          weekendMultiplier,
+                      onChanged: (value) {
+                        setState(() {
+                          weekendMultiplier =
+                              value;
+                        });
+                      },
+                    ),
+                    _decimalTile(
+                      title:
+                          'Holiday Multiplier',
+                      value:
+                          holidayMultiplier,
+                      onChanged: (value) {
+                        setState(() {
+                          holidayMultiplier =
+                              value;
+                        });
+                      },
+                    ),
+                    _decimalTile(
+                      title:
+                          'Minimum Booking Price',
+                      value:
+                          minimumBookingPrice,
+                      onChanged: (value) {
+                        setState(() {
+                          minimumBookingPrice =
+                              value;
+                        });
+                      },
+                    ),
+                  ],
+                ),
+                _section(
+                  title: 'Driver Settings',
+                  icon:
+                      Icons.airport_shuttle_outlined,
+                  children: [
+                    _switchTile(
+                      title:
+                          'Auto-assign Driver',
+                      subtitle:
+                          'Assign an approved available driver automatically',
+                      value:
+                          driverAutoAssign,
+                      onChanged: (value) {
+                        setState(() {
+                          driverAutoAssign =
+                              value;
+                        });
+                      },
+                    ),
+                    _numberTile(
+                      title:
+                          'Maximum Daily Tours per Driver',
+                      value:
+                          maximumDailyToursPerDriver,
+                      onChanged: (value) {
+                        setState(() {
+                          maximumDailyToursPerDriver =
+                              value;
+                        });
+                      },
+                    ),
+                    _decimalTile(
+                      title:
+                          'Minimum Driver Rating',
+                      value:
+                          minimumDriverRating,
+                      onChanged: (value) {
+                        setState(() {
+                          minimumDriverRating =
+                              value;
+                        });
+                      },
+                    ),
+                  ],
+                ),
+                _section(
+                  title: 'Guide Settings',
+                  icon:
+                      Icons.person_pin_circle_outlined,
+                  children: [
+                    _switchTile(
+                      title:
+                          'Auto-assign Guide',
+                      subtitle:
+                          'Assign an approved guide automatically',
+                      value:
+                          guideAutoAssign,
+                      onChanged: (value) {
+                        setState(() {
+                          guideAutoAssign =
+                              value;
+                        });
+                      },
+                    ),
+                    _switchTile(
+                      title:
+                          'Featured Guides',
+                      subtitle:
+                          'Show featured guide recommendations',
+                      value:
+                          featuredGuideEnabled,
+                      onChanged: (value) {
+                        setState(() {
+                          featuredGuideEnabled =
+                              value;
+                        });
+                      },
+                    ),
+                    _decimalTile(
+                      title:
+                          'Minimum Guide Rating',
+                      value:
+                          minimumGuideRating,
+                      onChanged: (value) {
+                        setState(() {
+                          minimumGuideRating =
+                              value;
+                        });
+                      },
+                    ),
+                    _switchTile(
+                      title:
+                          'Language Matching',
+                      subtitle:
+                          'Match guide language with customer preference',
+                      value:
+                          guideLanguageMatchingEnabled,
+                      onChanged: (value) {
+                        setState(() {
+                          guideLanguageMatchingEnabled =
+                              value;
+                        });
+                      },
+                    ),
+                  ],
+                ),
+                _section(
+                  title: 'Package Settings',
+                  icon:
+                      Icons.card_travel_outlined,
+                  children: [
+                    _switchTile(
+                      title:
+                          'Featured Packages',
+                      subtitle:
+                          'Allow featured package section',
+                      value:
+                          featuredPackagesEnabled,
+                      onChanged: (value) {
+                        setState(() {
+                          featuredPackagesEnabled =
+                              value;
+                        });
+                      },
+                    ),
+                    _switchTile(
+                      title:
+                          'Hide Fully Booked',
+                      subtitle:
+                          'Hide packages with no available seats',
+                      value:
+                          hideFullyBookedPackages,
+                      onChanged: (value) {
+                        setState(() {
+                          hideFullyBookedPackages =
+                              value;
+                        });
+                      },
+                    ),
+                    _switchTile(
+                      title: 'Waiting List',
+                      subtitle:
+                          'Allow waiting list for full packages',
+                      value:
+                          waitingListEnabled,
+                      onChanged: (value) {
+                        setState(() {
+                          waitingListEnabled =
+                              value;
+                        });
+                      },
+                    ),
+                    _numberTile(
+                      title:
+                          'Minimum Group Size',
+                      value:
+                          minimumGroupSize,
+                      onChanged: (value) {
+                        setState(() {
+                          minimumGroupSize =
+                              value;
+                        });
+                      },
+                    ),
+                    _numberTile(
+                      title:
+                          'Maximum Group Size',
+                      value:
+                          maximumGroupSize,
+                      onChanged: (value) {
+                        setState(() {
+                          maximumGroupSize =
+                              value;
+                        });
+                      },
+                    ),
+                  ],
+                ),
+                _section(
+                  title: 'Reviews',
+                  icon:
+                      Icons.reviews_outlined,
+                  children: [
+                    _switchTile(
+                      title: 'Enable Reviews',
+                      subtitle:
+                          'Allow tourists to submit reviews',
+                      value: reviewsEnabled,
+                      onChanged: (value) {
+                        setState(() {
+                          reviewsEnabled = value;
+                        });
+                      },
+                    ),
+                    _switchTile(
+                      title: 'Hide Low Ratings',
+                      subtitle:
+                          'Hide low-rated content from public lists',
+                      value: hideLowRatings,
+                      onChanged: (value) {
+                        setState(() {
+                          hideLowRatings = value;
+                        });
+                      },
+                    ),
+                    _switchTile(
+                      title:
+                          'Auto-approve Reviews',
+                      subtitle:
+                          'Publish reviews without admin approval',
+                      value:
+                          autoApproveReviews,
+                      onChanged: (value) {
+                        setState(() {
+                          autoApproveReviews =
+                              value;
+                        });
+                      },
+                    ),
+                  ],
+                ),
+                _section(
+                  title: 'Notifications',
+                  icon:
+                      Icons.notifications_active_outlined,
+                  children: [
+                    _switchTile(
+                      title:
+                          'Customer Notifications',
+                      subtitle:
+                          'Booking and tour status alerts',
+                      value:
+                          customerNotificationsEnabled,
+                      onChanged: (value) {
+                        setState(() {
+                          customerNotificationsEnabled =
+                              value;
+                        });
+                      },
+                    ),
+                    _switchTile(
+                      title:
+                          'Driver Notifications',
+                      subtitle:
+                          'Tour assignment and schedule alerts',
+                      value:
+                          driverNotificationsEnabled,
+                      onChanged: (value) {
+                        setState(() {
+                          driverNotificationsEnabled =
+                              value;
+                        });
+                      },
+                    ),
+                    _switchTile(
+                      title:
+                          'Guide Notifications',
+                      subtitle:
+                          'Guide assignment and schedule alerts',
+                      value:
+                          guideNotificationsEnabled,
+                      onChanged: (value) {
+                        setState(() {
+                          guideNotificationsEnabled =
+                              value;
+                        });
+                      },
+                    ),
+                    _switchTile(
+                      title:
+                          'Push Notifications',
+                      subtitle:
+                          'Firebase push notifications',
+                      value:
+                          pushNotificationsEnabled,
+                      onChanged: (value) {
+                        setState(() {
+                          pushNotificationsEnabled =
+                              value;
+                        });
+                      },
+                    ),
+                    _switchTile(
+                      title:
+                          'Email Notifications',
+                      subtitle:
+                          'Email provider required later',
+                      value:
+                          emailNotificationsEnabled,
+                      onChanged: (value) {
+                        setState(() {
+                          emailNotificationsEnabled =
+                              value;
+                        });
+                      },
+                    ),
+                    _switchTile(
+                      title:
+                          'SMS Notifications',
+                      subtitle:
+                          'SMS provider required later',
+                      value:
+                          smsNotificationsEnabled,
+                      onChanged: (value) {
+                        setState(() {
+                          smsNotificationsEnabled =
+                              value;
+                        });
+                      },
+                    ),
+                  ],
+                ),
+                _section(
+                  title: 'Promotions',
+                  icon:
+                      Icons.local_offer_outlined,
+                  children: [
+                    _switchTile(
+                      title: 'Promo Codes',
+                      subtitle:
+                          'Enable tourism promo codes',
+                      value:
+                          promoCodesEnabled,
+                      onChanged: (value) {
+                        setState(() {
+                          promoCodesEnabled =
+                              value;
+                        });
+                      },
+                    ),
+                    _switchTile(
+                      title: 'Loyalty',
+                      subtitle:
+                          'Use global SWAT RIDE loyalty system',
+                      value:
+                          loyaltyEnabled,
+                      onChanged: (value) {
+                        setState(() {
+                          loyaltyEnabled = value;
+                        });
+                      },
+                    ),
+                    _switchTile(
+                      title: 'Referral',
+                      subtitle:
+                          'Use global referral rewards',
+                      value:
+                          referralEnabled,
+                      onChanged: (value) {
+                        setState(() {
+                          referralEnabled = value;
+                        });
+                      },
+                    ),
+                    _switchTile(
+                      title: 'Cashback',
+                      subtitle:
+                          'Admin-controlled cashback campaigns',
+                      value:
+                          cashbackEnabled,
+                      onChanged: (value) {
+                        setState(() {
+                          cashbackEnabled = value;
+                        });
+                      },
+                    ),
+                  ],
+                ),
+                _section(
+                  title: 'Safety',
+                  icon:
+                      Icons.health_and_safety_outlined,
+                  children: [
+                    _switchTile(
+                      title: 'SOS',
+                      subtitle:
+                          'Use shared SWAT RIDE SOS system',
+                      value: sosEnabled,
+                      onChanged: (value) {
+                        setState(() {
+                          sosEnabled = value;
+                        });
+                      },
+                    ),
+                    _switchTile(
+                      title: 'Live Tracking',
+                      subtitle:
+                          'Paid maps functionality remains disabled for now',
+                      value:
+                          liveTrackingEnabled,
+                      onChanged: (value) {
+                        setState(() {
+                          liveTrackingEnabled =
+                              value;
+                        });
+                      },
+                    ),
+                    _textTile(
+                      title:
+                          'Emergency Contact',
+                      value:
+                          emergencyContact,
+                      onChanged: (value) {
+                        setState(() {
+                          emergencyContact =
+                              value;
+                        });
+                      },
+                    ),
+                  ],
+                ),
+                _section(
+                  title: 'AI Controls',
+                  icon:
+                      Icons.auto_awesome_outlined,
+                  children: [
+                    _switchTile(
+                      title:
+                          'AI Recommendations',
+                      subtitle:
+                          'Allow AI agent to recommend tours',
+                      value:
+                          aiRecommendationsEnabled,
+                      onChanged: (value) {
+                        setState(() {
+                          aiRecommendationsEnabled =
+                              value;
+                        });
+                      },
+                    ),
+                    _switchTile(
+                      title:
+                          'AI Package Ranking',
+                      subtitle:
+                          'Rank packages using admin-approved AI scores',
+                      value:
+                          aiPackageRankingEnabled,
+                      onChanged: (value) {
+                        setState(() {
+                          aiPackageRankingEnabled =
+                              value;
+                        });
+                      },
+                    ),
+                    _switchTile(
+                      title:
+                          'AI Destination Ranking',
+                      subtitle:
+                          'Rank destinations using admin-approved AI scores',
+                      value:
+                          aiDestinationRankingEnabled,
+                      onChanged: (value) {
+                        setState(() {
+                          aiDestinationRankingEnabled =
+                              value;
+                        });
+                      },
+                    ),
+                  ],
+                ),
+                _section(
+                  title: 'Payment Methods',
+                  icon:
+                      Icons.account_balance_wallet_outlined,
+                  children: [
+                    _switchTile(
+                      title: 'Cash',
+                      subtitle:
+                          'Cash payment for testing and production',
+                      value: cashEnabled,
+                      onChanged: (value) {
+                        setState(() {
+                          cashEnabled = value;
+                        });
+                      },
+                    ),
+                    _switchTile(
+                      title: 'Wallet',
+                      subtitle:
+                          'Keep OFF until real wallet settlement is ready',
+                      value: walletEnabled,
+                      onChanged: (value) {
+                        setState(() {
+                          walletEnabled = value;
+                        });
+                      },
+                    ),
+                    _switchTile(
+                      title: 'JazzCash',
+                      subtitle:
+                          'Keep OFF until live merchant API is ready',
+                      value:
+                          jazzCashEnabled,
+                      onChanged: (value) {
+                        setState(() {
+                          jazzCashEnabled = value;
+                        });
+                      },
+                    ),
+                    _switchTile(
+                      title: 'Easypaisa',
+                      subtitle:
+                          'Keep OFF until live merchant API is ready',
+                      value:
+                          easypaisaEnabled,
+                      onChanged: (value) {
+                        setState(() {
+                          easypaisaEnabled = value;
+                        });
+                      },
+                    ),
+                    _switchTile(
+                      title:
+                          'Testing Payment Bypass',
+                      subtitle:
+                          'No real payment is charged',
+                      value:
+                          testingPaymentBypassEnabled,
+                      onChanged: (value) {
+                        setState(() {
+                          testingPaymentBypassEnabled =
+                              value;
+                        });
+                      },
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                _billingNotice(),
+                const SizedBox(height: 18),
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton.icon(
+                    onPressed:
+                        _isSaving
+                            ? null
+                            : _saveSettings,
+                    icon: const Icon(
+                      Icons.save_outlined,
+                    ),
+                    label: Text(
+                      _isSaving
+                          ? 'Saving...'
+                          : 'Save Tourism Settings',
+                    ),
+                    style:
+                        ElevatedButton.styleFrom(
+                      backgroundColor:
+                          yellow,
+                      foregroundColor:
+                          Colors.black,
+                      padding:
+                          const EdgeInsets
+                              .symmetric(
+                        vertical: 15,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            );
+          },
+        ),
+      ),
+    );
+  }
+
+  Widget _headerCard() {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: darkCard,
+        borderRadius:
+            BorderRadius.circular(18),
+        border: Border.all(
+          color: yellow.withValues(
+            alpha: 0.22,
+          ),
+        ),
+      ),
+      child: const Row(
+        children: [
+          Icon(
+            Icons.settings_suggest_outlined,
+            color: yellow,
+            size: 34,
+          ),
+          SizedBox(width: 12),
+          Expanded(
+            child: Text(
+              'All Tourism features can be controlled without publishing an app update.',
+              style: TextStyle(
+                color: Colors.grey,
+                height: 1.4,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _section({
+    required String title,
+    required IconData icon,
+    required List<Widget> children,
+  }) {
+    return Container(
+      margin:
+          const EdgeInsets.only(
+        bottom: 14,
+      ),
+      padding: const EdgeInsets.all(15),
+      decoration: BoxDecoration(
+        color: darkCard,
+        borderRadius:
+            BorderRadius.circular(17),
+      ),
+      child: Column(
+        children: [
+          Row(
+            children: [
+              Icon(
+                icon,
+                color: yellow,
+              ),
+              const SizedBox(width: 9),
+              Expanded(
+                child: Text(
+                  title,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 17,
+                    fontWeight:
+                        FontWeight.bold,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          ...children,
+        ],
+      ),
+    );
+  }
+
+  Widget _switchTile({
+    required String title,
+    required String subtitle,
+    required bool value,
+    required ValueChanged<bool>
+        onChanged,
+  }) {
+    return SwitchListTile(
+      contentPadding: EdgeInsets.zero,
+      title: Text(
+        title,
+        style: const TextStyle(
+          color: Colors.white,
+          fontSize: 13,
+          fontWeight: FontWeight.bold,
+        ),
+      ),
+      subtitle: Text(
+        subtitle,
+        style: const TextStyle(
+          color: Colors.grey,
+          fontSize: 10,
+        ),
+      ),
+      value: value,
+      activeThumbColor: yellow,
+      onChanged: onChanged,
+    );
+  }
+
+  Widget _numberTile({
+    required String title,
+    required int value,
+    required ValueChanged<int>
+        onChanged,
+  }) {
+    return ListTile(
+      contentPadding: EdgeInsets.zero,
+      title: Text(
+        title,
+        style: const TextStyle(
+          color: Colors.white,
+          fontSize: 13,
+        ),
+      ),
+      trailing: SizedBox(
+        width: 110,
+        child: TextFormField(
+          initialValue: '$value',
+          keyboardType:
+              TextInputType.number,
+          textAlign: TextAlign.right,
+          style: const TextStyle(
+            color: Colors.white,
+          ),
+          onChanged: (text) {
+            onChanged(
+              int.tryParse(text) ?? 0,
+            );
+          },
+          decoration:
+              const InputDecoration(
+            isDense: true,
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _decimalTile({
+    required String title,
+    required double value,
+    required ValueChanged<double>
+        onChanged,
+  }) {
+    return ListTile(
+      contentPadding: EdgeInsets.zero,
+      title: Text(
+        title,
+        style: const TextStyle(
+          color: Colors.white,
+          fontSize: 13,
+        ),
+      ),
+      trailing: SizedBox(
+        width: 110,
+        child: TextFormField(
+          initialValue:
+              value.toStringAsFixed(2),
+          keyboardType:
+              const TextInputType
+                  .numberWithOptions(
+            decimal: true,
+          ),
+          textAlign: TextAlign.right,
+          style: const TextStyle(
+            color: Colors.white,
+          ),
+          onChanged: (text) {
+            onChanged(
+              double.tryParse(text) ?? 0,
+            );
+          },
+          decoration:
+              const InputDecoration(
+            isDense: true,
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _textTile({
+    required String title,
+    required String value,
+    required ValueChanged<String>
+        onChanged,
+  }) {
+    return ListTile(
+      contentPadding: EdgeInsets.zero,
+      title: Text(
+        title,
+        style: const TextStyle(
+          color: Colors.white,
+          fontSize: 13,
+        ),
+      ),
+      subtitle: TextFormField(
+        initialValue: value,
+        style: const TextStyle(
+          color: Colors.white,
+        ),
+        onChanged: onChanged,
+      ),
+    );
+  }
+
+  Widget _billingNotice() {
+    return Container(
+      padding: const EdgeInsets.all(13),
+      decoration: BoxDecoration(
+        color: Colors.orange.withValues(
+          alpha: 0.08,
+        ),
+        borderRadius:
+            BorderRadius.circular(14),
+        border: Border.all(
+          color: Colors.orange.withValues(
+            alpha: 0.24,
+          ),
+        ),
+      ),
+      child: const Row(
+        crossAxisAlignment:
+            CrossAxisAlignment.start,
+        children: [
+          Icon(
+            Icons.info_outline,
+            color: Colors.orange,
+          ),
+          SizedBox(width: 9),
+          Expanded(
+            child: Text(
+              'Firebase Storage, paid Maps, JazzCash live API, Easypaisa live API and real wallet settlement remain disabled. Keep testing bypass enabled until those services are ready.',
+              style: TextStyle(
+                color: Colors.grey,
+                fontSize: 10,
+                height: 1.4,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _loadSettings(
+    Map<String, dynamic> data,
+  ) {
+    bookingEnabled =
+        data['bookingEnabled'] ??
+            bookingEnabled;
+    instantBookingEnabled =
+        data['instantBookingEnabled'] ??
+            instantBookingEnabled;
+    manualApprovalRequired =
+        data['manualApprovalRequired'] ??
+            manualApprovalRequired;
+    maximumAdvanceBookingDays =
+        _readInt(
+      data['maximumAdvanceBookingDays'],
+      fallback:
+          maximumAdvanceBookingDays,
+    );
+    minimumAdvanceBookingHours =
+        _readInt(
+      data['minimumAdvanceBookingHours'],
+      fallback:
+          minimumAdvanceBookingHours,
+    );
+
+    freeCancellationHours =
+        _readInt(
+      data['freeCancellationHours'],
+      fallback: freeCancellationHours,
+    );
+    cancellationChargePercent =
+        _readDouble(
+      data['cancellationChargePercent'],
+      fallback:
+          cancellationChargePercent,
+    );
+    refundPercent =
+        _readDouble(
+      data['refundPercent'],
+      fallback: refundPercent,
+    );
+    noShowChargeEnabled =
+        data['noShowChargeEnabled'] ??
+            noShowChargeEnabled;
+
+    defaultCommissionPercent =
+        _readDouble(
+      data['defaultCommissionPercent'],
+      fallback:
+          defaultCommissionPercent,
+    );
+    seasonalMultiplier =
+        _readDouble(
+      data['seasonalMultiplier'],
+      fallback: seasonalMultiplier,
+    );
+    weekendMultiplier =
+        _readDouble(
+      data['weekendMultiplier'],
+      fallback: weekendMultiplier,
+    );
+    holidayMultiplier =
+        _readDouble(
+      data['holidayMultiplier'],
+      fallback: holidayMultiplier,
+    );
+    minimumBookingPrice =
+        _readDouble(
+      data['minimumBookingPrice'],
+      fallback: minimumBookingPrice,
+    );
+
+    driverAutoAssign =
+        data['driverAutoAssign'] ??
+            driverAutoAssign;
+    maximumDailyToursPerDriver =
+        _readInt(
+      data['maximumDailyToursPerDriver'],
+      fallback:
+          maximumDailyToursPerDriver,
+    );
+    minimumDriverRating =
+        _readDouble(
+      data['minimumDriverRating'],
+      fallback: minimumDriverRating,
+    );
+
+    guideAutoAssign =
+        data['guideAutoAssign'] ??
+            guideAutoAssign;
+    featuredGuideEnabled =
+        data['featuredGuideEnabled'] ??
+            featuredGuideEnabled;
+    minimumGuideRating =
+        _readDouble(
+      data['minimumGuideRating'],
+      fallback: minimumGuideRating,
+    );
+    guideLanguageMatchingEnabled =
+        data['guideLanguageMatchingEnabled'] ??
+            guideLanguageMatchingEnabled;
+
+    featuredPackagesEnabled =
+        data['featuredPackagesEnabled'] ??
+            featuredPackagesEnabled;
+    hideFullyBookedPackages =
+        data['hideFullyBookedPackages'] ??
+            hideFullyBookedPackages;
+    waitingListEnabled =
+        data['waitingListEnabled'] ??
+            waitingListEnabled;
+    minimumGroupSize =
+        _readInt(
+      data['minimumGroupSize'],
+      fallback: minimumGroupSize,
+    );
+    maximumGroupSize =
+        _readInt(
+      data['maximumGroupSize'],
+      fallback: maximumGroupSize,
+    );
+
+    reviewsEnabled =
+        data['reviewsEnabled'] ??
+            reviewsEnabled;
+    hideLowRatings =
+        data['hideLowRatings'] ??
+            hideLowRatings;
+    autoApproveReviews =
+        data['autoApproveReviews'] ??
+            autoApproveReviews;
+
+    customerNotificationsEnabled =
+        data['customerNotificationsEnabled'] ??
+            customerNotificationsEnabled;
+    driverNotificationsEnabled =
+        data['driverNotificationsEnabled'] ??
+            driverNotificationsEnabled;
+    guideNotificationsEnabled =
+        data['guideNotificationsEnabled'] ??
+            guideNotificationsEnabled;
+    pushNotificationsEnabled =
+        data['pushNotificationsEnabled'] ??
+            pushNotificationsEnabled;
+    emailNotificationsEnabled =
+        data['emailNotificationsEnabled'] ??
+            emailNotificationsEnabled;
+    smsNotificationsEnabled =
+        data['smsNotificationsEnabled'] ??
+            smsNotificationsEnabled;
+
+    promoCodesEnabled =
+        data['promoCodesEnabled'] ??
+            promoCodesEnabled;
+    loyaltyEnabled =
+        data['loyaltyEnabled'] ??
+            loyaltyEnabled;
+    referralEnabled =
+        data['referralEnabled'] ??
+            referralEnabled;
+    cashbackEnabled =
+        data['cashbackEnabled'] ??
+            cashbackEnabled;
+
+    sosEnabled =
+        data['sosEnabled'] ??
+            sosEnabled;
+    liveTrackingEnabled =
+        data['liveTrackingEnabled'] ??
+            liveTrackingEnabled;
+    emergencyContact =
+        data['emergencyContact']
+                ?.toString() ??
+            emergencyContact;
+
+    aiRecommendationsEnabled =
+        data['aiRecommendationsEnabled'] ??
+            aiRecommendationsEnabled;
+    aiPackageRankingEnabled =
+        data['aiPackageRankingEnabled'] ??
+            aiPackageRankingEnabled;
+    aiDestinationRankingEnabled =
+        data['aiDestinationRankingEnabled'] ??
+            aiDestinationRankingEnabled;
+
+    cashEnabled =
+        data['cashEnabled'] ??
+            cashEnabled;
+    walletEnabled =
+        data['walletEnabled'] ??
+            walletEnabled;
+    jazzCashEnabled =
+        data['jazzCashEnabled'] ??
+            jazzCashEnabled;
+    easypaisaEnabled =
+        data['easypaisaEnabled'] ??
+            easypaisaEnabled;
+    testingPaymentBypassEnabled =
+        data['testingPaymentBypassEnabled'] ??
+            testingPaymentBypassEnabled;
+  }
+
+  Future<void> _saveSettings() async {
+    setState(() {
+      _isSaving = true;
+    });
+
+    try {
+      await _settingsReference.set(
+        <String, dynamic>{
+          'bookingEnabled':
+              bookingEnabled,
+          'instantBookingEnabled':
+              instantBookingEnabled,
+          'manualApprovalRequired':
+              manualApprovalRequired,
+          'maximumAdvanceBookingDays':
+              maximumAdvanceBookingDays,
+          'minimumAdvanceBookingHours':
+              minimumAdvanceBookingHours,
+          'freeCancellationHours':
+              freeCancellationHours,
+          'cancellationChargePercent':
+              cancellationChargePercent,
+          'refundPercent':
+              refundPercent,
+          'noShowChargeEnabled':
+              noShowChargeEnabled,
+          'defaultCommissionPercent':
+              defaultCommissionPercent,
+          'seasonalMultiplier':
+              seasonalMultiplier,
+          'weekendMultiplier':
+              weekendMultiplier,
+          'holidayMultiplier':
+              holidayMultiplier,
+          'minimumBookingPrice':
+              minimumBookingPrice,
+          'driverAutoAssign':
+              driverAutoAssign,
+          'maximumDailyToursPerDriver':
+              maximumDailyToursPerDriver,
+          'minimumDriverRating':
+              minimumDriverRating,
+          'guideAutoAssign':
+              guideAutoAssign,
+          'featuredGuideEnabled':
+              featuredGuideEnabled,
+          'minimumGuideRating':
+              minimumGuideRating,
+          'guideLanguageMatchingEnabled':
+              guideLanguageMatchingEnabled,
+          'featuredPackagesEnabled':
+              featuredPackagesEnabled,
+          'hideFullyBookedPackages':
+              hideFullyBookedPackages,
+          'waitingListEnabled':
+              waitingListEnabled,
+          'minimumGroupSize':
+              minimumGroupSize,
+          'maximumGroupSize':
+              maximumGroupSize,
+          'reviewsEnabled':
+              reviewsEnabled,
+          'hideLowRatings':
+              hideLowRatings,
+          'autoApproveReviews':
+              autoApproveReviews,
+          'customerNotificationsEnabled':
+              customerNotificationsEnabled,
+          'driverNotificationsEnabled':
+              driverNotificationsEnabled,
+          'guideNotificationsEnabled':
+              guideNotificationsEnabled,
+          'pushNotificationsEnabled':
+              pushNotificationsEnabled,
+          'emailNotificationsEnabled':
+              emailNotificationsEnabled,
+          'smsNotificationsEnabled':
+              smsNotificationsEnabled,
+          'promoCodesEnabled':
+              promoCodesEnabled,
+          'loyaltyEnabled':
+              loyaltyEnabled,
+          'referralEnabled':
+              referralEnabled,
+          'cashbackEnabled':
+              cashbackEnabled,
+          'sosEnabled': sosEnabled,
+          'liveTrackingEnabled':
+              liveTrackingEnabled,
+          'emergencyContact':
+              emergencyContact,
+          'aiRecommendationsEnabled':
+              aiRecommendationsEnabled,
+          'aiPackageRankingEnabled':
+              aiPackageRankingEnabled,
+          'aiDestinationRankingEnabled':
+              aiDestinationRankingEnabled,
+          'cashEnabled':
+              cashEnabled,
+          'walletEnabled':
+              walletEnabled,
+          'jazzCashEnabled':
+              jazzCashEnabled,
+          'easypaisaEnabled':
+              easypaisaEnabled,
+          'testingPaymentBypassEnabled':
+              testingPaymentBypassEnabled,
+          'storageUploadUsed': false,
+          'updatedByRole':
+              'tourism_admin',
+          'updatedAt':
+              FieldValue.serverTimestamp(),
+        },
+        SetOptions(merge: true),
+      );
+
+      if (!mounted) {
+        return;
+      }
+
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Tourism settings saved.',
+            ),
+            backgroundColor: darkCard,
+          ),
+        );
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          SnackBar(
+            content: Text(
+              'Unable to save settings: $error',
+            ),
+            backgroundColor: Colors.red,
+          ),
+        );
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isSaving = false;
+        });
+      }
+    }
+  }
+
+  int _readInt(
+    dynamic value, {
+    int fallback = 0,
+  }) {
+    if (value is int) {
+      return value;
+    }
+
+    if (value is num) {
+      return value.toInt();
+    }
+
+    return int.tryParse(
+          value?.toString() ?? '',
+        ) ??
+        fallback;
+  }
+
+  double _readDouble(
+    dynamic value, {
+    double fallback = 0,
+  }) {
+    if (value is num) {
+      return value.toDouble();
+    }
+
+    return double.tryParse(
+          value?.toString() ?? '',
+        ) ??
+        fallback;
+  }
+}

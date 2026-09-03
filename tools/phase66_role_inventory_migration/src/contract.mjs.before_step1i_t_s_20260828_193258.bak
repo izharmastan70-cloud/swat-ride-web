@@ -1,0 +1,94 @@
+export const PHASE66_PROJECT_ID = 'swat-ride-v2';
+
+export const CURRENT_INVENTORY_VERSION = 'phase66_roles_v1_22';
+export const PROPOSED_INVENTORY_VERSION =
+  'phase66_roles_v2_23_security_incident';
+
+export const CURRENT_ROLE_COUNT = 22;
+export const PROPOSED_ROLE_COUNT = 23;
+
+export const SECURITY_INCIDENT_ROLE_ID = 'security_incident_agent';
+export const SECURITY_INCIDENT_MODULE = 'security_incident';
+export const SECURITY_INCIDENT_ACTION_ID =
+  'security_incident.attach_runtime';
+
+export const AUTHORITY_MANIFEST_DOCUMENT =
+  'security_incident_role_inventory_authority_manifest';
+
+export const MIGRATION_HOLD_DOCUMENT =
+  'security_incident_role_inventory_migration_hold';
+
+export const LOCKED_ROLLOUT_STAGE = 'MONITOR_ONLY';
+
+export const SAFETY = Object.freeze({
+  executionArmed: false,
+  dryRunOnly: true,
+  networkReadEnabled: false,
+  networkWriteEnabled: false,
+  credentialLoadingEnabled: false,
+  adminSdkInitializationEnabled: false,
+  liveFirestoreBootstrapEnabled: false,
+  roleDeltaEnabled: false,
+  approvalConsumptionEnabled: false,
+  guardMutationEnabled: false,
+  armingTokenMutationEnabled: false,
+  activationReceiptMutationEnabled: false,
+  existingActivationTokenReuseAllowed: false,
+  repositoryAttachEnabled: false,
+  repositoryArmEnabled: false,
+  incidentWriteEnabled: false,
+  suggestOnlyAuthorized: false,
+  autoAuthorized: false,
+});
+
+export const FUTURE_LIVE_READ_CONTRACT = Object.freeze({
+  requiresFirebaseAdmin: true,
+  requiresExplicitProjectId: true,
+  requiredProjectId: PHASE66_PROJECT_ID,
+  requiresFreshLiveAgentRolesRead: true,
+  requiredCurrentRoleCount: CURRENT_ROLE_COUNT,
+  requiresExactRoleIds: true,
+  requiresSecurityIncidentRoleAbsent: true,
+  requiresCurrentRoleProjectionFingerprint: true,
+  requiresProposedRoleProjectionFingerprint: true,
+  requiresCurrentControlFingerprint: true,
+  requiresCurrentRolloutMonitorOnly: true,
+  requiresFreshOwnerIdentity: true,
+  requiresExactOwnerApprovalBinding: true,
+  oldGuardMustRemainImmutable: true,
+  oldArmingTokenMustRemainImmutable: true,
+  oldActivationReceiptMustRemainImmutable: true,
+});
+
+export function assertOfflineSafety() {
+  for (const [key, value] of Object.entries(SAFETY)) {
+    if (
+      [
+        'executionArmed',
+        'networkReadEnabled',
+        'networkWriteEnabled',
+        'credentialLoadingEnabled',
+        'adminSdkInitializationEnabled',
+        'liveFirestoreBootstrapEnabled',
+        'roleDeltaEnabled',
+        'approvalConsumptionEnabled',
+        'guardMutationEnabled',
+        'armingTokenMutationEnabled',
+        'activationReceiptMutationEnabled',
+        'existingActivationTokenReuseAllowed',
+        'repositoryAttachEnabled',
+        'repositoryArmEnabled',
+        'incidentWriteEnabled',
+        'suggestOnlyAuthorized',
+        'autoAuthorized',
+      ].includes(key) &&
+      value !== false
+    ) {
+      throw new Error(`Offline safety violation: ${key} must be false`);
+    }
+  }
+
+  if (SAFETY.dryRunOnly !== true) {
+    throw new Error('Offline safety violation: dryRunOnly must be true');
+  }
+}

@@ -1,0 +1,818 @@
+import 'dart:convert';
+
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:crypto/crypto.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+
+import '../../super_admin/models/super_admin_access_result.dart';
+import '../../super_admin/services/super_admin_access_service.dart';
+import '../constants/agent_production_rollout_activation_constants.dart';
+import '../constants/agent_production_rollout_repository_constants.dart';
+import '../constants/agent_production_rollout_runtime_guard_constants.dart';
+import '../constants/agent_production_rollout_snapshot_constants.dart';
+import '../constants/agent_production_rollout_step1g_evidence_constants.dart';
+import '../models/agent_production_rollout_activation_models.dart';
+import '../models/agent_production_rollout_arming_token_models.dart';
+import '../models/agent_production_rollout_owner_approval.dart';
+import '../models/agent_production_rollout_repository_models.dart';
+import '../models/agent_production_rollout_step1g_runtime_models.dart';
+import 'agent_production_rollout_arming_token_repository.dart';
+import 'agent_production_rollout_arming_token_service.dart';
+import 'agent_production_rollout_guard_repository.dart';
+import 'agent_production_rollout_live_snapshot_reader.dart';
+import 'agent_production_rollout_monitor_activation_planner.dart';
+import 'agent_production_rollout_monitor_activation_repository.dart';
+import 'agent_production_rollout_monitor_plan_binding_service.dart';
+import 'agent_production_rollout_owner_bound_guard_coordinator.dart';
+import 'agent_production_rollout_step1g_authenticated_owner_policy.dart';
+import 'agent_production_rollout_trusted_capture_coordinator.dart';
+import 'agent_production_rollout_trusted_live_preflight_service.dart';
+
+class AgentProductionRolloutStep1GLiveActivationCoordinator {
+  factory AgentProductionRolloutStep1GLiveActivationCoordinator({
+    FirebaseAuth? auth,
+    FirebaseFirestore? firestore,
+    SuperAdminAccessService? accessService,
+    AgentProductionRolloutLiveSnapshotReader? reader,
+  }) {
+    final FirebaseAuth resolvedAuth = auth ?? FirebaseAuth.instance;
+    final FirebaseFirestore resolvedFirestore =
+        firestore ?? FirebaseFirestore.instance;
+
+    return AgentProductionRolloutStep1GLiveActivationCoordinator._(
+      resolvedAuth,
+      resolvedFirestore,
+      accessService ??
+          SuperAdminAccessService(
+            auth: resolvedAuth,
+            firestore: resolvedFirestore,
+          ),
+      reader ?? AgentProductionRolloutLiveSnapshotReaderAdapter(),
+    );
+  }
+
+  AgentProductionRolloutStep1GLiveActivationCoordinator._(
+    this._auth,
+    this._firestore,
+    this._accessService,
+    this._reader,
+  );
+
+  final FirebaseAuth _auth;
+  final FirebaseFirestore _firestore;
+  final SuperAdminAccessService _accessService;
+  final AgentProductionRolloutLiveSnapshotReader _reader;
+
+  static const AgentProductionRolloutStep1GAuthenticatedOwnerPolicy
+  _authPolicy = AgentProductionRolloutStep1GAuthenticatedOwnerPolicy();
+
+  static const AgentProductionRolloutMonitorActivationPlanner _planner =
+      AgentProductionRolloutMonitorActivationPlanner();
+
+  static const AgentProductionRolloutMonitorPlanBindingService _planBinding =
+      AgentProductionRolloutMonitorPlanBindingService();
+
+  Future<AgentProductionRolloutStep1GPreparedReview> prepare({
+    required String currentAdminId,
+  }) async {
+    final _VerifiedIdentity identity = await _verifyIdentity(currentAdminId);
+
+    final DateTime now = DateTime.now().toUtc();
+
+    final AgentProductionRolloutTrustedOwnerContext trustedContext =
+        AgentProductionRolloutTrustedOwnerContext(
+          actorRole: AgentProductionRolloutTrustedActorRole.superAdmin,
+          actorReferenceSha256: _sha256(identity.uid),
+          sessionReferenceSha256: _sha256(identity.idToken),
+          authorityVerified: true,
+          freshReauthenticationVerified: true,
+          issuedAtUtc: identity.authTimeUtc,
+        );
+
+    final AgentProductionRolloutTrustedCaptureCoordinator captureCoordinator =
+        AgentProductionRolloutTrustedCaptureCoordinator(reader: _reader);
+
+    final captureDecision = await captureCoordinator.capture(
+      trustedContext: trustedContext,
+      capturedAtUtc: now,
+      phase65SafetyEvidenceSha256:
+          AgentProductionRolloutStep1GEvidence.phase65SafetyEvidenceSha256,
+      phase62VersionEvidenceSha256:
+          AgentProductionRolloutStep1GEvidence.phase62VersionEvidenceSha256,
+    );
+
+    if (!captureDecision.captured || captureDecision.capture == null) {
+      throw StateError(
+        'Live rollout capture blocked: '
+        '${captureDecision.reasonCode}',
+      );
+    }
+
+    final AgentProductionRolloutTrustedCapture capture =
+        captureDecision.capture!;
+
+    _requireFailClosedInitialSnapshot(capture);
+
+    await _resolveInitialOrRecoverableGuardRevision(
+      actorReferenceSha256: capture.actorReferenceSha256,
+      controlStateFingerprintSha256: capture.controlStateFingerprintSha256,
+      roleCount: capture.snapshot.roleCount,
+    );
+
+    return AgentProductionRolloutStep1GPreparedReview(
+      trustedContext: trustedContext,
+      capture: capture,
+      preparedAtUtc: now,
+      accessSourceLabel: identity.accessSourceLabel,
+    );
+  }
+
+  Future<AgentProductionRolloutStep1GActivationOutcome> approveAndActivate({
+    required String currentAdminId,
+    required AgentProductionRolloutStep1GPreparedReview prepared,
+  }) async {
+    final _VerifiedIdentity identity = await _verifyIdentity(currentAdminId);
+
+    final String currentActorSha = _sha256(identity.uid);
+
+    if (currentActorSha != prepared.actorReferenceSha256.toLowerCase()) {
+      throw StateError(
+        'Authenticated Super Admin changed after review preparation.',
+      );
+    }
+
+    final DateTime approvalTime = DateTime.now().toUtc();
+
+    if (approvalTime.difference(prepared.preparedAtUtc) >
+        AgentProductionRolloutStep1GEvidence.maxFreshLoginAge) {
+      throw StateError(
+        'Prepared live review is stale. Prepare the live state again.',
+      );
+    }
+
+    final String approvalId =
+        'phase66-monitor-${_sha256('${prepared.actorReferenceSha256}|'
+        '${prepared.snapshotFingerprintSha256}|'
+        '${approvalTime.microsecondsSinceEpoch}').substring(0, 32)}';
+
+    final AgentProductionRolloutOwnerApproval ownerApproval =
+        AgentProductionRolloutOwnerApproval(
+          approvalId: approvalId,
+          ownerReferenceSha256: prepared.actorReferenceSha256,
+          snapshotFingerprintSha256: prepared.snapshotFingerprintSha256,
+          requestedStage: AgentProductionRolloutStage.monitorOnly,
+          approvedAtUtc: approvalTime,
+          expiresAtUtc: approvalTime.add(
+            AgentProductionRolloutStep1GEvidence.ownerApprovalValidity,
+          ),
+          explicitOwnerApproval: true,
+        );
+
+    final planDecision = _planner.plan(
+      capture: prepared.capture,
+      ownerApproval: ownerApproval,
+      evaluatedAtUtc: approvalTime,
+      planId: 'phase66-monitor-plan-${approvalTime.microsecondsSinceEpoch}',
+      phase65SafetyReady: true,
+      phase62VersionSafetyReady: true,
+      auditReady: true,
+      coreFailureIsolationReady: true,
+      providerPolicyReady: true,
+      emergencyStopClearanceApproved: true,
+    );
+
+    if (!planDecision.eligible || planDecision.plan == null) {
+      throw StateError(
+        'MONITOR_ONLY plan blocked: '
+        '${planDecision.reasonCode}',
+      );
+    }
+
+    final AgentProductionRolloutMonitorActivationPlan plan = planDecision.plan!;
+
+    final AgentProductionRolloutTrustedOwnerContext refreshedTrustedContext =
+        AgentProductionRolloutTrustedOwnerContext(
+          actorRole: AgentProductionRolloutTrustedActorRole.superAdmin,
+          actorReferenceSha256: currentActorSha,
+          sessionReferenceSha256: _sha256(identity.idToken),
+          authorityVerified: true,
+          freshReauthenticationVerified: true,
+          issuedAtUtc: identity.authTimeUtc,
+        );
+
+    final AgentProductionRolloutTrustedLivePreflightService preflightService =
+        AgentProductionRolloutTrustedLivePreflightService(reader: _reader);
+
+    final preflightDecision = await preflightService.evaluate(
+      trustedContext: refreshedTrustedContext,
+      plan: plan,
+      ownerApproval: ownerApproval,
+      nowUtc: DateTime.now().toUtc(),
+      phase65SafetyEvidenceSha256:
+          AgentProductionRolloutStep1GEvidence.phase65SafetyEvidenceSha256,
+      phase62VersionEvidenceSha256:
+          AgentProductionRolloutStep1GEvidence.phase62VersionEvidenceSha256,
+    );
+
+    if (!preflightDecision.ready || preflightDecision.preflight == null) {
+      throw StateError(
+        'Fresh live preflight blocked: '
+        '${preflightDecision.reasonCode}',
+      );
+    }
+
+    final int expectedPreviousGuardRevision =
+        await _resolveInitialOrRecoverableGuardRevision(
+          actorReferenceSha256:
+              preflightDecision.preflight!.actorReferenceSha256,
+          controlStateFingerprintSha256:
+              preflightDecision.preflight!.controlStateFingerprintSha256,
+          roleCount: preflightDecision.preflight!.roleCount,
+        );
+
+    final AgentProductionRolloutGuardRepository guardRepository =
+        AgentProductionRolloutGuardRepository(
+          firestore: _firestore,
+          persistenceArmed: true,
+        );
+
+    final AgentProductionRolloutOwnerBoundGuardCoordinator guardCoordinator =
+        AgentProductionRolloutOwnerBoundGuardCoordinator(
+          guardRepository: guardRepository,
+        );
+
+    final guardRequest = guardCoordinator.build(
+      preflight: preflightDecision.preflight!,
+      plan: plan,
+      expectedPreviousRevision: expectedPreviousGuardRevision,
+    );
+
+    final guardResult = await guardCoordinator.persistExactGuard(
+      request: guardRequest,
+      requestedAtUtc: DateTime.now().toUtc(),
+    );
+
+    if (!guardResult.persisted) {
+      return AgentProductionRolloutStep1GActivationOutcome(
+        activated: false,
+        postActivationVerified: false,
+        status: guardResult.status,
+        reasonCode: guardResult.reasonCode,
+        activationId: '',
+        armingTokenIdSha256: '',
+        guardRevision: guardResult.revision,
+      );
+    }
+
+    final AgentProductionRolloutArmingTokenService tokenService =
+        AgentProductionRolloutArmingTokenService();
+
+    final DateTime tokenIssuedAt = DateTime.now().toUtc();
+
+    final AgentProductionRolloutArmingCredential credential = tokenService
+        .createSecureCredential(
+          preflight: preflightDecision.preflight!,
+          guardRevision: guardRequest.guard.revision,
+          issuedAtUtc: tokenIssuedAt,
+        );
+
+    final AgentProductionRolloutArmingTokenRepository tokenRepository =
+        AgentProductionRolloutArmingTokenRepository(
+          firestore: _firestore,
+          issuanceArmed: true,
+        );
+
+    final tokenResult = await tokenRepository.issue(
+      request: AgentProductionRolloutArmingTokenIssuanceRequest(
+        credential: credential,
+        preflight: preflightDecision.preflight!,
+        plan: plan,
+      ),
+      nowUtc: DateTime.now().toUtc(),
+    );
+
+    if (!tokenResult.issued) {
+      return AgentProductionRolloutStep1GActivationOutcome(
+        activated: false,
+        postActivationVerified: false,
+        status: tokenResult.status,
+        reasonCode: tokenResult.reasonCode,
+        activationId: '',
+        armingTokenIdSha256: tokenResult.tokenIdSha256,
+        guardRevision: guardRequest.guard.revision,
+      );
+    }
+
+    final String planFingerprint = _planBinding.fingerprint(plan);
+
+    final String idempotencyKey = _planBinding.idempotencyKey(plan);
+
+    final AgentProductionRolloutMonitorExecutionRequest executionRequest =
+        AgentProductionRolloutMonitorExecutionRequest(
+          plan: plan,
+          planFingerprintSha256: planFingerprint,
+          idempotencyKeySha256: idempotencyKey,
+          expectedGuardRevision: guardRequest.guard.revision,
+          expectedGuardVersion:
+              AgentProductionRolloutGuardVersion.monitorOnlyV1,
+          requestedAtUtc: DateTime.now().toUtc(),
+        );
+
+    final AgentProductionRolloutMonitorActivationRepository
+    activationRepository = AgentProductionRolloutMonitorActivationRepository(
+      firestore: _firestore,
+      executionArmed: true,
+    );
+
+    final activationResult = await activationRepository.activate(
+      request: executionRequest,
+      nowUtc: DateTime.now().toUtc(),
+      armingCredential: credential,
+    );
+
+    if (!activationResult.applied) {
+      return AgentProductionRolloutStep1GActivationOutcome(
+        activated: false,
+        postActivationVerified: false,
+        status: activationResult.status,
+        reasonCode: activationResult.reasonCode,
+        activationId: activationResult.activationId,
+        armingTokenIdSha256: credential.tokenIdSha256,
+        guardRevision: guardRequest.guard.revision,
+      );
+    }
+
+    final bool verified = await _verifyPostActivation(
+      prepared: prepared,
+      plan: plan,
+      guardRevision: guardRequest.guard.revision,
+      tokenIdSha256: credential.tokenIdSha256,
+      activationId: activationResult.activationId,
+    );
+
+    return AgentProductionRolloutStep1GActivationOutcome(
+      activated: true,
+      postActivationVerified: verified,
+      status: activationResult.status,
+      reasonCode: verified
+          ? 'monitor_only_activation_and_immediate_post_verification_clean'
+          : 'CRITICAL_post_activation_verification_failed_use_existing_emergency_stop',
+      activationId: activationResult.activationId,
+      armingTokenIdSha256: credential.tokenIdSha256,
+      guardRevision: guardRequest.guard.revision,
+    );
+  }
+
+  Future<_VerifiedIdentity> _verifyIdentity(String currentAdminId) async {
+    final User? user = _auth.currentUser;
+
+    if (user == null) {
+      throw StateError('Firebase Super Admin sign-in required.');
+    }
+
+    final SuperAdminAccessResult access = await _accessService
+        .checkCurrentAccess(forceRefreshToken: true);
+
+    final IdTokenResult token = await user.getIdTokenResult(true);
+
+    final Map<String, dynamic> claims = token.claims ?? <String, dynamic>{};
+
+    final String claimRole =
+        claims['role']?.toString().trim().toLowerCase() ?? '';
+
+    final dynamic rawAuthTime = claims['auth_time'];
+
+    final int? authSeconds = rawAuthTime is num
+        ? rawAuthTime.toInt()
+        : int.tryParse(rawAuthTime?.toString() ?? '');
+
+    final DateTime? authTimeUtc = authSeconds == null
+        ? null
+        : DateTime.fromMillisecondsSinceEpoch(authSeconds * 1000, isUtc: true);
+
+    final String idToken = token.token?.trim() ?? '';
+
+    final AgentProductionRolloutStep1GAuthDecision decision = _authPolicy
+        .evaluate(
+          signedIn: true,
+          uidMatchesScreenAdmin: user.uid == currentAdminId.trim(),
+          superAdminAccessAllowed: access.isAllowed && access.isSuperAdmin,
+          testingBypass: access.isTestingBypass,
+          accessCameFromCustomClaim:
+              access.source == SuperAdminAccessSource.customClaim,
+          claimRole: claimRole,
+          idTokenPresent: idToken.isNotEmpty,
+          authTimeUtc: authTimeUtc,
+          nowUtc: DateTime.now().toUtc(),
+        );
+
+    if (!decision.allowed || authTimeUtc == null) {
+      throw StateError(decision.reasonCode);
+    }
+
+    return _VerifiedIdentity(
+      uid: user.uid,
+      idToken: idToken,
+      authTimeUtc: authTimeUtc,
+      accessSourceLabel: access.sourceLabel,
+    );
+  }
+
+  Future<int> _resolveInitialOrRecoverableGuardRevision({
+    required String actorReferenceSha256,
+    required String controlStateFingerprintSha256,
+    required int roleCount,
+  }) async {
+    final RegExp sha256 = RegExp(r'^[A-Fa-f0-9]{64}$');
+
+    final String expectedActorSha = actorReferenceSha256.trim().toLowerCase();
+
+    final String expectedControlSha = controlStateFingerprintSha256
+        .trim()
+        .toLowerCase();
+
+    if (!sha256.hasMatch(expectedActorSha) ||
+        !sha256.hasMatch(expectedControlSha) ||
+        roleCount <= 0) {
+      throw StateError(
+        'Strict orphan guard recovery requires exact actor, control SHA and role count.',
+      );
+    }
+
+    final DocumentSnapshot<Map<String, dynamic>> master = await _firestore
+        .collection(AgentProductionRolloutRepositoryPath.settingsCollection)
+        .doc(AgentProductionRolloutRepositoryPath.masterDocument)
+        .get();
+
+    if (!master.exists) {
+      throw StateError(
+        'Safe AI master document must exist before guard persistence.',
+      );
+    }
+
+    final DocumentSnapshot<Map<String, dynamic>> rollout = await _firestore
+        .collection(AgentProductionRolloutRepositoryPath.settingsCollection)
+        .doc(AgentProductionRolloutRepositoryPath.rolloutStateDocument)
+        .get();
+
+    if (rollout.exists) {
+      final String stage =
+          ((rollout.data() ?? <String, dynamic>{})['stage'] ??
+                  AgentProductionRolloutStage.off)
+              .toString()
+              .trim();
+
+      if (stage != AgentProductionRolloutStage.off) {
+        throw StateError('Initial production rollout stage must still be OFF.');
+      }
+    }
+
+    final QuerySnapshot<Map<String, dynamic>> existingActivations =
+        await _firestore
+            .collection(
+              AgentProductionRolloutRepositoryPath.activationsCollection,
+            )
+            .limit(1)
+            .get();
+
+    if (existingActivations.docs.isNotEmpty) {
+      throw StateError(
+        'Existing production activation receipt detected. '
+        'Initial OFF-to-MONITOR_ONLY recovery is not permitted.',
+      );
+    }
+
+    final QuerySnapshot<Map<String, dynamic>> readyTokens = await _firestore
+        .collection('agent_production_rollout_arming_tokens')
+        .where('status', isEqualTo: 'READY')
+        .limit(1)
+        .get();
+
+    if (readyTokens.docs.isNotEmpty) {
+      throw StateError(
+        'Existing READY production arming token detected. '
+        'Recovery is blocked until token state is reviewed.',
+      );
+    }
+
+    final DocumentSnapshot<Map<String, dynamic>> guard = await _firestore
+        .collection(AgentProductionRolloutRepositoryPath.settingsCollection)
+        .doc(AgentProductionRolloutRepositoryPath.rolloutGuardDocument)
+        .get();
+
+    if (!guard.exists) {
+      return 0;
+    }
+
+    final Map<String, dynamic> data = guard.data() ?? <String, dynamic>{};
+
+    final int revision = (data['revision'] as num?)?.toInt() ?? 0;
+
+    final int existingRoleCount = (data['roleCount'] as num?)?.toInt() ?? 0;
+
+    final String existingControlSha =
+        (data['controlStateFingerprintSha256'] ?? '')
+            .toString()
+            .trim()
+            .toLowerCase();
+
+    final String existingPlanSha = (data['planFingerprintSha256'] ?? '')
+        .toString()
+        .trim()
+        .toLowerCase();
+
+    final String existingActorSha = (data['actorReferenceSha256'] ?? '')
+        .toString()
+        .trim()
+        .toLowerCase();
+
+    final String existingApprovalId = (data['ownerApprovalId'] ?? '')
+        .toString()
+        .trim();
+
+    final bool safeRecoverableGuard =
+        data['enabled'] == true &&
+        data['guardVersion'] ==
+            AgentProductionRolloutRuntimeGuardVersion.monitorOnlyV1 &&
+        revision >= 1 &&
+        data['targetStage'] == AgentProductionRolloutStage.monitorOnly &&
+        data['runtimeMonitorOnlyOverlayEnforced'] == true &&
+        data['noAutoBusinessWriteBoundaryEnforced'] == true &&
+        data['appChatOnly'] == true &&
+        (data['autoTrafficPercent'] as num?)?.toInt() == 0 &&
+        (data['businessWriteTrafficPercent'] as num?)?.toInt() == 0 &&
+        data['externalChannelsEnabled'] == false &&
+        sha256.hasMatch(existingControlSha) &&
+        sha256.hasMatch(existingPlanSha) &&
+        existingRoleCount > 0 &&
+        existingApprovalId.isNotEmpty &&
+        sha256.hasMatch(existingActorSha) &&
+        existingControlSha == expectedControlSha &&
+        existingRoleCount == roleCount &&
+        existingActorSha == expectedActorSha;
+
+    if (!safeRecoverableGuard) {
+      throw StateError(
+        'Existing production rollout guard detected. '
+        'Initial OFF-to-MONITOR_ONLY activation will not overwrite it. '
+        'The guard is not eligible for strict orphan recovery.',
+      );
+    }
+
+    // Never delete the orphaned guard. The guard repository will require
+    // this exact current revision and persist the newly approved,
+    // freshly preflight-bound guard at revision + 1.
+    return revision;
+  }
+
+  void _requireFailClosedInitialSnapshot(
+    AgentProductionRolloutTrustedCapture capture,
+  ) {
+    final Map<String, dynamic> master =
+        capture.snapshot.masterSettingsProjection;
+
+    final bool safeMaster =
+        master['masterEnabled'] == false &&
+        master['emergencyReadOnly'] == true &&
+        master['freeAiEnabled'] == false &&
+        master['localAiEnabled'] == false &&
+        master['paidCodeAiEnabled'] == false &&
+        master['paidReasoningEnabled'] == false &&
+        master['callAgentEnabled'] == false &&
+        master['emailAgentEnabled'] == false &&
+        master['customerWhatsAppAgentEnabled'] == false &&
+        master['ownerWhatsAppAgentEnabled'] == false &&
+        master['emergencyWhatsAppAgentEnabled'] == false &&
+        master['approvalEngineEnabled'] == true &&
+        master['auditLoggingEnabled'] == true &&
+        master['askBeforePaid'] == true;
+
+    final bool enabledAutoRole = capture.snapshot.roleControlProjections.any(
+      (Map<String, dynamic> role) =>
+          role['enabled'] == true && role['mode'] == 'AUTO',
+    );
+
+    if (!safeMaster || enabledAutoRole || capture.snapshot.roleCount <= 0) {
+      final List<String> failures = <String>[];
+
+      void expectBool(String field, bool expected) {
+        final dynamic actual = master[field];
+        if (actual != expected) {
+          failures.add('$field expected=$expected actual=$actual');
+        }
+      }
+
+      expectBool('masterEnabled', false);
+      expectBool('emergencyReadOnly', true);
+      expectBool('freeAiEnabled', false);
+      expectBool('localAiEnabled', false);
+      expectBool('paidCodeAiEnabled', false);
+      expectBool('paidReasoningEnabled', false);
+      expectBool('callAgentEnabled', false);
+      expectBool('emailAgentEnabled', false);
+      expectBool('customerWhatsAppAgentEnabled', false);
+      expectBool('ownerWhatsAppAgentEnabled', false);
+      expectBool('emergencyWhatsAppAgentEnabled', false);
+      expectBool('approvalEngineEnabled', true);
+      expectBool('auditLoggingEnabled', true);
+      expectBool('askBeforePaid', true);
+
+      if (enabledAutoRole) {
+        failures.add('enabled AUTO role detected');
+      }
+
+      if (capture.snapshot.roleCount <= 0) {
+        failures.add(
+          'roleCount expected>0 actual=${capture.snapshot.roleCount}',
+        );
+      }
+
+      throw StateError(
+        'Initial production state is not the required fail-closed OFF baseline. '
+        'Failures: ${failures.join('; ')}',
+      );
+    }
+  }
+
+  Future<bool> _verifyPostActivation({
+    required AgentProductionRolloutStep1GPreparedReview prepared,
+    required AgentProductionRolloutMonitorActivationPlan plan,
+    required int guardRevision,
+    required String tokenIdSha256,
+    required String activationId,
+  }) async {
+    try {
+      final DocumentSnapshot<Map<String, dynamic>> masterSnapshot =
+          await _firestore
+              .collection(
+                AgentProductionRolloutRepositoryPath.settingsCollection,
+              )
+              .doc(AgentProductionRolloutRepositoryPath.masterDocument)
+              .get();
+
+      final DocumentSnapshot<Map<String, dynamic>> rolloutSnapshot =
+          await _firestore
+              .collection(
+                AgentProductionRolloutRepositoryPath.settingsCollection,
+              )
+              .doc(AgentProductionRolloutRepositoryPath.rolloutStateDocument)
+              .get();
+
+      final DocumentSnapshot<Map<String, dynamic>> guardSnapshot =
+          await _firestore
+              .collection(
+                AgentProductionRolloutRepositoryPath.settingsCollection,
+              )
+              .doc(AgentProductionRolloutRepositoryPath.rolloutGuardDocument)
+              .get();
+
+      final DocumentSnapshot<Map<String, dynamic>> tokenSnapshot =
+          await _firestore
+              .collection('agent_production_rollout_arming_tokens')
+              .doc(tokenIdSha256)
+              .get();
+
+      final DocumentSnapshot<Map<String, dynamic>> activationSnapshot =
+          await _firestore
+              .collection(
+                AgentProductionRolloutRepositoryPath.activationsCollection,
+              )
+              .doc(activationId)
+              .get();
+
+      if (!masterSnapshot.exists ||
+          !rolloutSnapshot.exists ||
+          !guardSnapshot.exists ||
+          !tokenSnapshot.exists ||
+          !activationSnapshot.exists) {
+        return false;
+      }
+
+      final Map<String, dynamic> master =
+          masterSnapshot.data() ?? <String, dynamic>{};
+
+      final Map<String, dynamic> rollout =
+          rolloutSnapshot.data() ?? <String, dynamic>{};
+
+      final Map<String, dynamic> guard =
+          guardSnapshot.data() ?? <String, dynamic>{};
+
+      final Map<String, dynamic> token =
+          tokenSnapshot.data() ?? <String, dynamic>{};
+
+      final Map<String, dynamic> activation =
+          activationSnapshot.data() ?? <String, dynamic>{};
+
+      final bool masterClean =
+          master['masterEnabled'] == true &&
+          master['emergencyReadOnly'] == false &&
+          master['freeAiEnabled'] == true &&
+          master['localAiEnabled'] == false &&
+          master['paidCodeAiEnabled'] == false &&
+          master['paidReasoningEnabled'] == false &&
+          master['callAgentEnabled'] == false &&
+          master['emailAgentEnabled'] == false &&
+          master['customerWhatsAppAgentEnabled'] == false &&
+          master['ownerWhatsAppAgentEnabled'] == false &&
+          master['emergencyWhatsAppAgentEnabled'] == false &&
+          master['approvalEngineEnabled'] == true &&
+          master['auditLoggingEnabled'] == true &&
+          master['askBeforePaid'] == true;
+
+      final bool rolloutClean =
+          rollout['stage'] == AgentProductionRolloutStage.monitorOnly &&
+          (rollout['autoTrafficPercent'] as num?)?.toInt() == 0 &&
+          (rollout['businessWriteTrafficPercent'] as num?)?.toInt() == 0 &&
+          rollout['appChatOnly'] == true &&
+          rollout['externalChannelsEnabled'] == false &&
+          rollout['providerClass'] == 'FREE_AI_ONLY' &&
+          (rollout['sourceControlStateFingerprintSha256'] ?? '')
+                  .toString()
+                  .toLowerCase() ==
+              plan.sourceControlStateFingerprintSha256.toLowerCase() &&
+          (rollout['guardRevision'] as num?)?.toInt() == guardRevision;
+
+      final bool guardClean =
+          guard['enabled'] == true &&
+          guard['guardVersion'] ==
+              AgentProductionRolloutRuntimeGuardVersion.monitorOnlyV1 &&
+          (guard['revision'] as num?)?.toInt() == guardRevision &&
+          guard['targetStage'] == AgentProductionRolloutStage.monitorOnly &&
+          guard['runtimeMonitorOnlyOverlayEnforced'] == true &&
+          guard['noAutoBusinessWriteBoundaryEnforced'] == true &&
+          guard['autoTrafficPercent'] == 0 &&
+          guard['businessWriteTrafficPercent'] == 0 &&
+          guard['externalChannelsEnabled'] == false;
+
+      final bool tokenClean =
+          token['status'] == 'CONSUMED' &&
+          token['consumedAt'] != null &&
+          (token['tokenIdSha256'] ?? '').toString().toLowerCase() ==
+              tokenIdSha256.toLowerCase();
+
+      final bool activationClean =
+          activation['status'] == 'APPLIED' &&
+          activation['armingTokenConsumed'] == true &&
+          (activation['armingTokenIdSha256'] ?? '').toString().toLowerCase() ==
+              tokenIdSha256.toLowerCase() &&
+          (activation['autoTrafficPercent'] as num?)?.toInt() == 0 &&
+          (activation['businessWriteTrafficPercent'] as num?)?.toInt() == 0 &&
+          activation['externalChannelsEnabled'] == false;
+
+      final postSnapshot = await _reader.read(
+        capturedAtUtc: DateTime.now().toUtc(),
+        phase65SafetyEvidenceSha256:
+            AgentProductionRolloutStep1GEvidence.phase65SafetyEvidenceSha256,
+        phase62VersionEvidenceSha256:
+            AgentProductionRolloutStep1GEvidence.phase62VersionEvidenceSha256,
+      );
+
+      final bool rolesUnchanged =
+          postSnapshot.roleCount == prepared.capture.snapshot.roleCount &&
+          _roleProjectionSha(postSnapshot.roleControlProjections) ==
+              _roleProjectionSha(
+                prepared.capture.snapshot.roleControlProjections,
+              );
+
+      return masterClean &&
+          rolloutClean &&
+          guardClean &&
+          tokenClean &&
+          activationClean &&
+          rolesUnchanged;
+    } on Object {
+      return false;
+    }
+  }
+
+  String _roleProjectionSha(List<Map<String, dynamic>> roles) {
+    return _sha256(jsonEncode(roles));
+  }
+
+  String _sha256(String value) {
+    return sha256.convert(utf8.encode(value)).toString();
+  }
+
+  bool get cliActivationSupported => false;
+  bool get requiresExplicitOwnerConfirmation => true;
+  bool get requiresFreshLogin => true;
+  bool get tokenRefreshAloneCountsAsFreshLogin => false;
+  bool get automaticRollbackImplemented => false;
+  bool get autoTrafficEnabled => false;
+  bool get businessWriteTrafficEnabled => false;
+  bool get externalChannelsEnabled => false;
+}
+
+class _VerifiedIdentity {
+  const _VerifiedIdentity({
+    required this.uid,
+    required this.idToken,
+    required this.authTimeUtc,
+    required this.accessSourceLabel,
+  });
+
+  final String uid;
+  final String idToken;
+  final DateTime authTimeUtc;
+  final String accessSourceLabel;
+}

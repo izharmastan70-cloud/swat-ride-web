@@ -1,0 +1,284 @@
+import 'package:flutter_test/flutter_test.dart';
+
+import 'package:swat_ride/ai_agent/constants/agent_action_ids.dart';
+import 'package:swat_ride/ai_agent/data/initial_agent_roles_seed.dart';
+import 'package:swat_ride/ai_agent/models/agent_call_food_status_stage3_readiness.dart';
+import 'package:swat_ride/ai_agent/models/agent_role.dart';
+
+AgentRole _callRole() {
+  return buildInitialAgentRoles().firstWhere(
+    (AgentRole role) => role.roleId == 'call_agent',
+  );
+}
+
+void main() {
+  group('Phase 49 Stage 3 Step 3F Food status readiness', () {
+    test('Food STATUS/READ foundation closes truthfully', () {
+      expect(
+        AgentCallFoodStatusStage3Readiness.foodStatusFoundationReady,
+        isTrue,
+      );
+      expect(
+        AgentCallFoodStatusStage3Readiness.step3FFoundationCloseoutReady,
+        isTrue,
+      );
+      expect(
+        AgentCallFoodStatusStage3Readiness.dedicatedCallAction,
+        AgentActionId.readCallFoodOrderStatus,
+      );
+      expect(AgentCallFoodStatusStage3Readiness.dedicatedActionLowRisk, isTrue);
+      expect(
+        AgentCallFoodStatusStage3Readiness.dedicatedActionReadOnly,
+        isTrue,
+      );
+      expect(AgentCallFoodStatusStage3Readiness.permissionEngineReady, isTrue);
+      expect(AgentCallFoodStatusStage3Readiness.runtimeGateReady, isTrue);
+    });
+
+    test('trusted binding resolver privacy and escalation are ready', () {
+      expect(
+        AgentCallFoodStatusStage3Readiness
+            .trustedCallerContactOrderBindingReady,
+        isTrue,
+      );
+      expect(
+        AgentCallFoodStatusStage3Readiness.trustedBackendResolverContractReady,
+        isTrue,
+      );
+      expect(
+        AgentCallFoodStatusStage3Readiness.privacyMinimizedSnapshotReady,
+        isTrue,
+      );
+      expect(
+        AgentCallFoodStatusStage3Readiness
+            .unauthorizedOrderExistenceHidingReady,
+        isTrue,
+      );
+      expect(
+        AgentCallFoodStatusStage3Readiness.safeEscalationRoutingReady,
+        isTrue,
+      );
+      expect(
+        AgentCallFoodStatusStage3Readiness.escalationRecommendationOnly,
+        isTrue,
+      );
+    });
+
+    test('foundation complete does not claim production live', () {
+      expect(
+        AgentCallFoodStatusStage3Readiness.productionFoodStatusCallSupportLive,
+        isFalse,
+      );
+      expect(
+        AgentCallFoodStatusStage3Readiness
+            .realTrustedBackendFoodResolverConnected,
+        isFalse,
+      );
+      expect(
+        AgentCallFoodStatusStage3Readiness
+            .realCallerContactBindingSourceConnected,
+        isFalse,
+      );
+      expect(
+        AgentCallFoodStatusStage3Readiness
+            .actualGenericFoodConnectorCallFlowConnected,
+        isFalse,
+      );
+      expect(
+        AgentCallFoodStatusStage3Readiness.actualHumanTransferConnected,
+        isFalse,
+      );
+      expect(
+        AgentCallFoodStatusStage3Readiness.actualManagerAdminTransferConnected,
+        isFalse,
+      );
+      expect(
+        AgentCallFoodStatusStage3Readiness.actualOwnerTransferConnected,
+        isFalse,
+      );
+      expect(
+        AgentCallFoodStatusStage3Readiness.productionTelephonyConnected,
+        isFalse,
+      );
+      expect(
+        AgentCallFoodStatusStage3Readiness.productionSttConnected,
+        isFalse,
+      );
+      expect(
+        AgentCallFoodStatusStage3Readiness.productionTtsConnected,
+        isFalse,
+      );
+      expect(
+        AgentCallFoodStatusStage3Readiness.productionSmsConnected,
+        isFalse,
+      );
+    });
+
+    test('Food status lane has no mutation authority', () {
+      expect(AgentCallFoodStatusStage3Readiness.foodCreateAuthority, isFalse);
+      expect(AgentCallFoodStatusStage3Readiness.foodWriteAuthority, isFalse);
+      expect(AgentCallFoodStatusStage3Readiness.foodCancelAuthority, isFalse);
+      expect(AgentCallFoodStatusStage3Readiness.foodRefundAuthority, isFalse);
+      expect(
+        AgentCallFoodStatusStage3Readiness.foodPaymentMutationAuthority,
+        isFalse,
+      );
+      expect(
+        AgentCallFoodStatusStage3Readiness.foodRiderAssignmentAuthority,
+        isFalse,
+      );
+      expect(
+        AgentCallFoodStatusStage3Readiness.directFirestoreAuthority,
+        isFalse,
+      );
+      expect(
+        AgentCallFoodStatusStage3Readiness.directFirebaseAuthAuthority,
+        isFalse,
+      );
+      expect(
+        AgentCallFoodStatusStage3Readiness.directFoodOrderServiceAuthority,
+        isFalse,
+      );
+      expect(AgentCallFoodStatusStage3Readiness.providerAuthority, isFalse);
+    });
+
+    test('call_agent closes Food lane with exactly four dedicated actions', () {
+      final AgentRole role = _callRole();
+
+      expect(role.allowedActions, <String>[
+        AgentActionId.createCallRideBooking,
+        AgentActionId.readCallExistingRide,
+        AgentActionId.readCallFoodOrderStatus,
+        AgentActionId.readCallTourBookingStatus,
+      ]);
+
+      expect(role.allowedActions, isNot(contains(AgentActionId.readFoodOrder)));
+      expect(
+        role.allowedActions,
+        isNot(contains(AgentActionId.readHotelBooking)),
+      );
+      expect(
+        role.allowedActions,
+        isNot(contains(AgentActionId.readTourBooking)),
+      );
+      expect(
+        role.allowedActions,
+        isNot(contains(AgentActionId.readCargoBooking)),
+      );
+      expect(
+        role.allowedActions,
+        isNot(contains(AgentActionId.readStudentRide)),
+      );
+      expect(
+        role.allowedActions,
+        isNot(contains(AgentActionId.transferCallToHuman)),
+      );
+      expect(
+        role.allowedActions,
+        isNot(contains(AgentActionId.transferCallToManager)),
+      );
+      expect(
+        role.allowedActions,
+        isNot(contains(AgentActionId.transferCallToOwner)),
+      );
+    });
+
+    test('next-service gate selects nothing prematurely', () {
+      expect(
+        AgentCallFoodStatusStage3Readiness.nextServiceSelectedNow,
+        isFalse,
+      );
+      expect(AgentCallFoodStatusStage3Readiness.nextServiceGateLocked, isTrue);
+
+      expect(
+        AgentCallFoodStatusStage3Readiness.hotelConnectorImplementationExists,
+        isTrue,
+      );
+      expect(
+        AgentCallFoodStatusStage3Readiness.hotelCentralRegistryReady,
+        isFalse,
+      );
+      expect(
+        AgentCallFoodStatusStage3Readiness.hotelGateStatus,
+        AgentCallStage3NextServiceGateStatus.registryNotReady,
+      );
+
+      expect(
+        AgentCallFoodStatusStage3Readiness.tourConnectorImplementationExists,
+        isTrue,
+      );
+      expect(
+        AgentCallFoodStatusStage3Readiness.tourCentralRegistryReady,
+        isFalse,
+      );
+      expect(
+        AgentCallFoodStatusStage3Readiness.tourGateStatus,
+        AgentCallStage3NextServiceGateStatus.registryNotReady,
+      );
+
+      expect(AgentCallFoodStatusStage3Readiness.cargoConnectorReady, isFalse);
+      expect(
+        AgentCallFoodStatusStage3Readiness.cargoGateStatus,
+        AgentCallStage3NextServiceGateStatus.notConnected,
+      );
+
+      expect(AgentCallFoodStatusStage3Readiness.studentConnectorReady, isFalse);
+      expect(
+        AgentCallFoodStatusStage3Readiness.studentGateStatus,
+        AgentCallStage3NextServiceGateStatus.notConnected,
+      );
+
+      expect(
+        AgentCallFoodStatusStage3Readiness.parcelConnectorVerified,
+        isFalse,
+      );
+      expect(
+        AgentCallFoodStatusStage3Readiness.parcelGateStatus,
+        AgentCallStage3NextServiceGateStatus.auditRequired,
+      );
+    });
+
+    test('no next service may activate without exact audit', () {
+      expect(
+        AgentCallFoodStatusStage3Readiness.hotelMayBeActivatedWithoutAudit,
+        isFalse,
+      );
+      expect(
+        AgentCallFoodStatusStage3Readiness.tourMayBeActivatedWithoutAudit,
+        isFalse,
+      );
+      expect(
+        AgentCallFoodStatusStage3Readiness.cargoMayBeActivatedWithoutAudit,
+        isFalse,
+      );
+      expect(
+        AgentCallFoodStatusStage3Readiness.studentMayBeActivatedWithoutAudit,
+        isFalse,
+      );
+      expect(
+        AgentCallFoodStatusStage3Readiness.parcelMayBeActivatedWithoutAudit,
+        isFalse,
+      );
+      expect(AgentCallFoodStatusStage3Readiness.nextStep, contains('STEP 3G'));
+      expect(
+        AgentCallFoodStatusStage3Readiness.nextStep,
+        contains('AUDIT / SELECTION'),
+      );
+    });
+
+    test('safe readiness map cannot overclaim production or next service', () {
+      final Map<String, dynamic> map =
+          AgentCallFoodStatusStage3Readiness.toSafeMap();
+
+      expect(map['foodStatusFoundationReady'], isTrue);
+      expect(map['step3FFoundationCloseoutReady'], isTrue);
+      expect(map['productionFoodStatusCallSupportLive'], isFalse);
+      expect(map['realTrustedBackendFoodResolverConnected'], isFalse);
+      expect(map['actualGenericFoodConnectorCallFlowConnected'], isFalse);
+      expect(map['productionTelephonyConnected'], isFalse);
+      expect(map['foodWriteAuthority'], isFalse);
+      expect(map['nextServiceSelectedNow'], isFalse);
+      expect(map['nextServiceGateLocked'], isTrue);
+    });
+  });
+}

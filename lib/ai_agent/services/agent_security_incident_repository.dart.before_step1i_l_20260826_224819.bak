@@ -1,0 +1,455 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
+
+import '../constants/agent_audit_constants.dart';
+import '../models/agent_security_incident_persistence_write_authorization.dart';
+import '../models/agent_security_incident_record.dart';
+import 'agent_audit_service.dart';
+import 'agent_security_incident_persistence_write_gate.dart';
+
+class AgentSecurityIncidentRepository {
+  AgentSecurityIncidentRepository({
+    FirebaseFirestore? firestore,
+    AgentSecurityIncidentPersistenceWriteGate? writeGate,
+    AgentAuditService? auditService,
+    this.executionArmed = defaultExecutionArmed,
+  }) : _firestore = firestore ?? FirebaseFirestore.instance,
+       _writeGate =
+           writeGate ?? const AgentSecurityIncidentPersistenceWriteGate() {
+    _auditService = auditService ?? AgentAuditService(firestore: _firestore);
+  }
+
+  static const String collectionName = 'agent_security_incidents';
+  static const bool defaultExecutionArmed = false;
+
+  final FirebaseFirestore _firestore;
+  final AgentSecurityIncidentPersistenceWriteGate _writeGate;
+  late final AgentAuditService _auditService;
+
+  /// Step1I-E never attaches this repository to runtime.
+  /// Future controlled activation must explicitly opt in.
+  final bool executionArmed;
+
+  static const Set<String> persistedFields = <String>{
+    'incidentId',
+    'source',
+    'sourceReferenceId',
+    'pseudonymousSubjectRef',
+    'status',
+    'severity',
+    'evidenceConfidence',
+    'createdAt',
+    'updatedAt',
+    'evidenceReferenceCodes',
+    'assignedResponderRef',
+    'acknowledgedAt',
+    'triagedAt',
+    'resolvedAt',
+    'closedAt',
+  };
+
+  static const Set<String> immutableFields = <String>{
+    'incidentId',
+    'source',
+    'sourceReferenceId',
+    'pseudonymousSubjectRef',
+    'createdAt',
+  };
+
+  static const Set<String> lifecycleFields = <String>{
+    'status',
+    'severity',
+    'evidenceConfidence',
+    'updatedAt',
+    'evidenceReferenceCodes',
+    'assignedResponderRef',
+    'acknowledgedAt',
+    'triagedAt',
+    'resolvedAt',
+    'closedAt',
+  };
+
+  static final RegExp _safeId = RegExp(r'^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$');
+
+  CollectionReference<Map<String, dynamic>> get _collection =>
+      _firestore.collection(collectionName);
+
+  Future<Map<String, dynamic>?> getById(String incidentId) async {
+    _validateId(incidentId);
+
+    final DocumentSnapshot<Map<String, dynamic>> snapshot = await _collection
+        .doc(incidentId)
+        .get();
+
+    final Map<String, dynamic>? data = snapshot.data();
+
+    if (!snapshot.exists || data == null) {
+      return null;
+    }
+
+    return Map<String, dynamic>.unmodifiable(Map<String, dynamic>.from(data));
+  }
+
+  Stream<List<Map<String, dynamic>>> watchRecent({int limit = 50}) {
+    final int safeLimit = limit.clamp(1, 100);
+
+    return _collection
+        .orderBy('updatedAt', descending: true)
+        .limit(safeLimit)
+        .snapshots()
+        .map(
+          (QuerySnapshot<Map<String, dynamic>> snapshot) =>
+              List<Map<String, dynamic>>.unmodifiable(
+                snapshot.docs.map(
+                  (QueryDocumentSnapshot<Map<String, dynamic>> doc) =>
+                      Map<String, dynamic>.unmodifiable(
+                        Map<String, dynamic>.from(doc.data()),
+                      ),
+                ),
+              ),
+        );
+  }
+
+  Future<void> create({
+    required AgentSecurityIncidentRecord record,
+    required AgentSecurityIncidentPersistenceWriteAuthorization authorization,
+    DateTime? nowUtc,
+  }) async {
+    _requireExecutionArmed();
+
+    final Map<String, dynamic> persisted = _toPersistedMap(record);
+    final String incidentId = persisted['incidentId']! as String;
+
+    _writeGate.requireAuthorized(
+      authorization: authorization,
+      expectedOperation: AgentSecurityIncidentPersistenceOperation.create,
+      expectedIncidentId: incidentId,
+      nowUtc: (nowUtc ?? DateTime.now()).toUtc(),
+    );
+
+    final DocumentReference<Map<String, dynamic>> ref = _collection.doc(
+      incidentId,
+    );
+
+    await _firestore.runTransaction<void>((Transaction transaction) async {
+      final DocumentSnapshot<Map<String, dynamic>> existing = await transaction
+          .get(ref);
+
+      if (existing.exists) {
+        throw const AgentSecurityIncidentRepositoryException(
+          'Security incident already exists.',
+        );
+      }
+
+      transaction.set(ref, persisted);
+
+      _appendAtomicAudit(
+        transaction: transaction,
+        record: record,
+        authorization: authorization,
+        actionId: 'ai.security.incident.persist.create',
+        result: 'COMMITTED_ATOMIC',
+        reason:
+            'Security incident create committed atomically with immutable audit.',
+      );
+    });
+  }
+
+  Future<void> updateLifecycle({
+    required AgentSecurityIncidentRecord record,
+    required AgentSecurityIncidentPersistenceWriteAuthorization authorization,
+    DateTime? nowUtc,
+  }) async {
+    _requireExecutionArmed();
+
+    final Map<String, dynamic> persisted = _toPersistedMap(record);
+    final String incidentId = persisted['incidentId']! as String;
+
+    _writeGate.requireAuthorized(
+      authorization: authorization,
+      expectedOperation:
+          AgentSecurityIncidentPersistenceOperation.lifecycleUpdate,
+      expectedIncidentId: incidentId,
+      nowUtc: (nowUtc ?? DateTime.now()).toUtc(),
+    );
+
+    final DocumentReference<Map<String, dynamic>> ref = _collection.doc(
+      incidentId,
+    );
+
+    await _firestore.runTransaction<void>((Transaction transaction) async {
+      final DocumentSnapshot<Map<String, dynamic>> currentSnapshot =
+          await transaction.get(ref);
+
+      final Map<String, dynamic>? current = currentSnapshot.data();
+
+      if (!currentSnapshot.exists || current == null) {
+        throw const AgentSecurityIncidentRepositoryException(
+          'Security incident does not exist.',
+        );
+      }
+
+      for (final String field in immutableFields) {
+        if (current[field] != persisted[field]) {
+          throw AgentSecurityIncidentRepositoryException(
+            'Immutable security incident field changed: $field',
+          );
+        }
+      }
+
+      final Map<String, dynamic> lifecycleUpdate = <String, dynamic>{
+        for (final String field in lifecycleFields) field: persisted[field],
+      };
+
+      transaction.update(ref, lifecycleUpdate);
+
+      _appendAtomicAudit(
+        transaction: transaction,
+        record: record,
+        authorization: authorization,
+        actionId: 'ai.security.incident.persist.lifecycle_update',
+        result: 'COMMITTED_ATOMIC',
+        reason:
+            'Security incident lifecycle update committed atomically with immutable audit.',
+      );
+    });
+  }
+
+  void _appendAtomicAudit({
+    required Transaction transaction,
+    required AgentSecurityIncidentRecord record,
+    required AgentSecurityIncidentPersistenceWriteAuthorization authorization,
+    required String actionId,
+    required String result,
+    required String reason,
+  }) {
+    final Map<String, dynamic> safeAuthorizationMetadata =
+        Map<String, dynamic>.from(authorization.toSafeAuditMetadata());
+
+    safeAuthorizationMetadata.addAll(<String, dynamic>{
+      'atomicWithIncidentWrite': true,
+      'protectedSecurityEvidence': true,
+      'containsRawPrompt': false,
+      'containsPrivatePayload': false,
+    });
+
+    _auditService.appendInTransaction(
+      transaction: transaction,
+      eventType: AgentAuditEventType.systemEvent,
+      severity: _auditSeverityFor(record.severity),
+      actorType: _auditActorTypeFor(authorization.actorRole),
+      actorId: authorization.actorRef,
+      roleId: authorization.actorRole,
+      module: 'security_incident_persistence',
+      actionId: actionId,
+      result: result,
+      reason: reason,
+      scope: <String, dynamic>{
+        'incidentId': record.incidentId,
+        'operation': authorization.operation,
+      },
+      metadata: safeAuthorizationMetadata,
+    );
+  }
+
+  String _auditSeverityFor(String incidentSeverity) {
+    switch (incidentSeverity.trim().toUpperCase()) {
+      case 'CRITICAL':
+        return AgentAuditSeverity.critical;
+      case 'HIGH':
+        return AgentAuditSeverity.high;
+      case 'WARNING':
+      case 'MEDIUM':
+        return AgentAuditSeverity.warning;
+      default:
+        return AgentAuditSeverity.info;
+    }
+  }
+
+  String _auditActorTypeFor(String actorRole) {
+    if (actorRole == AgentSecurityIncidentPersistenceActorRole.owner) {
+      return AgentAuditActorType.owner;
+    }
+
+    return AgentAuditActorType.admin;
+  }
+
+  Map<String, dynamic> _toPersistedMap(AgentSecurityIncidentRecord record) {
+    final Map<String, dynamic> result = <String, dynamic>{
+      'incidentId': record.incidentId,
+      'source': record.source,
+      'sourceReferenceId': record.sourceReferenceId,
+      'pseudonymousSubjectRef': record.pseudonymousSubjectRef,
+      'status': record.status,
+      'severity': record.severity,
+      'evidenceConfidence': record.evidenceConfidence,
+      'createdAt': record.createdAt.toUtc().toIso8601String(),
+      'updatedAt': record.updatedAt.toUtc().toIso8601String(),
+      'evidenceReferenceCodes': List<String>.unmodifiable(
+        record.evidenceReferenceCodes,
+      ),
+      'assignedResponderRef': record.assignedResponderRef,
+      'acknowledgedAt': record.acknowledgedAt?.toUtc().toIso8601String(),
+      'triagedAt': record.triagedAt?.toUtc().toIso8601String(),
+      'resolvedAt': record.resolvedAt?.toUtc().toIso8601String(),
+      'closedAt': record.closedAt?.toUtc().toIso8601String(),
+    };
+
+    _validatePersistedMap(result);
+
+    return Map<String, dynamic>.unmodifiable(result);
+  }
+
+  void _validatePersistedMap(Map<String, dynamic> data) {
+    if (!data.keys.toSet().containsAll(persistedFields) ||
+        data.keys.length != persistedFields.length) {
+      throw const AgentSecurityIncidentRepositoryException(
+        'Security incident persistence shape is invalid.',
+      );
+    }
+
+    for (final String field in <String>[
+      'incidentId',
+      'source',
+      'sourceReferenceId',
+      'pseudonymousSubjectRef',
+      'status',
+      'severity',
+      'evidenceConfidence',
+      'createdAt',
+      'updatedAt',
+    ]) {
+      final Object? value = data[field];
+
+      if (value is! String || value.trim().isEmpty) {
+        throw AgentSecurityIncidentRepositoryException(
+          'Security incident field must be a non-empty string: $field',
+        );
+      }
+    }
+
+    for (final String field in <String>[
+      'incidentId',
+      'sourceReferenceId',
+      'pseudonymousSubjectRef',
+    ]) {
+      _validateId(data[field]! as String);
+    }
+
+    final Object? evidence = data['evidenceReferenceCodes'];
+
+    if (evidence is! List ||
+        evidence.isEmpty ||
+        evidence.length > 12 ||
+        evidence.any(
+          (Object? value) => value is! String || !_safeId.hasMatch(value),
+        )) {
+      throw const AgentSecurityIncidentRepositoryException(
+        'Security incident evidence references are invalid.',
+      );
+    }
+
+    for (final String field in <String>[
+      'assignedResponderRef',
+      'acknowledgedAt',
+      'triagedAt',
+      'resolvedAt',
+      'closedAt',
+    ]) {
+      final Object? value = data[field];
+
+      if (value != null && value is! String) {
+        throw AgentSecurityIncidentRepositoryException(
+          'Security incident optional persistence field is invalid: $field',
+        );
+      }
+    }
+
+    final Object? responder = data['assignedResponderRef'];
+
+    if (responder is String && !_safeId.hasMatch(responder)) {
+      throw const AgentSecurityIncidentRepositoryException(
+        'Security incident responder reference is invalid.',
+      );
+    }
+
+    final DateTime createdAt = _parseUtcDate(
+      data['createdAt']! as String,
+      'createdAt',
+    );
+
+    final DateTime updatedAt = _parseUtcDate(
+      data['updatedAt']! as String,
+      'updatedAt',
+    );
+
+    if (updatedAt.isBefore(createdAt)) {
+      throw const AgentSecurityIncidentRepositoryException(
+        'Security incident updatedAt cannot be before createdAt.',
+      );
+    }
+
+    for (final String field in <String>[
+      'acknowledgedAt',
+      'triagedAt',
+      'resolvedAt',
+      'closedAt',
+    ]) {
+      final Object? value = data[field];
+
+      if (value is String) {
+        final DateTime date = _parseUtcDate(value, field);
+
+        if (date.isBefore(createdAt)) {
+          throw AgentSecurityIncidentRepositoryException(
+            'Security incident $field cannot be before createdAt.',
+          );
+        }
+      }
+    }
+  }
+
+  DateTime _parseUtcDate(String value, String field) {
+    final DateTime? parsed = DateTime.tryParse(value);
+
+    if (parsed == null) {
+      throw AgentSecurityIncidentRepositoryException(
+        'Security incident date is invalid: $field',
+      );
+    }
+
+    return parsed.toUtc();
+  }
+
+  void _validateId(String value) {
+    if (!_safeId.hasMatch(value)) {
+      throw const AgentSecurityIncidentRepositoryException(
+        'Security incident identifier is invalid.',
+      );
+    }
+  }
+
+  void _requireExecutionArmed() {
+    if (!executionArmed) {
+      throw const AgentSecurityIncidentRepositoryException(
+        'Security incident persistence execution is not armed.',
+      );
+    }
+  }
+
+  bool get deleteSupported => false;
+  bool get runtimeAttached => false;
+  bool get deploysRules => false;
+  bool get changesRolloutStage => false;
+  bool get changesAgentMode => false;
+  bool get authorizesSuggestOnly => false;
+  bool get authorizesAuto => false;
+}
+
+class AgentSecurityIncidentRepositoryException implements Exception {
+  const AgentSecurityIncidentRepositoryException(this.message);
+
+  final String message;
+
+  @override
+  String toString() => 'AgentSecurityIncidentRepositoryException: $message';
+}

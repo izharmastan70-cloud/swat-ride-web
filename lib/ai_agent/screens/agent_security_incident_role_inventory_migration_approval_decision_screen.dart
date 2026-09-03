@@ -1,0 +1,272 @@
+import 'package:flutter/material.dart';
+
+import '../models/agent_approval_request.dart';
+import '../models/agent_security_incident_role_inventory_migration_central_approval_request.dart';
+import '../services/agent_security_incident_role_inventory_migration_approval_decision_coordinator.dart';
+import '../services/agent_security_incident_role_inventory_migration_exact_pending_approval_reader.dart';
+import '../services/agent_security_incident_role_inventory_migration_expected_approval_request_factory.dart';
+
+class AgentSecurityIncidentRoleInventoryMigrationApprovalDecisionScreen
+    extends StatefulWidget {
+  const AgentSecurityIncidentRoleInventoryMigrationApprovalDecisionScreen({
+    super.key,
+    required this.currentAdminId,
+  });
+
+  final String currentAdminId;
+
+  @override
+  State<AgentSecurityIncidentRoleInventoryMigrationApprovalDecisionScreen>
+  createState() =>
+      _AgentSecurityIncidentRoleInventoryMigrationApprovalDecisionScreenState();
+}
+
+class _AgentSecurityIncidentRoleInventoryMigrationApprovalDecisionScreenState
+    extends
+        State<
+          AgentSecurityIncidentRoleInventoryMigrationApprovalDecisionScreen
+        > {
+  static const String _approvePhrase = 'APPROVE 22 TO 23';
+  static const String _rejectPhrase = 'REJECT 22 TO 23';
+
+  final AgentSecurityIncidentRoleInventoryMigrationExpectedApprovalRequestFactory
+  _factory =
+      const AgentSecurityIncidentRoleInventoryMigrationExpectedApprovalRequestFactory();
+
+  final AgentSecurityIncidentRoleInventoryMigrationExactPendingApprovalReader
+  _reader =
+      AgentSecurityIncidentRoleInventoryMigrationExactPendingApprovalReader();
+
+  final TextEditingController _confirmationController = TextEditingController();
+
+  late final AgentSecurityIncidentRoleInventoryMigrationCentralApprovalRequest
+  _expected;
+
+  bool _working = false;
+  String _message = '';
+
+  @override
+  void initState() {
+    super.initState();
+
+    _expected = _factory.build(currentAdminId: widget.currentAdminId);
+  }
+
+  @override
+  void dispose() {
+    _confirmationController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _approve(AgentApprovalRequest observed) async {
+    if (_working) return;
+
+    if (_confirmationController.text.trim() != _approvePhrase) {
+      setState(() {
+        _message = 'Type exactly "$_approvePhrase" before approval.';
+      });
+      return;
+    }
+
+    setState(() {
+      _working = true;
+      _message = '';
+    });
+
+    try {
+      final coordinator =
+          AgentSecurityIncidentRoleInventoryMigrationApprovalDecisionCoordinator.live(
+            executionArmed: true,
+          );
+
+      await coordinator.approveObserved(
+        observed: observed,
+        expected: _expected,
+        currentAdminId: widget.currentAdminId,
+      );
+
+      if (!mounted) return;
+
+      setState(() {
+        _message =
+            'Exact migration approval marked APPROVED. '
+            'Migration was NOT executed and approval was NOT consumed.';
+        _confirmationController.clear();
+      });
+    } catch (error) {
+      if (!mounted) return;
+
+      setState(() {
+        _message = 'Approval blocked: $error';
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          _working = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _reject(AgentApprovalRequest observed) async {
+    if (_working) return;
+
+    if (_confirmationController.text.trim() != _rejectPhrase) {
+      setState(() {
+        _message = 'Type exactly "$_rejectPhrase" before rejection.';
+      });
+      return;
+    }
+
+    setState(() {
+      _working = true;
+      _message = '';
+    });
+
+    try {
+      final coordinator =
+          AgentSecurityIncidentRoleInventoryMigrationApprovalDecisionCoordinator.live(
+            executionArmed: true,
+          );
+
+      await coordinator.rejectObserved(
+        observed: observed,
+        expected: _expected,
+        currentAdminId: widget.currentAdminId,
+      );
+
+      if (!mounted) return;
+
+      setState(() {
+        _message =
+            'Exact migration approval marked REJECTED. '
+            'No migration or runtime action executed.';
+        _confirmationController.clear();
+      });
+    } catch (error) {
+      if (!mounted) return;
+
+      setState(() {
+        _message = 'Rejection blocked: $error';
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          _working = false;
+        });
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('ISSUE 11 SERVER-POLLING READER READY')),
+      body: StreamBuilder<AgentApprovalRequest?>(
+        stream: _reader.watchExactPending(expected: _expected),
+        builder: (BuildContext context, AsyncSnapshot<AgentApprovalRequest?> snapshot) {
+          if (snapshot.hasError) {
+            return _body(
+              context,
+              child: Text(
+                'Exact migration approval direct read blocked: '
+                '${snapshot.error}',
+              ),
+            );
+          }
+
+          if (snapshot.connectionState == ConnectionState.waiting &&
+              !snapshot.hasData) {
+            return _body(
+              context,
+              child: const Center(child: CircularProgressIndicator()),
+            );
+          }
+
+          final AgentApprovalRequest? approval = snapshot.data;
+
+          if (approval == null) {
+            return _body(
+              context,
+              child: const Text(
+                'No exact fresh PENDING 22-to-23 migration approval is available. '
+                'The previous request may have expired. '
+                'Expired approvals are never reused. '
+                'Do not use the generic Approval Inbox.',
+              ),
+            );
+          }
+
+          return _body(
+            context,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: <Widget>[
+                const Text(
+                  'EXACT PENDING MIGRATION APPROVAL FOUND',
+                  style: TextStyle(fontWeight: FontWeight.bold),
+                ),
+                const SizedBox(height: 12),
+                const Text(
+                  'Operation: MIGRATE_SECURITY_INCIDENT_ROLE_INVENTORY_22_TO_23',
+                ),
+                const Text('Target role: security_incident_agent'),
+                const Text('Target action: security_incident.attach_runtime'),
+                const Text('Target module: security_incident'),
+                const Text('Current roles: 22'),
+                const Text('Proposed roles: 23'),
+                const Text('Proposed role enabled: NO'),
+                const Text('Rollout stage: MONITOR_ONLY'),
+                const Text('Existing activation-token reuse: NO'),
+                const SizedBox(height: 12),
+                const Text(
+                  'Approval decision only. This screen does NOT consume the '
+                  'approval, execute the role migration, create/enable the '
+                  '23rd role, mutate guard/token/receipt, attach runtime, arm '
+                  'the repository, or write an incident.',
+                ),
+                const SizedBox(height: 16),
+                TextField(
+                  controller: _confirmationController,
+                  enabled: !_working,
+                  decoration: const InputDecoration(
+                    labelText: 'Explicit Owner confirmation',
+                    helperText: 'APPROVE 22 TO 23  |  REJECT 22 TO 23',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                FilledButton(
+                  onPressed: _working ? null : () => _approve(approval),
+                  child: Text(
+                    _working ? 'WORKING...' : 'APPROVE EXACT MIGRATION REQUEST',
+                  ),
+                ),
+                const SizedBox(height: 8),
+                OutlinedButton(
+                  onPressed: _working ? null : () => _reject(approval),
+                  child: const Text('REJECT EXACT MIGRATION REQUEST'),
+                ),
+                if (_message.isNotEmpty) ...<Widget>[
+                  const SizedBox(height: 16),
+                  Text(_message),
+                ],
+              ],
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _body(BuildContext context, {required Widget child}) {
+    return ListView(
+      padding: const EdgeInsets.all(16),
+      children: <Widget>[
+        Card(
+          child: Padding(padding: const EdgeInsets.all(16), child: child),
+        ),
+      ],
+    );
+  }
+}

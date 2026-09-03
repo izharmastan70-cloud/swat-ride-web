@@ -1,0 +1,604 @@
+import 'package:flutter/material.dart';
+
+import '../models/ride_refund_request_model.dart';
+import '../services/ride_refund_service.dart';
+
+class RideRefundManagementScreen extends StatefulWidget {
+  const RideRefundManagementScreen({
+    super.key,
+    required this.adminId,
+    this.adminName = '',
+  });
+
+  final String adminId;
+  final String adminName;
+
+  @override
+  State<RideRefundManagementScreen> createState() =>
+      _RideRefundManagementScreenState();
+}
+
+class _RideRefundManagementScreenState
+    extends State<RideRefundManagementScreen> {
+  static const Color _yellow = Color(0xFFFFD400);
+  static const Color _background = Color(0xFF090909);
+  static const Color _card = Color(0xFF191919);
+
+  final RideRefundService _service = RideRefundService();
+
+  RideRefundStatus? _filter;
+  final Set<String> _saving = <String>{};
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: _background,
+      appBar: AppBar(
+        backgroundColor: const Color(0xFF121212),
+        foregroundColor: Colors.white,
+        elevation: 0,
+        title: const Text(
+          'Ride Refunds & Disputes',
+          style: TextStyle(fontWeight: FontWeight.w900),
+        ),
+      ),
+      body: SafeArea(
+        child: Column(
+          children: <Widget>[
+            _buildGatewayNotice(),
+            _buildFilters(),
+            Expanded(
+              child: StreamBuilder<List<RideRefundRequestModel>>(
+                stream: _service.watchRefundRequests(status: _filter),
+                builder: (context, snapshot) {
+                  if (snapshot.hasError) {
+                    return _MessageState(
+                      icon: Icons.cloud_off_rounded,
+                      title: 'Refund requests could not be loaded',
+                      message: _cleanError(snapshot.error),
+                    );
+                  }
+
+                  if (snapshot.connectionState == ConnectionState.waiting) {
+                    return const Center(
+                      child: CircularProgressIndicator(color: _yellow),
+                    );
+                  }
+
+                  final items =
+                      snapshot.data ?? const <RideRefundRequestModel>[];
+
+                  if (items.isEmpty) {
+                    return const _MessageState(
+                      icon: Icons.receipt_long_outlined,
+                      title: 'No refund requests',
+                      message:
+                          'Refund requests matching this filter will appear here.',
+                    );
+                  }
+
+                  return ListView.separated(
+                    padding: const EdgeInsets.fromLTRB(16, 8, 16, 30),
+                    itemCount: items.length,
+                    separatorBuilder: (_, _) => const SizedBox(height: 12),
+                    itemBuilder: (context, index) {
+                      return _buildRefundCard(items[index]);
+                    },
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildGatewayNotice() {
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: Colors.orange.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: Colors.orangeAccent.withValues(alpha: 0.35)),
+      ),
+      child: const Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Icon(Icons.security_rounded, color: Colors.orangeAccent),
+          SizedBox(width: 12),
+          Expanded(
+            child: Text(
+              'Admin approval does not execute a real provider refund. '
+              'JazzCash, Easypaisa and card refund APIs must remain on the '
+              'secure backend. Mark Refunded only after gateway confirmation.',
+              style: TextStyle(color: Colors.white70, height: 1.4),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildFilters() {
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      padding: const EdgeInsets.fromLTRB(16, 6, 16, 10),
+      child: Row(
+        children: <Widget>[
+          _filterChip(
+            label: 'All',
+            selected: _filter == null,
+            onTap: () => setState(() => _filter = null),
+          ),
+          for (final status in RideRefundStatus.values) ...<Widget>[
+            const SizedBox(width: 8),
+            _filterChip(
+              label: _statusLabel(status),
+              selected: _filter == status,
+              onTap: () => setState(() => _filter = status),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _filterChip({
+    required String label,
+    required bool selected,
+    required VoidCallback onTap,
+  }) {
+    return ChoiceChip(
+      label: Text(label),
+      selected: selected,
+      onSelected: (_) => onTap(),
+      selectedColor: _yellow,
+      backgroundColor: _card,
+      side: BorderSide(color: selected ? _yellow : Colors.white12),
+      labelStyle: TextStyle(
+        color: selected ? Colors.black : Colors.white70,
+        fontWeight: FontWeight.w800,
+      ),
+    );
+  }
+
+  Widget _buildRefundCard(RideRefundRequestModel item) {
+    final bool saving = _saving.contains(item.id);
+
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: _card,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: Colors.white10),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Row(
+            children: <Widget>[
+              Expanded(
+                child: Text(
+                  'PKR ${item.refundAmount.toStringAsFixed(2)}',
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 20,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+              ),
+              _StatusPill(
+                label: _statusLabel(item.status),
+                color: _statusColor(item.status),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Text(
+            'Original: PKR ${item.originalAmount.toStringAsFixed(2)}',
+            style: const TextStyle(color: Colors.white54),
+          ),
+          const SizedBox(height: 14),
+          _detail('Ride ID', item.rideId),
+          _detail('Payment ID', item.paymentId),
+          _detail('User ID', item.userId),
+          _detail(
+            'Payment method',
+            item.paymentMethod.isEmpty ? 'Not recorded' : item.paymentMethod,
+          ),
+          if (item.providerTransactionId.isNotEmpty)
+            _detail('Provider transaction', item.providerTransactionId),
+          const Divider(color: Colors.white12, height: 26),
+          const Text(
+            'Refund reason',
+            style: TextStyle(
+              color: Colors.white54,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+          const SizedBox(height: 5),
+          Text(
+            item.reason,
+            style: const TextStyle(color: Colors.white, height: 1.4),
+          ),
+          if (item.adminNote.isNotEmpty) ...<Widget>[
+            const SizedBox(height: 14),
+            const Text(
+              'Admin note',
+              style: TextStyle(
+                color: Colors.white54,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+            const SizedBox(height: 5),
+            Text(
+              item.adminNote,
+              style: const TextStyle(color: Colors.white70, height: 1.4),
+            ),
+          ],
+          if (item.status == RideRefundStatus.pending) ...<Widget>[
+            const SizedBox(height: 18),
+            Row(
+              children: <Widget>[
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: saving
+                        ? null
+                        : () => _review(item, approve: false),
+                    icon: const Icon(Icons.close_rounded),
+                    label: const Text('Reject'),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: Colors.redAccent,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: FilledButton.icon(
+                    onPressed: saving
+                        ? null
+                        : () => _review(item, approve: true),
+                    icon: saving
+                        ? const SizedBox(
+                            width: 17,
+                            height: 17,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.check_rounded),
+                    label: const Text('Approve'),
+                    style: FilledButton.styleFrom(
+                      backgroundColor: _yellow,
+                      foregroundColor: Colors.black,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ],
+          if (item.status == RideRefundStatus.approved) ...<Widget>[
+            const SizedBox(height: 18),
+            SizedBox(
+              width: double.infinity,
+              child: FilledButton.icon(
+                onPressed: saving ? null : () => _markRefunded(item),
+                icon: const Icon(Icons.verified_rounded),
+                label: const Text('Mark Refunded'),
+                style: FilledButton.styleFrom(
+                  backgroundColor: Colors.green,
+                  foregroundColor: Colors.white,
+                ),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _detail(String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 6),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          SizedBox(
+            width: 118,
+            child: Text(label, style: const TextStyle(color: Colors.white38)),
+          ),
+          Expanded(
+            child: SelectableText(
+              value.isEmpty ? '-' : value,
+              style: const TextStyle(color: Colors.white70),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _review(
+    RideRefundRequestModel item, {
+    required bool approve,
+  }) async {
+    final note = await _askText(
+      title: approve ? 'Approve refund' : 'Reject refund',
+      label: 'Admin reason / note',
+      confirmText: approve ? 'Approve' : 'Reject',
+    );
+
+    if (note == null) {
+      return;
+    }
+
+    setState(() => _saving.add(item.id));
+
+    try {
+      if (approve) {
+        await _service.approveRefund(
+          refundId: item.id,
+          adminId: widget.adminId,
+          adminName: widget.adminName,
+          adminNote: note,
+        );
+      } else {
+        await _service.rejectRefund(
+          refundId: item.id,
+          adminId: widget.adminId,
+          adminName: widget.adminName,
+          adminNote: note,
+        );
+      }
+
+      if (!mounted) {
+        return;
+      }
+
+      _showMessage(
+        approve ? 'Refund approved.' : 'Refund rejected.',
+        success: true,
+      );
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+
+      _showMessage(_cleanError(error));
+    } finally {
+      if (mounted) {
+        setState(() => _saving.remove(item.id));
+      }
+    }
+  }
+
+  Future<void> _markRefunded(RideRefundRequestModel item) async {
+    final reference = await _askText(
+      title: 'Confirm gateway refund',
+      label: 'Gateway refund reference',
+      confirmText: 'Mark Refunded',
+      warning:
+          'Only continue after the real payment provider confirms the refund.',
+    );
+
+    if (reference == null) {
+      return;
+    }
+
+    setState(() => _saving.add(item.id));
+
+    try {
+      await _service.markRefunded(
+        refundId: item.id,
+        adminId: widget.adminId,
+        gatewayRefundReference: reference,
+        gatewayRefundExecuted: true,
+      );
+
+      if (!mounted) {
+        return;
+      }
+
+      _showMessage('Refund marked as completed.', success: true);
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+
+      _showMessage(_cleanError(error));
+    } finally {
+      if (mounted) {
+        setState(() => _saving.remove(item.id));
+      }
+    }
+  }
+
+  Future<String?> _askText({
+    required String title,
+    required String label,
+    required String confirmText,
+    String warning = '',
+  }) async {
+    final controller = TextEditingController();
+
+    final result = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          backgroundColor: const Color(0xFF202020),
+          title: Text(title, style: const TextStyle(color: Colors.white)),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              if (warning.isNotEmpty) ...<Widget>[
+                Text(
+                  warning,
+                  style: const TextStyle(
+                    color: Colors.orangeAccent,
+                    height: 1.35,
+                  ),
+                ),
+                const SizedBox(height: 14),
+              ],
+              TextField(
+                controller: controller,
+                autofocus: true,
+                maxLines: 3,
+                style: const TextStyle(color: Colors.white),
+                decoration: InputDecoration(
+                  labelText: label,
+                  labelStyle: const TextStyle(color: Colors.white54),
+                  enabledBorder: const OutlineInputBorder(
+                    borderSide: BorderSide(color: Colors.white24),
+                  ),
+                  focusedBorder: const OutlineInputBorder(
+                    borderSide: BorderSide(color: _yellow),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          actions: <Widget>[
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () {
+                final value = controller.text.trim();
+
+                if (value.isEmpty) {
+                  return;
+                }
+
+                Navigator.pop(dialogContext, value);
+              },
+              style: FilledButton.styleFrom(
+                backgroundColor: _yellow,
+                foregroundColor: Colors.black,
+              ),
+              child: Text(confirmText),
+            ),
+          ],
+        );
+      },
+    );
+
+    controller.dispose();
+    return result;
+  }
+
+  void _showMessage(String message, {bool success = false}) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        backgroundColor: success ? Colors.green : Colors.redAccent,
+        content: Text(message),
+      ),
+    );
+  }
+
+  static String _statusLabel(RideRefundStatus status) {
+    switch (status) {
+      case RideRefundStatus.pending:
+        return 'Pending';
+      case RideRefundStatus.approved:
+        return 'Approved';
+      case RideRefundStatus.rejected:
+        return 'Rejected';
+      case RideRefundStatus.refunded:
+        return 'Refunded';
+    }
+  }
+
+  static Color _statusColor(RideRefundStatus status) {
+    switch (status) {
+      case RideRefundStatus.pending:
+        return Colors.orangeAccent;
+      case RideRefundStatus.approved:
+        return Colors.lightBlueAccent;
+      case RideRefundStatus.rejected:
+        return Colors.redAccent;
+      case RideRefundStatus.refunded:
+        return Colors.greenAccent;
+    }
+  }
+
+  static String _cleanError(Object? error) {
+    return error
+        .toString()
+        .replaceFirst('Exception: ', '')
+        .replaceFirst('Bad state: ', '')
+        .trim();
+  }
+}
+
+class _StatusPill extends StatelessWidget {
+  const _StatusPill({required this.label, required this.color});
+
+  final String label;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(30),
+        border: Border.all(color: color.withValues(alpha: 0.45)),
+      ),
+      child: Text(
+        label,
+        style: TextStyle(
+          color: color,
+          fontSize: 11,
+          fontWeight: FontWeight.w900,
+        ),
+      ),
+    );
+  }
+}
+
+class _MessageState extends StatelessWidget {
+  const _MessageState({
+    required this.icon,
+    required this.title,
+    required this.message,
+  });
+
+  final IconData icon;
+  final String title;
+  final String message;
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.all(32),
+        child: Column(
+          children: <Widget>[
+            Icon(icon, size: 64, color: Colors.white24),
+            const SizedBox(height: 16),
+            Text(
+              title,
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 19,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              message,
+              textAlign: TextAlign.center,
+              style: const TextStyle(color: Colors.white54, height: 1.4),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}

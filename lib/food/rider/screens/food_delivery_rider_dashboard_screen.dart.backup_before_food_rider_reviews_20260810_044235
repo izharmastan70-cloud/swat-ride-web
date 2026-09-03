@@ -1,0 +1,1112 @@
+// lib/food/rider/screens/food_delivery_rider_dashboard_screen.dart
+// =============================================================
+// SWAT RIDE - FOOD DELIVERY
+// Food Delivery Rider Dashboard Screen
+//
+// Connected with:
+// - FoodDeliveryRiderModel
+// - FoodDeliveryRiderService
+// - FoodOrderModel
+//
+// Real features:
+// - Live rider profile
+// - Online / offline control
+// - Available / busy control
+// - Current delivery card
+// - Available food order count
+// - Earnings and wallet summary
+// - Delivery statistics
+// - Navigation to rider modules
+//
+// Paid map rendering remains temporarily bypassed.
+// =============================================================
+
+import 'package:flutter/material.dart';
+
+import '../../models/food_order_model.dart';
+import '../models/food_delivery_rider_model.dart';
+import '../services/food_delivery_rider_service.dart';
+
+class FoodDeliveryRiderDashboardScreen
+    extends StatefulWidget {
+  const FoodDeliveryRiderDashboardScreen({
+    required this.rider,
+    super.key,
+  });
+
+  final FoodDeliveryRiderModel rider;
+
+  @override
+  State<FoodDeliveryRiderDashboardScreen>
+      createState() =>
+          _FoodDeliveryRiderDashboardScreenState();
+}
+
+class _FoodDeliveryRiderDashboardScreenState
+    extends State<FoodDeliveryRiderDashboardScreen> {
+  static const Color yellow = Color(0xFFFFD60A);
+  static const Color background = Color(0xFF0D0D0D);
+  static const Color cardColor = Color(0xFF1A1A1A);
+
+  final FoodDeliveryRiderService _riderService =
+      FoodDeliveryRiderService();
+
+  bool _isUpdatingStatus = false;
+
+  FoodDeliveryRiderModel get initialRider =>
+      widget.rider;
+
+  void _showMessage(String message) {
+    if (!mounted) {
+      return;
+    }
+
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Text(message),
+        ),
+      );
+  }
+
+  Future<void> _setOnlineStatus({
+    required FoodDeliveryRiderModel rider,
+    required bool value,
+  }) async {
+    if (_isUpdatingStatus) {
+      return;
+    }
+
+    setState(() {
+      _isUpdatingStatus = true;
+    });
+
+    try {
+      await _riderService.setOnlineStatus(
+        riderId: rider.riderId,
+        isOnline: value,
+      );
+
+      _showMessage(
+        value
+            ? 'You are now online.'
+            : 'You are now offline.',
+      );
+    } on FoodDeliveryRiderServiceException
+        catch (error) {
+      _showMessage(error.message);
+    } catch (error) {
+      _showMessage(
+        'Unable to update online status: $error',
+      );
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isUpdatingStatus = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _setAvailability({
+    required FoodDeliveryRiderModel rider,
+    required bool value,
+  }) async {
+    if (_isUpdatingStatus) {
+      return;
+    }
+
+    setState(() {
+      _isUpdatingStatus = true;
+    });
+
+    try {
+      await _riderService.setAvailability(
+        riderId: rider.riderId,
+        isAvailable: value,
+      );
+
+      _showMessage(
+        value
+            ? 'You can now receive food orders.'
+            : 'You are marked busy.',
+      );
+    } on FoodDeliveryRiderServiceException
+        catch (error) {
+      _showMessage(error.message);
+    } catch (error) {
+      _showMessage(
+        'Unable to update availability: $error',
+      );
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isUpdatingStatus = false;
+        });
+      }
+    }
+  }
+
+  void _openRoute(
+    String routeName, {
+    Object? arguments,
+  }) {
+    Navigator.pushNamed(
+      context,
+      routeName,
+      arguments: arguments ?? initialRider,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!initialRider.canAccessRiderDashboard) {
+      return _buildAccessDenied();
+    }
+
+    return Scaffold(
+      backgroundColor: background,
+      appBar: AppBar(
+        backgroundColor: background,
+        elevation: 0,
+        title: const Text(
+          'Food Rider Dashboard',
+          style: TextStyle(
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+        actions: <Widget>[
+          IconButton(
+            tooltip: 'Notifications',
+            onPressed: () {
+              _openRoute(
+                '/food_rider_notifications',
+              );
+            },
+            icon: const Icon(
+              Icons.notifications_outlined,
+            ),
+          ),
+          IconButton(
+            tooltip: 'Profile',
+            onPressed: () {
+              _openRoute(
+                '/food_rider_profile',
+              );
+            },
+            icon: const Icon(
+              Icons.account_circle_outlined,
+            ),
+          ),
+        ],
+      ),
+      body:
+          StreamBuilder<FoodDeliveryRiderModel?>(
+        stream: _riderService.watchRiderById(
+          initialRider.riderId,
+        ),
+        initialData: initialRider,
+        builder: (
+          BuildContext context,
+          AsyncSnapshot<FoodDeliveryRiderModel?>
+              riderSnapshot,
+        ) {
+          if (riderSnapshot.connectionState ==
+                  ConnectionState.waiting &&
+              !riderSnapshot.hasData) {
+            return const Center(
+              child: CircularProgressIndicator(
+                color: yellow,
+              ),
+            );
+          }
+
+          if (riderSnapshot.hasError) {
+            return _buildErrorState();
+          }
+
+          final FoodDeliveryRiderModel rider =
+              riderSnapshot.data ?? initialRider;
+
+          return StreamBuilder<List<FoodOrderModel>>(
+            stream:
+                _riderService.watchRiderActiveOrders(
+              rider.riderId,
+            ),
+            builder: (
+              BuildContext context,
+              AsyncSnapshot<List<FoodOrderModel>>
+                  activeOrderSnapshot,
+            ) {
+              final List<FoodOrderModel>
+                  activeOrders =
+                  activeOrderSnapshot.data ??
+                      const <FoodOrderModel>[];
+
+              final FoodOrderModel? currentOrder =
+                  activeOrders.isEmpty
+                      ? null
+                      : activeOrders.first;
+
+              return StreamBuilder<
+                  List<FoodOrderModel>>(
+                stream:
+                    _riderService.watchAvailableOrders(),
+                builder: (
+                  BuildContext context,
+                  AsyncSnapshot<List<FoodOrderModel>>
+                      availableSnapshot,
+                ) {
+                  final int availableOrders =
+                      availableSnapshot.data?.length ??
+                          0;
+
+                  return RefreshIndicator(
+                    color: yellow,
+                    onRefresh: () async {
+                      setState(() {});
+                    },
+                    child: ListView(
+                      physics:
+                          const AlwaysScrollableScrollPhysics(),
+                      padding:
+                          const EdgeInsets.fromLTRB(
+                        16,
+                        12,
+                        16,
+                        30,
+                      ),
+                      children: <Widget>[
+                        _buildHeaderCard(rider),
+                        const SizedBox(height: 16),
+                        _buildAvailabilityCard(rider),
+                        const SizedBox(height: 16),
+                        if (currentOrder != null)
+                          _buildCurrentDeliveryCard(
+                            rider: rider,
+                            order: currentOrder,
+                          )
+                        else
+                          _buildNoActiveDeliveryCard(
+                            rider,
+                          ),
+                        const SizedBox(height: 18),
+                        _buildStatsGrid(
+                          rider: rider,
+                          availableOrders:
+                              availableOrders,
+                        ),
+                        const SizedBox(height: 22),
+                        const Text(
+                          'Rider Tools',
+                          style: TextStyle(
+                            fontSize: 20,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        _buildActionGrid(
+                          rider: rider,
+                          currentOrder: currentOrder,
+                        ),
+                        const SizedBox(height: 22),
+                        _buildLocationCard(rider),
+                      ],
+                    ),
+                  );
+                },
+              );
+            },
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _buildHeaderCard(
+    FoodDeliveryRiderModel rider,
+  ) {
+    return Container(
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        color: yellow,
+        borderRadius: BorderRadius.circular(22),
+      ),
+      child: Row(
+        children: <Widget>[
+          const CircleAvatar(
+            radius: 32,
+            backgroundColor: Colors.black,
+            child: Icon(
+              Icons.delivery_dining,
+              color: yellow,
+              size: 35,
+            ),
+          ),
+          const SizedBox(width: 15),
+          Expanded(
+            child: Column(
+              crossAxisAlignment:
+                  CrossAxisAlignment.start,
+              children: <Widget>[
+                const Text(
+                  'Food Delivery Rider',
+                  style: TextStyle(
+                    color: Colors.black87,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  rider.fullName,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: Colors.black,
+                    fontSize: 21,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(height: 5),
+                Text(
+                  '${rider.vehicleType.displayName} • ${rider.city}',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: Colors.black87,
+                    fontSize: 12,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const Icon(
+            Icons.verified,
+            color: Colors.black,
+            size: 30,
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildAvailabilityCard(
+    FoodDeliveryRiderModel rider,
+  ) {
+    final Color statusColor = rider.isOnline
+        ? Colors.greenAccent
+        : Colors.redAccent;
+
+    return Container(
+      padding: const EdgeInsets.all(17),
+      decoration: BoxDecoration(
+        color: cardColor,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(
+          color: Colors.white10,
+        ),
+      ),
+      child: Column(
+        children: <Widget>[
+          Row(
+            children: <Widget>[
+              CircleAvatar(
+                backgroundColor:
+                    statusColor.withValues(
+                  alpha: 0.15,
+                ),
+                child: Icon(
+                  rider.isOnline
+                      ? Icons.wifi
+                      : Icons.wifi_off,
+                  color: statusColor,
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment:
+                      CrossAxisAlignment.start,
+                  children: <Widget>[
+                    const Text(
+                      'Rider status',
+                      style: TextStyle(
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      rider.availabilityText,
+                      style: TextStyle(
+                        color: statusColor,
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              if (_isUpdatingStatus)
+                const SizedBox(
+                  width: 24,
+                  height: 24,
+                  child: CircularProgressIndicator(
+                    color: yellow,
+                    strokeWidth: 2,
+                  ),
+                )
+              else
+                Switch(
+                  value: rider.isOnline,
+                  onChanged: rider.isOnDelivery
+                      ? null
+                      : (bool value) =>
+                          _setOnlineStatus(
+                        rider: rider,
+                        value: value,
+                      ),
+                  activeColor: yellow,
+                ),
+            ],
+          ),
+          if (rider.isOnline &&
+              !rider.isOnDelivery) ...<Widget>[
+            const Divider(
+              color: Colors.white12,
+              height: 24,
+            ),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              value: rider.isAvailable,
+              onChanged: _isUpdatingStatus
+                  ? null
+                  : (bool value) =>
+                      _setAvailability(
+                    rider: rider,
+                    value: value,
+                  ),
+              activeColor: yellow,
+              title: const Text(
+                'Receive food orders',
+                style: TextStyle(
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              subtitle: const Text(
+                'Turn this off when you are temporarily busy.',
+                style: TextStyle(
+                  color: Colors.grey,
+                  fontSize: 11,
+                ),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildCurrentDeliveryCard({
+    required FoodDeliveryRiderModel rider,
+    required FoodOrderModel order,
+  }) {
+    return Container(
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: cardColor,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(
+          color: Colors.lightBlueAccent.withValues(
+            alpha: 0.65,
+          ),
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment:
+            CrossAxisAlignment.start,
+        children: <Widget>[
+          Row(
+            children: <Widget>[
+              const CircleAvatar(
+                backgroundColor:
+                    Color(0x3329B6F6),
+                child: Icon(
+                  Icons.route,
+                  color: Colors.lightBlueAccent,
+                ),
+              ),
+              const SizedBox(width: 11),
+              const Expanded(
+                child: Text(
+                  'Current Delivery',
+                  style: TextStyle(
+                    fontSize: 17,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+              Text(
+                _orderStatusText(order.status),
+                style: const TextStyle(
+                  color: Colors.lightBlueAccent,
+                  fontSize: 11,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 13),
+          Text(
+            'Order #${_shortId(order.orderId)}',
+            style: const TextStyle(
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          const SizedBox(height: 5),
+          Text(
+            order.deliveryAddress.fullAddress,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+              color: Colors.grey,
+              fontSize: 12,
+              height: 1.4,
+            ),
+          ),
+          const SizedBox(height: 13),
+          SizedBox(
+            width: double.infinity,
+            child: ElevatedButton.icon(
+              onPressed: () {
+                _openRoute(
+                  '/food_rider_active_delivery',
+                  arguments: <String, dynamic>{
+                    'rider': rider,
+                    'order': order,
+                  },
+                );
+              },
+              icon: const Icon(
+                Icons.delivery_dining,
+              ),
+              label: const Text(
+                'Open Active Delivery',
+                style: TextStyle(
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: yellow,
+                foregroundColor: Colors.black,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildNoActiveDeliveryCard(
+    FoodDeliveryRiderModel rider,
+  ) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: cardColor,
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Column(
+        children: <Widget>[
+          const Icon(
+            Icons.delivery_dining,
+            color: yellow,
+            size: 48,
+          ),
+          const SizedBox(height: 10),
+          const Text(
+            'No active delivery',
+            style: TextStyle(
+              fontSize: 17,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          const SizedBox(height: 5),
+          Text(
+            rider.canReceiveOrders
+                ? 'You are ready to receive new food delivery requests.'
+                : 'Go online and enable availability to receive food orders.',
+            textAlign: TextAlign.center,
+            style: const TextStyle(
+              color: Colors.grey,
+              fontSize: 12,
+              height: 1.4,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildStatsGrid({
+    required FoodDeliveryRiderModel rider,
+    required int availableOrders,
+  }) {
+    final List<_RiderStat> stats =
+        <_RiderStat>[
+      _RiderStat(
+        title: 'Available Orders',
+        value: '$availableOrders',
+        icon: Icons.receipt_long_outlined,
+      ),
+      _RiderStat(
+        title: 'Completed',
+        value: '${rider.completedDeliveries}',
+        icon: Icons.task_alt,
+      ),
+      _RiderStat(
+        title: 'Wallet',
+        value:
+            'Rs. ${rider.walletBalance.toStringAsFixed(0)}',
+        icon:
+            Icons.account_balance_wallet_outlined,
+      ),
+      _RiderStat(
+        title: 'Rating',
+        value: rider.rating.toStringAsFixed(1),
+        icon: Icons.star_outline,
+      ),
+    ];
+
+    return GridView.builder(
+      itemCount: stats.length,
+      shrinkWrap: true,
+      physics:
+          const NeverScrollableScrollPhysics(),
+      gridDelegate:
+          const SliverGridDelegateWithFixedCrossAxisCount(
+        crossAxisCount: 2,
+        crossAxisSpacing: 12,
+        mainAxisSpacing: 12,
+        childAspectRatio: 1.42,
+      ),
+      itemBuilder: (
+        BuildContext context,
+        int index,
+      ) {
+        final _RiderStat stat = stats[index];
+
+        return Container(
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            color: cardColor,
+            borderRadius: BorderRadius.circular(19),
+            border: Border.all(
+              color: Colors.white10,
+            ),
+          ),
+          child: Column(
+            crossAxisAlignment:
+                CrossAxisAlignment.start,
+            mainAxisAlignment:
+                MainAxisAlignment.spaceBetween,
+            children: <Widget>[
+              Icon(
+                stat.icon,
+                color: yellow,
+                size: 27,
+              ),
+              Text(
+                stat.value,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  fontSize: 19,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              Text(
+                stat.title,
+                style: const TextStyle(
+                  color: Colors.grey,
+                  fontSize: 11,
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildActionGrid({
+    required FoodDeliveryRiderModel rider,
+    required FoodOrderModel? currentOrder,
+  }) {
+    final List<_RiderAction> actions =
+        <_RiderAction>[
+      _RiderAction(
+        title: 'Available Orders',
+        subtitle: 'View pickup requests',
+        icon: Icons.receipt_long_outlined,
+        routeName:
+            '/food_rider_available_orders',
+      ),
+      _RiderAction(
+        title: 'Active Delivery',
+        subtitle: currentOrder == null
+            ? 'No current order'
+            : 'Continue delivery',
+        icon: Icons.delivery_dining,
+        routeName:
+            '/food_rider_active_delivery',
+        arguments: currentOrder == null
+            ? rider
+            : <String, dynamic>{
+                'rider': rider,
+                'order': currentOrder,
+              },
+      ),
+      _RiderAction(
+        title: 'Delivery History',
+        subtitle: 'Completed and cancelled',
+        icon: Icons.history,
+        routeName:
+            '/food_rider_delivery_history',
+      ),
+      _RiderAction(
+        title: 'Earnings',
+        subtitle: 'Income and commission',
+        icon: Icons.payments_outlined,
+        routeName:
+            '/food_rider_earnings',
+      ),
+      _RiderAction(
+        title: 'Wallet',
+        subtitle: 'Balance and settlement',
+        icon:
+            Icons.account_balance_wallet_outlined,
+        routeName: '/food_rider_wallet',
+      ),
+      _RiderAction(
+        title: 'Profile',
+        subtitle: 'Personal and vehicle',
+        icon: Icons.person_outline,
+        routeName: '/food_rider_profile',
+      ),
+      _RiderAction(
+        title: 'Support',
+        subtitle: 'Help and emergency',
+        icon: Icons.support_agent,
+        routeName: '/food_rider_support',
+      ),
+      _RiderAction(
+        title: 'Notifications',
+        subtitle: 'Orders and admin alerts',
+        icon: Icons.notifications_outlined,
+        routeName:
+            '/food_rider_notifications',
+      ),
+    ];
+
+    return GridView.builder(
+      itemCount: actions.length,
+      shrinkWrap: true,
+      physics:
+          const NeverScrollableScrollPhysics(),
+      gridDelegate:
+          const SliverGridDelegateWithFixedCrossAxisCount(
+        crossAxisCount: 2,
+        crossAxisSpacing: 12,
+        mainAxisSpacing: 12,
+        childAspectRatio: 1.15,
+      ),
+      itemBuilder: (
+        BuildContext context,
+        int index,
+      ) {
+        final _RiderAction action =
+            actions[index];
+
+        return Material(
+          color: cardColor,
+          borderRadius: BorderRadius.circular(19),
+          child: InkWell(
+            borderRadius: BorderRadius.circular(19),
+            onTap: () {
+              _openRoute(
+                action.routeName,
+                arguments:
+                    action.arguments ?? rider,
+              );
+            },
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment:
+                    CrossAxisAlignment.start,
+                children: <Widget>[
+                  CircleAvatar(
+                    backgroundColor:
+                        yellow.withValues(
+                      alpha: 0.12,
+                    ),
+                    child: Icon(
+                      action.icon,
+                      color: yellow,
+                    ),
+                  ),
+                  const Spacer(),
+                  Text(
+                    action.title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 15,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    action.subtitle,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: Colors.grey,
+                      fontSize: 11,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildLocationCard(
+    FoodDeliveryRiderModel rider,
+  ) {
+    return Container(
+      padding: const EdgeInsets.all(17),
+      decoration: BoxDecoration(
+        color: cardColor,
+        borderRadius: BorderRadius.circular(19),
+        border: Border.all(
+          color: Colors.white10,
+        ),
+      ),
+      child: Row(
+        children: <Widget>[
+          CircleAvatar(
+            backgroundColor:
+                yellow.withValues(alpha: 0.12),
+            child: const Icon(
+              Icons.my_location,
+              color: yellow,
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment:
+                  CrossAxisAlignment.start,
+              children: <Widget>[
+                const Text(
+                  'Live Location',
+                  style: TextStyle(
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  rider.hasLiveLocation
+                      ? '${rider.currentLatitude.toStringAsFixed(6)}, '
+                          '${rider.currentLongitude.toStringAsFixed(6)}'
+                      : 'Location not updated yet',
+                  style: const TextStyle(
+                    color: Colors.grey,
+                    fontSize: 11,
+                  ),
+                ),
+                const SizedBox(height: 3),
+                const Text(
+                  'Paid map rendering is bypassed; Firestore coordinates remain supported.',
+                  style: TextStyle(
+                    color: Colors.grey,
+                    fontSize: 10,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildAccessDenied() {
+    return Scaffold(
+      backgroundColor: background,
+      appBar: AppBar(
+        backgroundColor: background,
+        title: const Text(
+          'Food Rider Dashboard',
+        ),
+      ),
+      body: Center(
+        child: Padding(
+          padding: const EdgeInsets.all(30),
+          child: Column(
+            mainAxisAlignment:
+                MainAxisAlignment.center,
+            children: <Widget>[
+              const Icon(
+                Icons.lock_outline,
+                color: Colors.redAccent,
+                size: 72,
+              ),
+              const SizedBox(height: 16),
+              const Text(
+                'Dashboard access unavailable',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontSize: 21,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                'Food Rider dashboard is available only after admin approval.',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  color: Colors.grey,
+                  height: 1.4,
+                ),
+              ),
+              const SizedBox(height: 22),
+              ElevatedButton(
+                onPressed: () {
+                  Navigator.pop(context);
+                },
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: yellow,
+                  foregroundColor: Colors.black,
+                ),
+                child: const Text('Go Back'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildErrorState() {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(30),
+        child: Column(
+          mainAxisAlignment:
+              MainAxisAlignment.center,
+          children: <Widget>[
+            const Icon(
+              Icons.cloud_off,
+              color: Colors.redAccent,
+              size: 72,
+            ),
+            const SizedBox(height: 16),
+            const Text(
+              'Unable to load rider dashboard',
+              style: TextStyle(
+                fontSize: 21,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              'Check Firestore connection and security rules.',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                color: Colors.grey,
+              ),
+            ),
+            const SizedBox(height: 18),
+            ElevatedButton(
+              onPressed: () {
+                setState(() {});
+              },
+              style: ElevatedButton.styleFrom(
+                backgroundColor: yellow,
+                foregroundColor: Colors.black,
+              ),
+              child: const Text('Try Again'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  String _shortId(String value) {
+    if (value.length <= 8) {
+      return value;
+    }
+
+    return value.substring(0, 8);
+  }
+
+  static String _orderStatusText(
+    FoodOrderStatus status,
+  ) {
+    switch (status) {
+      case FoodOrderStatus.pending:
+        return 'Pending';
+      case FoodOrderStatus.accepted:
+        return 'Accepted';
+      case FoodOrderStatus.preparing:
+        return 'Preparing';
+      case FoodOrderStatus.readyForPickup:
+        return 'Ready for Pickup';
+      case FoodOrderStatus.pickedUp:
+        return 'Picked Up';
+      case FoodOrderStatus.onTheWay:
+        return 'On The Way';
+      case FoodOrderStatus.delivered:
+        return 'Delivered';
+      case FoodOrderStatus.cancelled:
+        return 'Cancelled';
+    }
+  }
+}
+
+class _RiderStat {
+  const _RiderStat({
+    required this.title,
+    required this.value,
+    required this.icon,
+  });
+
+  final String title;
+  final String value;
+  final IconData icon;
+}
+
+class _RiderAction {
+  const _RiderAction({
+    required this.title,
+    required this.subtitle,
+    required this.icon,
+    required this.routeName,
+    this.arguments,
+  });
+
+  final String title;
+  final String subtitle;
+  final IconData icon;
+  final String routeName;
+  final Object? arguments;
+}

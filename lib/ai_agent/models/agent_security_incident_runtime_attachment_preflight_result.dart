@@ -1,0 +1,66 @@
+abstract final class AgentSecurityIncidentRuntimeAttachmentPreflightStatus {
+  static const String notArmed = 'PREFLIGHT_NOT_ARMED';
+  static const String freshOwnerBlocked = 'FRESH_OWNER_BLOCKED';
+  static const String persistedRoleBlocked = 'PERSISTED_ROLE_BLOCKED';
+  static const String permissionBlocked = 'PERMISSION_BLOCKED';
+  static const String runtimeBlocked = 'RUNTIME_GATE_BLOCKED';
+  static const String approvalRequiredDecisionMissing =
+      'APPROVAL_REQUIRED_DECISION_MISSING';
+  static const String approvalUnavailable = 'APPROVAL_UNAVAILABLE';
+  static const String approvalInvalid = 'APPROVAL_INVALID';
+  static const String approvalMismatch = 'APPROVAL_MISMATCH';
+
+  static const String readyForSeparateApprovalConsumption =
+      'READY_FOR_SEPARATE_ONE_TIME_APPROVAL_CONSUMPTION';
+}
+
+class AgentSecurityIncidentRuntimeAttachmentPreflightResult {
+  const AgentSecurityIncidentRuntimeAttachmentPreflightResult({
+    required this.status,
+    required this.reasonCode,
+    required this.freshOwnerVerified,
+    required this.permissionRequiresApproval,
+    required this.runtimeRequiresApproval,
+    required this.centralApprovalSnapshotVerified,
+  });
+
+  final String status;
+  final String reasonCode;
+
+  final bool freshOwnerVerified;
+  final bool permissionRequiresApproval;
+  final bool runtimeRequiresApproval;
+  final bool centralApprovalSnapshotVerified;
+
+  bool get readyForSeparateApprovalConsumption =>
+      status ==
+      AgentSecurityIncidentRuntimeAttachmentPreflightStatus
+          .readyForSeparateApprovalConsumption;
+
+  // This result is only an authorization-preflight projection.
+  // It is never itself an activation capability.
+  bool get containsRawIdToken => false;
+  bool get containsUid => false;
+  bool get containsEmail => false;
+  bool get containsPhone => false;
+  bool get containsRawClaims => false;
+
+  bool get createsApproval => false;
+  bool get approvesRequest => false;
+  bool get consumesApproval => false;
+
+  bool get instantiatesRepository => false;
+  bool get attachesRuntime => false;
+  bool get armsRepository => false;
+
+  bool get createsIncident => false;
+  bool get updatesIncident => false;
+  bool get createsIdempotencyReceipt => false;
+
+  bool get changesRolloutStage => false;
+  bool get changesAgentMode => false;
+  bool get changesEmergencyStop => false;
+
+  bool get authorizesSuggestOnly => false;
+  bool get authorizesAuto => false;
+}

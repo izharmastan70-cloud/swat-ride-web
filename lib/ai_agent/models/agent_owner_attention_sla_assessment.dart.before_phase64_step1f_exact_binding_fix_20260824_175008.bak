@@ -1,0 +1,51 @@
+import '../constants/agent_owner_attention_sla_constants.dart';
+
+class AgentOwnerAttentionSlaAssessment {
+  AgentOwnerAttentionSlaAssessment({
+    required this.attentionId,
+    required this.state,
+    required this.age,
+    required this.threshold,
+    required this.notificationEligible,
+    required this.notificationReason,
+  }) {
+    validate();
+  }
+
+  final String attentionId;
+  final String state;
+  final Duration age;
+  final Duration threshold;
+
+  final bool notificationEligible;
+  final String? notificationReason;
+
+  bool get stale =>
+      state == AgentOwnerAttentionSlaState.stale ||
+      state == AgentOwnerAttentionSlaState.immediateEscalation;
+
+  bool get terminal => state == AgentOwnerAttentionSlaState.terminal;
+
+  bool get assessmentOnly => true;
+  bool get inboxMutated => false;
+  bool get sourceRecordMutated => false;
+  bool get notificationSent => false;
+  bool get approvalConsumed => false;
+  bool get permissionGranted => false;
+  bool get businessActionExecuted => false;
+
+  void validate() {
+    if (attentionId.trim().isEmpty ||
+        !AgentOwnerAttentionSlaState.values.contains(state) ||
+        age.isNegative ||
+        threshold.isNegative ||
+        (notificationEligible &&
+            (notificationReason == null ||
+                !AgentOwnerAttentionNotificationReason.values.contains(
+                  notificationReason,
+                ))) ||
+        (!notificationEligible && notificationReason != null)) {
+      throw const FormatException('Invalid Owner Attention SLA assessment.');
+    }
+  }
+}

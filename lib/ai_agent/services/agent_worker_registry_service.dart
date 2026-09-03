@@ -1,0 +1,282 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
+
+import '../constants/agent_dispatcher_constants.dart';
+import '../models/agent_worker.dart';
+
+// =========================================================
+// AI AGENT â€” WORKER REGISTRY SERVICE
+// =========================================================
+//
+// Phase 22 worker lifecycle:
+// - register/update worker capabilities
+// - heartbeat
+// - operational status
+// - Super Admin enable/disable
+// - worker monitoring streams
+
+class AgentWorkerRegistryService {
+  final FirebaseFirestore _firestore;
+
+  AgentWorkerRegistryService({
+    FirebaseFirestore? firestore,
+  }) : _firestore = firestore ?? FirebaseFirestore.instance;
+
+  CollectionReference<Map<String, dynamic>> get _workers =>
+      _firestore.collection(AgentWorkerCollection.workers);
+
+  Future<void> registerWorker(AgentWorker worker) async {
+    worker.validate();
+
+    final DocumentReference<Map<String, dynamic>> document =
+        _workers.doc(worker.workerId);
+
+    await _firestore.runTransaction<void>(
+      (Transaction transaction) async {
+        final DocumentSnapshot<Map<String, dynamic>> snapshot =
+            await transaction.get(document);
+
+        if (!snapshot.exists) {
+          transaction.set(document, worker.toMap());
+          return;
+        }
+
+        final AgentWorker existing = AgentWorker.fromMap(
+          snapshot.data()!,
+          documentId: snapshot.id,
+        );
+
+        transaction.update(
+          document,
+          <String, dynamic>{
+            'name': worker.name,
+            'workerType': worker.workerType,
+            'providerId': worker.providerId,
+            'supportedRoleIds': worker.supportedRoleIds,
+            'supportedModules': worker.supportedModules,
+            'maxConcurrentTasks': worker.maxConcurrentTasks,
+            'metadata': worker.metadata,
+            'status': existing.enabled
+                ? worker.status
+                : AgentWorkerStatus.offline,
+            'lastHeartbeatAt':
+                Timestamp.fromDate(worker.lastHeartbeatAt),
+            'updatedAt': Timestamp.fromDate(worker.updatedAt),
+          },
+        );
+      },
+    );
+  }
+
+  Future<AgentWorker?> getWorker(String workerId) async {
+    final String normalizedWorkerId = workerId.trim();
+
+    if (normalizedWorkerId.isEmpty) {
+      throw const AgentWorkerRegistryException(
+        code: 'invalid_worker_id',
+        message: 'workerId is required.',
+      );
+    }
+
+    final DocumentSnapshot<Map<String, dynamic>> snapshot =
+        await _workers.doc(normalizedWorkerId).get();
+
+    if (!snapshot.exists) return null;
+
+    return AgentWorker.fromMap(
+      snapshot.data()!,
+      documentId: snapshot.id,
+    );
+  }
+
+  Stream<AgentWorker?> watchWorker(String workerId) {
+    final String normalizedWorkerId = workerId.trim();
+
+    if (normalizedWorkerId.isEmpty) {
+      throw const AgentWorkerRegistryException(
+        code: 'invalid_worker_id',
+        message: 'workerId is required.',
+      );
+    }
+
+    return _workers.doc(normalizedWorkerId).snapshots().map(
+      (DocumentSnapshot<Map<String, dynamic>> snapshot) {
+        if (!snapshot.exists) return null;
+
+        return AgentWorker.fromMap(
+          snapshot.data()!,
+          documentId: snapshot.id,
+        );
+      },
+    );
+  }
+
+  Stream<List<AgentWorker>> watchWorkers({
+    bool enabledOnly = false,
+    int limit = 100,
+  }) {
+    if (limit < 1 || limit > 200) {
+      throw const AgentWorkerRegistryException(
+        code: 'invalid_limit',
+        message: 'Worker limit must be between 1 and 200.',
+      );
+    }
+
+    Query<Map<String, dynamic>> query =
+        _workers.orderBy('name').limit(limit);
+
+    if (enabledOnly) {
+      query = _workers
+          .where('enabled', isEqualTo: true)
+          .orderBy('name')
+          .limit(limit);
+    }
+
+    return query.snapshots().map(
+      (QuerySnapshot<Map<String, dynamic>> snapshot) =>
+          snapshot.docs
+              .map(
+                (QueryDocumentSnapshot<Map<String, dynamic>>
+                    document) =>
+                    AgentWorker.fromMap(
+                  document.data(),
+                  documentId: document.id,
+                ),
+              )
+              .toList(growable: false),
+    );
+  }
+
+  Future<void> recordHeartbeat({
+    required String workerId,
+    String? status,
+  }) async {
+    final String normalizedWorkerId = workerId.trim();
+
+    if (normalizedWorkerId.isEmpty) {
+      throw const AgentWorkerRegistryException(
+        code: 'invalid_worker_id',
+        message: 'workerId is required.',
+      );
+    }
+
+    if (status != null &&
+        !AgentWorkerStatus.isValid(status)) {
+      throw AgentWorkerRegistryException(
+        code: 'invalid_worker_status',
+        message: 'Invalid worker status: $status',
+      );
+    }
+
+    final DocumentReference<Map<String, dynamic>> document =
+        _workers.doc(normalizedWorkerId);
+
+    await _firestore.runTransaction<void>(
+      (Transaction transaction) async {
+        final DocumentSnapshot<Map<String, dynamic>> snapshot =
+            await transaction.get(document);
+
+        if (!snapshot.exists) {
+          throw const AgentWorkerRegistryException(
+            code: 'worker_not_found',
+            message:
+                'Worker must be registered before heartbeat.',
+          );
+        }
+
+        final AgentWorker worker = AgentWorker.fromMap(
+          snapshot.data()!,
+          documentId: snapshot.id,
+        );
+
+        if (!worker.enabled) {
+          throw const AgentWorkerRegistryException(
+            code: 'worker_disabled',
+            message:
+                'Disabled worker cannot publish a heartbeat.',
+          );
+        }
+
+        final DateTime now = DateTime.now().toUtc();
+
+        transaction.update(
+          document,
+          <String, dynamic>{
+            'lastHeartbeatAt': Timestamp.fromDate(now),
+            'updatedAt': Timestamp.fromDate(now),
+            'status': ?status,
+          },
+        );
+      },
+    );
+  }
+
+  Future<void> setWorkerEnabled({
+    required String workerId,
+    required bool enabled,
+  }) async {
+    final String normalizedWorkerId = workerId.trim();
+
+    if (normalizedWorkerId.isEmpty) {
+      throw const AgentWorkerRegistryException(
+        code: 'invalid_worker_id',
+        message: 'workerId is required.',
+      );
+    }
+
+    final DateTime now = DateTime.now().toUtc();
+
+    await _workers.doc(normalizedWorkerId).update(
+      <String, dynamic>{
+        'enabled': enabled,
+        'status': enabled
+            ? AgentWorkerStatus.available
+            : AgentWorkerStatus.offline,
+        'updatedAt': Timestamp.fromDate(now),
+      },
+    );
+  }
+
+  Future<void> setWorkerStatus({
+    required String workerId,
+    required String status,
+  }) async {
+    final String normalizedWorkerId = workerId.trim();
+
+    if (normalizedWorkerId.isEmpty) {
+      throw const AgentWorkerRegistryException(
+        code: 'invalid_worker_id',
+        message: 'workerId is required.',
+      );
+    }
+
+    if (!AgentWorkerStatus.isValid(status)) {
+      throw AgentWorkerRegistryException(
+        code: 'invalid_worker_status',
+        message: 'Invalid worker status: $status',
+      );
+    }
+
+    await _workers.doc(normalizedWorkerId).update(
+      <String, dynamic>{
+        'status': status,
+        'updatedAt': Timestamp.fromDate(
+          DateTime.now().toUtc(),
+        ),
+      },
+    );
+  }
+}
+
+class AgentWorkerRegistryException implements Exception {
+  final String code;
+  final String message;
+
+  const AgentWorkerRegistryException({
+    required this.code,
+    required this.message,
+  });
+
+  @override
+  String toString() =>
+      'AgentWorkerRegistryException($code): $message';
+}

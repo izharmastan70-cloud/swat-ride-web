@@ -1,0 +1,54 @@
+import { createHash } from 'node:crypto';
+
+export function sha256Hex(value) {
+  return createHash('sha256').update(value, 'utf8').digest('hex');
+}
+
+function sortedUniqueStrings(values) {
+  return [...new Set(values.map((value) => String(value).trim()))].sort();
+}
+
+export function normalizeRoleProjection(role) {
+  return {
+    roleId: String(role.roleId ?? '').trim(),
+    module: String(role.module ?? '').trim(),
+    enabled: role.enabled === true,
+    mode: String(role.mode ?? '').trim(),
+    allowedActions: sortedUniqueStrings(role.allowedActions ?? []),
+    approvalRequiredActions: sortedUniqueStrings(
+      role.approvalRequiredActions ?? [],
+    ),
+    forbiddenActions: sortedUniqueStrings(role.forbiddenActions ?? []),
+    aiClass: String(role.aiClass ?? '').trim(),
+    privacyLevel: String(role.privacyLevel ?? '').trim(),
+  };
+}
+
+export function roleInventoryFingerprint(roles) {
+  const projections = roles
+    .map(normalizeRoleProjection)
+    .sort((a, b) => a.roleId.localeCompare(b.roleId));
+
+  return sha256Hex(JSON.stringify(projections));
+}
+
+export function proposedRoleProjection() {
+  return {
+    roleId: 'security_incident_agent',
+    module: 'security_incident',
+    enabled: true,
+    mode: 'ASK_FIRST',
+    allowedActions: ['security_incident.attach_runtime'],
+    approvalRequiredActions: ['security_incident.attach_runtime'],
+    forbiddenActions: [],
+    aiClass: 'FREE_AI',
+    privacyLevel: 'CRITICAL',
+  };
+}
+
+export function proposedInventoryFingerprint(currentRoles) {
+  return roleInventoryFingerprint([
+    ...currentRoles,
+    proposedRoleProjection(),
+  ]);
+}

@@ -1,0 +1,527 @@
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/material.dart';
+
+import '../models/hotel_favorite.dart';
+import '../services/hotel_favorite_service.dart';
+
+class MyFavoriteHotelsScreen extends StatefulWidget {
+  const MyFavoriteHotelsScreen({super.key});
+
+  @override
+  State<MyFavoriteHotelsScreen> createState() =>
+      _MyFavoriteHotelsScreenState();
+}
+
+class _MyFavoriteHotelsScreenState
+    extends State<MyFavoriteHotelsScreen> {
+  static const Color yellow = Color(0xFFFFD60A);
+  static const Color darkCard = Color(0xFF1A1A1A);
+  static const Color darkBackground = Color(0xFF0D0D0D);
+
+  final HotelFavoriteService _service =
+      HotelFavoriteService();
+
+  String _workingHotelId = '';
+
+  @override
+  Widget build(BuildContext context) {
+    final user =
+        FirebaseAuth.instance.currentUser;
+
+    return Scaffold(
+      backgroundColor: darkBackground,
+      appBar: AppBar(
+        backgroundColor: darkBackground,
+        elevation: 0,
+        iconTheme:
+            const IconThemeData(color: Colors.white),
+        title: const Text(
+          'My Favorite Hotels',
+          style: TextStyle(
+            color: Colors.white,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+      ),
+      body: user == null
+          ? _messageState(
+              icon: Icons.lock_outline,
+              title: 'Login Required',
+              message:
+                  'Please log in to view your favorite hotels.',
+            )
+          : SafeArea(
+              child:
+                  StreamBuilder<List<HotelFavorite>>(
+                stream: _service.userFavoritesStream(
+                  user.uid,
+                ),
+                builder: (context, snapshot) {
+                  if (snapshot.connectionState ==
+                      ConnectionState.waiting) {
+                    return const Center(
+                      child: CircularProgressIndicator(
+                        color: yellow,
+                      ),
+                    );
+                  }
+
+                  if (snapshot.hasError) {
+                    return _messageState(
+                      icon: Icons.error_outline,
+                      title:
+                          'Unable to Load Favorites',
+                      message:
+                          snapshot.error.toString(),
+                    );
+                  }
+
+                  final favorites =
+                      snapshot.data ??
+                          const <HotelFavorite>[];
+
+                  if (favorites.isEmpty) {
+                    return _messageState(
+                      icon:
+                          Icons.favorite_border,
+                      title:
+                          'No Favorite Hotels',
+                      message:
+                          'Tap the heart button on any hotel to save it here.',
+                    );
+                  }
+
+                  return ListView.builder(
+                    padding:
+                        const EdgeInsets.fromLTRB(
+                      16,
+                      16,
+                      16,
+                      30,
+                    ),
+                    itemCount: favorites.length,
+                    itemBuilder: (
+                      context,
+                      index,
+                    ) {
+                      return _favoriteCard(
+                        favorite:
+                            favorites[index],
+                        userId: user.uid,
+                      );
+                    },
+                  );
+                },
+              ),
+            ),
+    );
+  }
+
+  Widget _favoriteCard({
+    required HotelFavorite favorite,
+    required String userId,
+  }) {
+    final bool working =
+        _workingHotelId == favorite.hotelId;
+
+    return Container(
+      margin:
+          const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.all(15),
+      decoration: BoxDecoration(
+        color: darkCard,
+        borderRadius:
+            BorderRadius.circular(18),
+        border: Border.all(
+          color: yellow.withValues(
+            alpha: 0.18,
+          ),
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment:
+            CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 58,
+                height: 58,
+                decoration: BoxDecoration(
+                  color:
+                      yellow.withValues(
+                    alpha: 0.12,
+                  ),
+                  borderRadius:
+                      BorderRadius.circular(16),
+                ),
+                child: const Icon(
+                  Icons.hotel,
+                  color: yellow,
+                  size: 30,
+                ),
+              ),
+              const SizedBox(width: 13),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment:
+                      CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      favorite.hotelName,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 17,
+                        fontWeight:
+                            FontWeight.bold,
+                      ),
+                    ),
+                    const SizedBox(height: 5),
+                    Row(
+                      children: [
+                        const Icon(
+                          Icons.location_on,
+                          color: yellow,
+                          size: 15,
+                        ),
+                        const SizedBox(width: 4),
+                        Expanded(
+                          child: Text(
+                            favorite
+                                    .hotelLocation
+                                    .trim()
+                                    .isEmpty
+                                ? 'Location not available'
+                                : favorite
+                                    .hotelLocation,
+                            style:
+                                const TextStyle(
+                              color: Colors.grey,
+                              fontSize: 11,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+              IconButton(
+                tooltip:
+                    'Remove from favorites',
+                onPressed: working
+                    ? null
+                    : () =>
+                        _removeFavorite(
+                      userId: userId,
+                      favorite: favorite,
+                    ),
+                icon: working
+                    ? const SizedBox(
+                        width: 20,
+                        height: 20,
+                        child:
+                            CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: yellow,
+                        ),
+                      )
+                    : const Icon(
+                        Icons.favorite,
+                        color: Colors.redAccent,
+                      ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 13),
+          Row(
+            children: [
+              const Icon(
+                Icons.star,
+                color: yellow,
+                size: 18,
+              ),
+              const SizedBox(width: 5),
+              Text(
+                favorite.averageRating > 0
+                    ? favorite.averageRating
+                        .toStringAsFixed(1)
+                    : 'New',
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontWeight:
+                      FontWeight.bold,
+                ),
+              ),
+              const SizedBox(width: 6),
+              Text(
+                '(${favorite.reviewCount} review(s))',
+                style: const TextStyle(
+                  color: Colors.grey,
+                  fontSize: 11,
+                ),
+              ),
+              const Spacer(),
+              Text(
+                favorite.startingPrice > 0
+                    ? 'From PKR ${_money(favorite.startingPrice)}'
+                    : 'Price on request',
+                style: const TextStyle(
+                  color: yellow,
+                  fontSize: 12,
+                  fontWeight:
+                      FontWeight.bold,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          if (!favorite.isActive)
+            _warningCard(
+              'This hotel is currently unavailable.',
+            ),
+          SizedBox(
+            width: double.infinity,
+            child: OutlinedButton.icon(
+              onPressed: favorite.isActive
+                  ? () {
+                      Navigator.pop(
+                        context,
+                        <String, dynamic>{
+                          'hotelId':
+                              favorite.hotelId,
+                          'hotelName':
+                              favorite.hotelName,
+                          'hotelLocation':
+                              favorite
+                                  .hotelLocation,
+                        },
+                      );
+                    }
+                  : null,
+              icon: const Icon(
+                Icons.arrow_forward,
+              ),
+              label: const Text(
+                'Open Hotel',
+              ),
+              style:
+                  OutlinedButton.styleFrom(
+                foregroundColor: yellow,
+                side: const BorderSide(
+                  color: yellow,
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _removeFavorite({
+    required String userId,
+    required HotelFavorite favorite,
+  }) async {
+    final bool? confirmed =
+        await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          backgroundColor: darkCard,
+          title: const Text(
+            'Remove Favorite',
+            style: TextStyle(
+              color: Colors.white,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          content: Text(
+            'Remove ${favorite.hotelName} from your favorite hotels?',
+            style: const TextStyle(
+              color: Colors.grey,
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () {
+                Navigator.pop(
+                  dialogContext,
+                  false,
+                );
+              },
+              child: const Text('Cancel'),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                Navigator.pop(
+                  dialogContext,
+                  true,
+                );
+              },
+              style:
+                  ElevatedButton.styleFrom(
+                backgroundColor:
+                    Colors.redAccent,
+                foregroundColor:
+                    Colors.white,
+              ),
+              child: const Text('Remove'),
+            ),
+          ],
+        );
+      },
+    );
+
+    if (confirmed != true) {
+      return;
+    }
+
+    setState(() {
+      _workingHotelId =
+          favorite.hotelId;
+    });
+
+    try {
+      await _service.removeFavorite(
+        userId: userId,
+        hotelId: favorite.hotelId,
+      );
+
+      _showMessage(
+        'Hotel removed from favorites.',
+      );
+    } catch (error) {
+      _showMessage(
+        'Unable to remove favorite: $error',
+        isError: true,
+      );
+    } finally {
+      if (mounted) {
+        setState(() {
+          _workingHotelId = '';
+        });
+      }
+    }
+  }
+
+  Widget _warningCard(
+    String message,
+  ) {
+    return Container(
+      width: double.infinity,
+      margin:
+          const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.orange.withValues(
+          alpha: 0.10,
+        ),
+        borderRadius:
+            BorderRadius.circular(12),
+      ),
+      child: Row(
+        children: [
+          const Icon(
+            Icons.warning_amber,
+            color: Colors.orange,
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              message,
+              style: const TextStyle(
+                color: Colors.grey,
+                fontSize: 11,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _messageState({
+    required IconData icon,
+    required String title,
+    required String message,
+  }) {
+    return Center(
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.all(24),
+        child: Container(
+          width: double.infinity,
+          padding: const EdgeInsets.all(22),
+          decoration: BoxDecoration(
+            color: darkCard,
+            borderRadius:
+                BorderRadius.circular(18),
+          ),
+          child: Column(
+            children: [
+              Icon(
+                icon,
+                color: yellow,
+                size: 48,
+              ),
+              const SizedBox(height: 14),
+              Text(
+                title,
+                textAlign:
+                    TextAlign.center,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 19,
+                  fontWeight:
+                      FontWeight.bold,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                message,
+                textAlign:
+                    TextAlign.center,
+                style: const TextStyle(
+                  color: Colors.grey,
+                  height: 1.5,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  String _money(
+    num amount,
+  ) {
+    return amount
+        .toStringAsFixed(0)
+        .replaceAllMapped(
+          RegExp(
+            r'\B(?=(\d{3})+(?!\d))',
+          ),
+          (match) => ',',
+        );
+  }
+
+  void _showMessage(
+    String message, {
+    bool isError = false,
+  }) {
+    if (!mounted) {
+      return;
+    }
+
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Text(message),
+          backgroundColor:
+              isError ? Colors.red : darkCard,
+        ),
+      );
+  }
+}

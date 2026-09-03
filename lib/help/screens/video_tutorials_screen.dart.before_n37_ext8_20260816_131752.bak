@@ -1,0 +1,549 @@
+import 'package:flutter/material.dart';
+import 'package:url_launcher/url_launcher.dart';
+
+import '../models/help_video_tutorial_model.dart';
+import '../services/help_video_tutorial_service.dart';
+
+import '../services/help_video_playback_policy.dart';
+
+class VideoTutorialsScreen extends StatefulWidget {
+  VideoTutorialsScreen({super.key, HelpVideoTutorialService? service})
+    : service = service ?? HelpVideoTutorialService();
+
+  final HelpVideoTutorialService service;
+
+  @override
+  State<VideoTutorialsScreen> createState() => _VideoTutorialsScreenState();
+}
+
+class _VideoTutorialsScreenState extends State<VideoTutorialsScreen> {
+  static const HelpVideoPlaybackPolicy _playbackPolicy =
+      HelpVideoPlaybackPolicy();
+
+  static const List<String> _categories = <String>[
+    'All',
+    'Getting Started',
+    'Ride',
+    'Food',
+    'Hotel',
+    'Tours',
+    'Student',
+    'Cargo',
+    'Safety',
+    'Payments',
+    'Rewards',
+    'Driver',
+    'Partners',
+  ];
+
+  String _selectedCategory = 'All';
+  String _searchQuery = '';
+
+  Future<void> _openTutorial(
+    BuildContext context,
+    HelpVideoTutorialModel tutorial,
+  ) async {
+    if (!widget.service.isSafeVideoUrl(tutorial.videoUrl)) {
+      _showMessage(context, 'This video guide link is not valid.');
+      return;
+    }
+
+    final Uri? uri = Uri.tryParse(tutorial.videoUrl.trim());
+
+    if (uri == null) {
+      _showMessage(context, 'This video guide link is not valid.');
+      return;
+    }
+
+    try {
+      final bool opened = await launchUrl(
+        uri,
+        mode: LaunchMode.externalApplication,
+      );
+
+      if (!opened && context.mounted) {
+        _showMessage(context, 'The video guide could not be opened.');
+      }
+    } on Object {
+      if (context.mounted) {
+        _showMessage(context, 'The video guide could not be opened.');
+      }
+    }
+  }
+
+  void _showMessage(BuildContext context, String message) {
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  String _categoryKey(String value) {
+    return value.trim().toLowerCase().replaceAll('-', '_').replaceAll(' ', '_');
+  }
+
+  String _tutorialCategory(HelpVideoTutorialModel tutorial) {
+    String value = tutorial.category.trim();
+
+    if (value.isEmpty) {
+      value = tutorial.module.trim();
+    }
+
+    switch (_categoryKey(value)) {
+      case '':
+      case 'general':
+      case 'getting_started':
+      case 'gettingstarted':
+      case 'start':
+        return 'Getting Started';
+
+      case 'ride':
+      case 'rides':
+      case 'normal_ride':
+        return 'Ride';
+
+      case 'food':
+      case 'food_delivery':
+      case 'restaurant':
+        return 'Food';
+
+      case 'hotel':
+      case 'hotels':
+        return 'Hotel';
+
+      case 'tour':
+      case 'tours':
+      case 'tourism':
+        return 'Tours';
+
+      case 'student':
+      case 'student_ride':
+      case 'school':
+        return 'Student';
+
+      case 'cargo':
+        return 'Cargo';
+
+      case 'safety':
+      case 'sos':
+      case 'emergency':
+        return 'Safety';
+
+      case 'payment':
+      case 'payments':
+      case 'wallet':
+        return 'Payments';
+
+      case 'reward':
+      case 'rewards':
+      case 'promo':
+      case 'loyalty':
+        return 'Rewards';
+
+      case 'driver':
+      case 'drivers':
+        return 'Driver';
+
+      case 'partner':
+      case 'partners':
+      case 'restaurant_partner':
+      case 'hotel_partner':
+        return 'Partners';
+
+      default:
+        return value;
+    }
+  }
+
+  bool _matchesSearch(HelpVideoTutorialModel tutorial) {
+    final String query = _searchQuery.trim().toLowerCase();
+
+    if (query.isEmpty) {
+      return true;
+    }
+
+    final String searchableText = <String>[
+      tutorial.title,
+      tutorial.description,
+      tutorial.category,
+      tutorial.module,
+      tutorial.feature,
+      tutorial.language,
+      _tutorialCategory(tutorial),
+      ...tutorial.keywords,
+      ...tutorial.intents,
+    ].join(' ').toLowerCase();
+
+    return searchableText.contains(query);
+  }
+
+  bool _matchesCategory(HelpVideoTutorialModel tutorial) {
+    if (_selectedCategory == 'All') {
+      return true;
+    }
+
+    return _tutorialCategory(tutorial) == _selectedCategory;
+  }
+
+  List<HelpVideoTutorialModel> _filterTutorials(
+    List<HelpVideoTutorialModel> tutorials,
+  ) {
+    return tutorials
+        .where(_matchesCategory)
+        .where(_matchesSearch)
+        .toList(growable: false);
+  }
+
+  String _durationLabel(int seconds) {
+    if (seconds <= 0) {
+      return '';
+    }
+
+    if (seconds < 60) {
+      return '${seconds}s';
+    }
+
+    final int minutes = seconds ~/ 60;
+    final int remainingSeconds = seconds % 60;
+
+    if (remainingSeconds == 0) {
+      return '${minutes}m';
+    }
+
+    return '${minutes}m ${remainingSeconds}s';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFF0D0D0D),
+      appBar: AppBar(
+        actions: <Widget>[
+          IconButton(
+            tooltip: 'Low-bandwidth video policy',
+            icon: const Icon(Icons.data_saver_on_outlined),
+            onPressed: () {
+              showDialog<void>(
+                context: context,
+                builder: (dialogContext) => AlertDialog(
+                  title: const Text('Video Guides'),
+                  content: Text(
+                    '${_playbackPolicy.userHint}\n\n'
+                    'Captions and text guidance remain available '
+                    'when video playback is unavailable.',
+                  ),
+                  actions: <Widget>[
+                    TextButton(
+                      onPressed: () => Navigator.pop(dialogContext),
+                      child: const Text('OK'),
+                    ),
+                  ],
+                ),
+              );
+            },
+          ),
+        ],
+        backgroundColor: const Color(0xFF0D0D0D),
+        title: const Text(
+          'Video Guides',
+          style: TextStyle(fontWeight: FontWeight.bold),
+        ),
+      ),
+      body: SafeArea(
+        child: Column(
+          children: <Widget>[
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+              child: TextField(
+                onChanged: (value) {
+                  setState(() {
+                    _searchQuery = value;
+                  });
+                },
+                textInputAction: TextInputAction.search,
+                style: const TextStyle(color: Colors.white),
+                decoration: InputDecoration(
+                  hintText: 'Search video guides',
+                  hintStyle: const TextStyle(color: Colors.white54),
+                  prefixIcon: const Icon(
+                    Icons.search_rounded,
+                    color: Colors.white70,
+                  ),
+                  filled: true,
+                  fillColor: const Color(0xFF181818),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(14),
+                    borderSide: BorderSide.none,
+                  ),
+                ),
+              ),
+            ),
+            SizedBox(
+              height: 48,
+              child: ListView.separated(
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                scrollDirection: Axis.horizontal,
+                itemCount: _categories.length,
+                separatorBuilder: (_, _) => const SizedBox(width: 8),
+                itemBuilder: (BuildContext context, int index) {
+                  final String category = _categories[index];
+
+                  final bool selected = category == _selectedCategory;
+
+                  return ChoiceChip(
+                    label: Text(category),
+                    selected: selected,
+                    onSelected: (_) {
+                      setState(() {
+                        _selectedCategory = category;
+                      });
+                    },
+                    labelStyle: TextStyle(
+                      color: selected ? Colors.black : Colors.white70,
+                      fontWeight: FontWeight.w600,
+                    ),
+                    selectedColor: const Color(0xFFFFD60A),
+                    backgroundColor: const Color(0xFF181818),
+                    side: BorderSide(
+                      color: selected
+                          ? const Color(0xFFFFD60A)
+                          : Colors.white12,
+                    ),
+                    showCheckmark: false,
+                  );
+                },
+              ),
+            ),
+            const SizedBox(height: 6),
+            Expanded(
+              child: StreamBuilder<List<HelpVideoTutorialModel>>(
+                stream: widget.service.watchEnabledTutorials(),
+                builder:
+                    (
+                      BuildContext context,
+                      AsyncSnapshot<List<HelpVideoTutorialModel>> snapshot,
+                    ) {
+                      if (snapshot.connectionState == ConnectionState.waiting &&
+                          !snapshot.hasData) {
+                        return const Center(child: CircularProgressIndicator());
+                      }
+
+                      if (snapshot.hasError) {
+                        return const _TutorialStateView(
+                          icon: Icons.video_library_outlined,
+                          title: 'Video guides are unavailable',
+                          message:
+                              'Video guides are not available right now. Please try again later.',
+                        );
+                      }
+
+                      final List<HelpVideoTutorialModel> tutorials =
+                          snapshot.data ?? const <HelpVideoTutorialModel>[];
+
+                      if (tutorials.isEmpty) {
+                        return const _TutorialStateView(
+                          icon: Icons.ondemand_video_outlined,
+                          title: 'No video guides available yet',
+                          message:
+                              'SWAT RIDE video guides will appear here when they are reviewed and published.',
+                        );
+                      }
+
+                      final List<HelpVideoTutorialModel> filteredTutorials =
+                          _filterTutorials(tutorials);
+
+                      if (filteredTutorials.isEmpty) {
+                        return const _TutorialStateView(
+                          icon: Icons.search_off_rounded,
+                          title: 'No matching video guides',
+                          message:
+                              'Try another search term or select a different category.',
+                        );
+                      }
+
+                      return Column(
+                        children: <Widget>[
+                          Padding(
+                            padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+                            child: Align(
+                              alignment: Alignment.centerLeft,
+                              child: Text(
+                                '${filteredTutorials.length} '
+                                '${filteredTutorials.length == 1 ? "guide" : "guides"}',
+                                style: const TextStyle(
+                                  color: Colors.white54,
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ),
+                          ),
+                          Expanded(
+                            child: ListView.separated(
+                              keyboardDismissBehavior:
+                                  ScrollViewKeyboardDismissBehavior.onDrag,
+                              padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+                              itemCount: filteredTutorials.length,
+                              separatorBuilder: (_, _) =>
+                                  const SizedBox(height: 12),
+                              itemBuilder: (BuildContext context, int index) {
+                                final HelpVideoTutorialModel tutorial =
+                                    filteredTutorials[index];
+
+                                return _TutorialCard(
+                                  tutorial: tutorial,
+                                  category: _tutorialCategory(tutorial),
+                                  durationLabel: _durationLabel(
+                                    tutorial.duration,
+                                  ),
+                                  onTap: () => _openTutorial(context, tutorial),
+                                );
+                              },
+                            ),
+                          ),
+                        ],
+                      );
+                    },
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _TutorialCard extends StatelessWidget {
+  const _TutorialCard({
+    required this.tutorial,
+    required this.category,
+    required this.durationLabel,
+    required this.onTap,
+  });
+
+  final HelpVideoTutorialModel tutorial;
+  final String category;
+  final String durationLabel;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final List<String> metadata = <String>[
+      category,
+      if (durationLabel.isNotEmpty) durationLabel,
+      if (tutorial.language.trim().isNotEmpty &&
+          tutorial.language.trim().toLowerCase() != 'und')
+        tutorial.language.trim().toUpperCase(),
+    ];
+
+    return Material(
+      color: const Color(0xFF181818),
+      borderRadius: BorderRadius.circular(16),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(16),
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              Container(
+                width: 52,
+                height: 52,
+                decoration: BoxDecoration(
+                  color: const Color(0xFFFFD60A),
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                child: const Icon(
+                  Icons.play_arrow_rounded,
+                  color: Colors.black,
+                  size: 30,
+                ),
+              ),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: <Widget>[
+                    Text(
+                      tutorial.title,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.w700,
+                        fontSize: 16,
+                      ),
+                    ),
+                    if (tutorial.description.trim().isNotEmpty) ...[
+                      const SizedBox(height: 6),
+                      Text(
+                        tutorial.description,
+                        maxLines: 3,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: Colors.white60,
+                          height: 1.35,
+                        ),
+                      ),
+                    ],
+                    const SizedBox(height: 8),
+                    Text(
+                      metadata.join(' â€¢ '),
+                      style: const TextStyle(
+                        color: Colors.white38,
+                        fontSize: 12,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
+              const Icon(Icons.open_in_new_rounded, color: Colors.white54),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _TutorialStateView extends StatelessWidget {
+  const _TutorialStateView({
+    required this.icon,
+    required this.title,
+    required this.message,
+  });
+
+  final IconData icon;
+  final String title;
+  final String message;
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(28),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            Icon(icon, color: const Color(0xFFFFD60A), size: 58),
+            const SizedBox(height: 16),
+            Text(
+              title,
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                color: Colors.white,
+                fontWeight: FontWeight.bold,
+                fontSize: 19,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              message,
+              textAlign: TextAlign.center,
+              style: const TextStyle(color: Colors.white60, height: 1.4),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}

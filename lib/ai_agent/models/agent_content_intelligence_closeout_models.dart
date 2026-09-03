@@ -1,0 +1,266 @@
+import '../constants/agent_content_intelligence_closeout_constants.dart';
+
+class AgentContentCommentSignal {
+  const AgentContentCommentSignal({
+    required this.commentId,
+    required this.category,
+    required this.risk,
+    required this.hasPrivateData,
+    required this.ownerAutoReplyPolicyEnabled,
+    required this.approvedResponseReferenceId,
+  });
+
+  final String commentId;
+  final String category;
+  final String risk;
+  final bool hasPrivateData;
+  final bool ownerAutoReplyPolicyEnabled;
+  final String approvedResponseReferenceId;
+
+  bool get containsRawCommentText => false;
+  bool get containsPhone => false;
+  bool get containsEmail => false;
+  bool get containsCnic => false;
+  bool get containsPaymentData => false;
+  bool get grantsAuthority => false;
+  bool get executesReply => false;
+  bool get executesBusinessAction => false;
+  bool get persistsSignal => false;
+
+  void validateStructure() {
+    if (commentId.trim().isEmpty ||
+        commentId.length > 180 ||
+        !AgentContentCommentCategory.values.contains(category) ||
+        !AgentContentCommentRisk.values.contains(risk)) {
+      throw const FormatException('Invalid comment intelligence signal.');
+    }
+  }
+}
+
+class AgentContentCommentRouteDecision {
+  const AgentContentCommentRouteDecision({
+    required this.route,
+    required this.autoReplyEligible,
+    required this.publicDetailedReplyAllowed,
+    required this.privateSupportRequired,
+    required this.emergencyEscalationRequired,
+    required this.humanReviewRequired,
+  });
+
+  final String route;
+  final bool autoReplyEligible;
+  final bool publicDetailedReplyAllowed;
+  final bool privateSupportRequired;
+  final bool emergencyEscalationRequired;
+  final bool humanReviewRequired;
+
+  bool get sendsReply => false;
+  bool get performsRefund => false;
+  bool get performsBooking => false;
+  bool get mutatesWallet => false;
+  bool get changesPrice => false;
+  bool get executesAdminAction => false;
+  bool get executesBusinessAction => false;
+  bool get exposesPrivateData => false;
+  bool get grantsAuthority => false;
+  bool get persistsDecision => false;
+
+  void validateStructure() {
+    if (!AgentContentCommentRoute.values.contains(route)) {
+      throw const FormatException('Invalid comment route.');
+    }
+
+    if (autoReplyEligible && !humanReviewRequired) {
+      throw const FormatException(
+        'Auto-reply eligible content remains review-controlled.',
+      );
+    }
+  }
+}
+
+class AgentContentPerformanceSnapshot {
+  const AgentContentPerformanceSnapshot({
+    required this.contentId,
+    required this.platform,
+    required this.verifiedMetrics,
+    required this.sampleSufficient,
+    required this.views,
+    required this.reach,
+    required this.watchTimeSeconds,
+    required this.averageWatchTimeSeconds,
+    required this.likes,
+    required this.comments,
+    required this.shares,
+    required this.saves,
+    required this.clicks,
+    required this.attributedConversions,
+  });
+
+  final String contentId;
+  final String platform;
+  final bool verifiedMetrics;
+  final bool sampleSufficient;
+  final int views;
+  final int reach;
+  final int watchTimeSeconds;
+  final double averageWatchTimeSeconds;
+  final int likes;
+  final int comments;
+  final int shares;
+  final int saves;
+  final int clicks;
+  final int attributedConversions;
+
+  bool get usesVerifiedMetricsOnlyForLearning => true;
+  bool get conversionsAreAttributionNotGuarantee => true;
+  bool get autoTrainsModel => false;
+  bool get changesProductionBehavior => false;
+  bool get persistsSnapshot => false;
+
+  void validateStructure() {
+    final List<num> values = <num>[
+      views,
+      reach,
+      watchTimeSeconds,
+      averageWatchTimeSeconds,
+      likes,
+      comments,
+      shares,
+      saves,
+      clicks,
+      attributedConversions,
+    ];
+
+    if (contentId.trim().isEmpty ||
+        platform.trim().isEmpty ||
+        values.any((num value) => value < 0)) {
+      throw const FormatException('Invalid performance snapshot.');
+    }
+  }
+}
+
+class AgentContentPerformanceRecommendation {
+  AgentContentPerformanceRecommendation({
+    required this.evidenceSufficient,
+    required this.mayInformNextContent,
+    required this.mayDeclareWinner,
+    required this.platformSpecific,
+    required List<String> suggestedExperimentDimensions,
+  }) : suggestedExperimentDimensions = List<String>.unmodifiable(
+         suggestedExperimentDimensions,
+       );
+
+  final bool evidenceSufficient;
+  final bool mayInformNextContent;
+  final bool mayDeclareWinner;
+  final bool platformSpecific;
+  final List<String> suggestedExperimentDimensions;
+
+  bool get controlledImprovementOnly => true;
+  bool get selfTraining => false;
+  bool get selfDeployment => false;
+  bool get securityRuleChange => false;
+  bool get permissionChange => false;
+  bool get providerPolicyChange => false;
+  bool get costLimitChange => false;
+  bool get autoPublishes => false;
+  bool get persistsRecommendation => false;
+}
+
+class AgentContentRotationContext {
+  AgentContentRotationContext({
+    required List<String> enabledServices,
+    required List<String> recentServices,
+    required List<String> recentContentFingerprints,
+  }) : enabledServices = List<String>.unmodifiable(enabledServices),
+       recentServices = List<String>.unmodifiable(recentServices),
+       recentContentFingerprints = List<String>.unmodifiable(
+         recentContentFingerprints,
+       );
+
+  final List<String> enabledServices;
+  final List<String> recentServices;
+  final List<String> recentContentFingerprints;
+
+  bool isEnabled(String service) => enabledServices.contains(service);
+
+  bool isRecent(String service) => recentServices.contains(service);
+
+  bool isDuplicateFingerprint(String fingerprint) =>
+      recentContentFingerprints.contains(fingerprint);
+
+  bool get writesServiceState => false;
+  bool get persistsHistory => false;
+}
+
+class AgentContentTrendCandidate {
+  const AgentContentTrendCandidate({
+    required this.trendId,
+    required this.verifiedData,
+    required this.sourceFresh,
+    required this.relevantToEnabledService,
+    required this.brandSafe,
+    required this.serviceEnabled,
+  });
+
+  final String trendId;
+  final bool verifiedData;
+  final bool sourceFresh;
+  final bool relevantToEnabledService;
+  final bool brandSafe;
+  final bool serviceEnabled;
+
+  bool get ownerApprovalRequired => true;
+  bool get autoPublishes => false;
+  bool get autoChangesStrategy => false;
+  bool get persistsTrend => false;
+}
+
+class AgentContentOwnerWhatsAppIntelligenceProjection {
+  AgentContentOwnerWhatsAppIntelligenceProjection({
+    required this.requestId,
+    required this.commentSummary,
+    required this.performanceSummary,
+    required this.nextContentSuggestion,
+    required List<String> warnings,
+  }) : warnings = List<String>.unmodifiable(warnings);
+
+  final String requestId;
+  final String commentSummary;
+  final String performanceSummary;
+  final String nextContentSuggestion;
+  final List<String> warnings;
+
+  bool get reviewVisibilityOnly => true;
+  bool get containsRawComments => false;
+  bool get containsRawPrompt => false;
+  bool get containsRawSourcePayload => false;
+  bool get containsPhone => false;
+  bool get containsEmail => false;
+  bool get containsCnic => false;
+  bool get containsPaymentData => false;
+  bool get containsSecrets => false;
+  bool get sendsWhatsApp => false;
+  bool get executesApproval => false;
+  bool get publishesContent => false;
+  bool get schedulesContent => false;
+  bool get executesBusinessAction => false;
+  bool get grantsAuthority => false;
+  bool get persistsProjection => false;
+
+  Map<String, dynamic> toSafeSummary() => <String, dynamic>{
+    'requestId': requestId,
+    'commentSummary': commentSummary,
+    'performanceSummary': performanceSummary,
+    'nextContentSuggestion': nextContentSuggestion,
+    'warnings': warnings,
+    'reviewVisibilityOnly': true,
+    'containsRawComments': false,
+    'containsRawPrompt': false,
+    'containsRawSourcePayload': false,
+    'containsPrivateData': false,
+    'sendsWhatsApp': false,
+    'executesApproval': false,
+    'publishesContent': false,
+  };
+}

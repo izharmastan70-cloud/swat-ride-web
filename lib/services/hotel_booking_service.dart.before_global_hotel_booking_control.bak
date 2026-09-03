@@ -1,0 +1,271 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
+
+import '../models/hotel_booking.dart';
+
+class HotelBookingService {
+  HotelBookingService({
+    FirebaseFirestore? firestore,
+  }) : _firestore =
+            firestore ?? FirebaseFirestore.instance;
+
+  final FirebaseFirestore _firestore;
+
+  // =========================================================
+  // FIRESTORE COLLECTION
+  // =========================================================
+
+  CollectionReference<Map<String, dynamic>>
+      get _bookingsCollection =>
+          _firestore.collection('hotel_bookings');
+
+  // =========================================================
+  // CREATE HOTEL BOOKING
+  // =========================================================
+
+  Future<String> createBooking(
+    HotelBooking booking,
+  ) async {
+    try {
+      final DocumentReference<Map<String, dynamic>>
+          document =
+          await _bookingsCollection.add(
+        booking.toMap(),
+      );
+
+      return document.id;
+    } catch (e) {
+      throw Exception(
+        'Unable to create hotel booking: $e',
+      );
+    }
+  }
+
+  // =========================================================
+  // GET SINGLE HOTEL BOOKING
+  // =========================================================
+
+  Future<HotelBooking?> getBooking(
+    String bookingId,
+  ) async {
+    try {
+      final DocumentSnapshot<Map<String, dynamic>>
+          snapshot =
+          await _bookingsCollection
+              .doc(bookingId)
+              .get();
+
+      if (!snapshot.exists ||
+          snapshot.data() == null) {
+        return null;
+      }
+
+      return HotelBooking.fromMap(
+        snapshot.data()!,
+        snapshot.id,
+      );
+    } catch (e) {
+      throw Exception(
+        'Unable to load hotel booking: $e',
+      );
+    }
+  }
+
+  // =========================================================
+  // GET USER HOTEL BOOKINGS
+  // =========================================================
+
+  Future<List<HotelBooking>>
+      getUserBookings(
+    String userId,
+  ) async {
+    try {
+      final QuerySnapshot<Map<String, dynamic>>
+          snapshot =
+          await _bookingsCollection
+              .where(
+                'userId',
+                isEqualTo: userId,
+              )
+              .orderBy(
+                'createdAt',
+                descending: true,
+              )
+              .get();
+
+      return snapshot.docs
+          .map(
+            (doc) => HotelBooking.fromMap(
+              doc.data(),
+              doc.id,
+            ),
+          )
+          .toList();
+    } catch (e) {
+      throw Exception(
+        'Unable to load user hotel bookings: $e',
+      );
+    }
+  }
+
+  // =========================================================
+  // USER HOTEL BOOKINGS - REALTIME
+  // =========================================================
+
+  Stream<List<HotelBooking>>
+      userBookingsStream(
+    String userId,
+  ) {
+    return _bookingsCollection
+        .where(
+          'userId',
+          isEqualTo: userId,
+        )
+        .orderBy(
+          'createdAt',
+          descending: true,
+        )
+        .snapshots()
+        .map(
+          (snapshot) =>
+              snapshot.docs
+                  .map(
+                    (doc) =>
+                        HotelBooking.fromMap(
+                      doc.data(),
+                      doc.id,
+                    ),
+                  )
+                  .toList(),
+        );
+  }
+
+  // =========================================================
+  // UPDATE BOOKING STATUS
+  // =========================================================
+
+  Future<void> updateBookingStatus({
+    required String bookingId,
+    required String status,
+  }) async {
+    try {
+      await _bookingsCollection
+          .doc(bookingId)
+          .update({
+        'bookingStatus': status,
+        'updatedAt':
+            FieldValue.serverTimestamp(),
+      });
+    } catch (e) {
+      throw Exception(
+        'Unable to update hotel booking status: $e',
+      );
+    }
+  }
+
+  // =========================================================
+  // CONFIRM BOOKING
+  // =========================================================
+
+  Future<void> confirmBooking(
+    String bookingId,
+  ) async {
+    await updateBookingStatus(
+      bookingId: bookingId,
+      status: 'confirmed',
+    );
+  }
+
+  // =========================================================
+  // CANCEL BOOKING
+  // =========================================================
+
+  Future<void> cancelBooking(
+    String bookingId,
+  ) async {
+    await updateBookingStatus(
+      bookingId: bookingId,
+      status: 'cancelled',
+    );
+  }
+
+  // =========================================================
+  // COMPLETE BOOKING
+  // =========================================================
+
+  Future<void> completeBooking(
+    String bookingId,
+  ) async {
+    await updateBookingStatus(
+      bookingId: bookingId,
+      status: 'completed',
+    );
+  }
+
+  // =========================================================
+  // DELETE BOOKING
+  // =========================================================
+
+  Future<void> deleteBooking(
+    String bookingId,
+  ) async {
+    try {
+      await _bookingsCollection
+          .doc(bookingId)
+          .delete();
+    } catch (e) {
+      throw Exception(
+        'Unable to delete hotel booking: $e',
+      );
+    }
+  }
+
+  // =========================================================
+  // UPDATE PAYMENT STATUS
+  // =========================================================
+
+  Future<void> updatePaymentStatus({
+    required String bookingId,
+    required String paymentStatus,
+  }) async {
+    try {
+      await _bookingsCollection
+          .doc(bookingId)
+          .update({
+        'paymentStatus':
+            paymentStatus,
+        'updatedAt':
+            FieldValue.serverTimestamp(),
+      });
+    } catch (e) {
+      throw Exception(
+        'Unable to update hotel payment status: $e',
+      );
+    }
+  }
+
+  // =========================================================
+  // MARK PAYMENT AS PAID
+  // =========================================================
+
+  Future<void> markPaymentPaid(
+    String bookingId,
+  ) async {
+    await updatePaymentStatus(
+      bookingId: bookingId,
+      paymentStatus: 'paid',
+    );
+  }
+
+  // =========================================================
+  // MARK PAYMENT AS PENDING
+  // =========================================================
+
+  Future<void> markPaymentPending(
+    String bookingId,
+  ) async {
+    await updatePaymentStatus(
+      bookingId: bookingId,
+      paymentStatus: 'pending',
+    );
+  }
+}

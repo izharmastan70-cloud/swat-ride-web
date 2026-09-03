@@ -1,0 +1,226 @@
+import 'package:flutter_test/flutter_test.dart';
+
+import 'package:swat_ride/ai_agent/constants/agent_action_ids.dart';
+import 'package:swat_ride/ai_agent/constants/agent_enums.dart';
+import 'package:swat_ride/ai_agent/data/initial_agent_roles_seed.dart';
+import 'package:swat_ride/ai_agent/models/agent_call_existing_ride_support_contract.dart';
+import 'package:swat_ride/ai_agent/models/agent_master_settings.dart';
+import 'package:swat_ride/ai_agent/models/agent_role.dart';
+import 'package:swat_ride/ai_agent/services/agent_action_registry.dart';
+import 'package:swat_ride/ai_agent/services/agent_call_existing_ride_read_authorization_service.dart';
+
+AgentRole _callRole() {
+  return buildInitialAgentRoles().firstWhere(
+    (AgentRole role) => role.roleId == 'call_agent',
+  );
+}
+
+AgentRole _rideRole() {
+  return buildInitialAgentRoles().firstWhere(
+    (AgentRole role) => role.roleId == 'ride_agent',
+  );
+}
+
+AgentMasterSettings _settings({
+  bool masterEnabled = true,
+  bool emergencyReadOnly = false,
+  bool freeAiEnabled = true,
+  bool callAgentEnabled = true,
+}) {
+  final DateTime now = DateTime.utc(2026, 8, 18, 9);
+
+  return AgentMasterSettings(
+    masterEnabled: masterEnabled,
+    emergencyReadOnly: emergencyReadOnly,
+    freeAiEnabled: freeAiEnabled,
+    localAiEnabled: false,
+    paidCodeAiEnabled: false,
+    callAgentEnabled: callAgentEnabled,
+    approvalEngineEnabled: true,
+    auditLoggingEnabled: true,
+    monthlyPaidCodeBudgetRs: 0,
+    paidCodeBudgetUsedRs: 0,
+    emergencyActivatedAt: emergencyReadOnly ? now : null,
+    emergencyActivatedBy: emergencyReadOnly ? 'test' : '',
+    emergencyReason: emergencyReadOnly ? 'test emergency' : '',
+    createdAt: now,
+    updatedAt: null,
+  );
+}
+
+AgentCallExistingRideSupportRequest _request({
+  String caller = 'caller-ref-1',
+  String contact = 'contact-ref-1',
+  String ride = 'ride-ref-1',
+}) {
+  return AgentCallExistingRideSupportRequest(
+    callSessionId: 'call-session-1',
+    requestedBy: 'trusted-call-actor-1',
+    trustedCallerReferenceId: caller,
+    trustedContactReferenceId: contact,
+    trustedRideReferenceId: ride,
+    intent: AgentCallExistingRideSupportIntent.status,
+  );
+}
+
+void main() {
+  group('Phase 49 Stage 2 Step 2C existing Ride read authorization', () {
+    const service = AgentCallExistingRideReadAuthorizationService();
+
+    test('dedicated Call existing-Ride read action is registered', () {
+      expect(
+        AgentActionId.values,
+        contains(AgentActionId.readCallExistingRide),
+      );
+
+      final definition = AgentActionRegistry.definition(
+        AgentActionId.readCallExistingRide,
+      );
+
+      expect(definition.actionId, AgentActionId.readCallExistingRide);
+      expect(definition.module, 'call');
+      expect(definition.readOnly, isTrue);
+      expect(definition.risk, AgentActionRisk.low);
+    });
+
+    test(
+      'call_agent remains AUTO and least privilege with exactly two actions',
+      () {
+        final AgentRole role = _callRole();
+
+        expect(role.mode, AgentMode.auto);
+        expect(role.allowedActions, <String>[
+          AgentActionId.createCallRideBooking,
+          AgentActionId.readCallExistingRide,
+        ]);
+
+        expect(role.allowedActions, isNot(contains(AgentActionId.readRide)));
+        expect(
+          role.allowedActions,
+          isNot(contains(AgentActionId.readRideStatus)),
+        );
+        expect(role.allowedActions, isNot(contains(AgentActionId.cancelRide)));
+        expect(
+          role.allowedActions,
+          isNot(contains(AgentActionId.transferCallToHuman)),
+        );
+      },
+    );
+
+    test(
+      'valid trusted read passes central Permission Engine and Runtime Gate',
+      () {
+        final result = service.authorize(
+          settings: _settings(),
+          role: _callRole(),
+          request: _request(),
+        );
+
+        expect(result.isAllowed, isTrue);
+        expect(result.permissionAllowed, isTrue);
+        expect(result.runtimeAllowed, isTrue);
+        expect(result.trustedContextBound, isTrue);
+        expect(result.exactRoleBound, isTrue);
+        expect(result.exactModuleBound, isTrue);
+        expect(result.exactActionBound, isTrue);
+        expect(result.approvalFreeRead, isTrue);
+        expect(result.reason, isEmpty);
+      },
+    );
+
+    test('AI master OFF blocks read', () {
+      final result = service.authorize(
+        settings: _settings(masterEnabled: false),
+        role: _callRole(),
+        request: _request(),
+      );
+
+      expect(result.isAllowed, isFalse);
+      expect(result.runtimeAllowed, isFalse);
+    });
+
+    test('Call Agent master switch OFF blocks read', () {
+      final result = service.authorize(
+        settings: _settings(callAgentEnabled: false),
+        role: _callRole(),
+        request: _request(),
+      );
+
+      expect(result.isAllowed, isFalse);
+      expect(result.runtimeAllowed, isFalse);
+    });
+
+    test('Free AI switch OFF blocks free-ai Call role', () {
+      final result = service.authorize(
+        settings: _settings(freeAiEnabled: false),
+        role: _callRole(),
+        request: _request(),
+      );
+
+      expect(result.isAllowed, isFalse);
+      expect(result.runtimeAllowed, isFalse);
+    });
+
+    test(
+      'Emergency read-only blocks AUTO Call role under existing Runtime Gate',
+      () {
+        final result = service.authorize(
+          settings: _settings(emergencyReadOnly: true),
+          role: _callRole(),
+          request: _request(),
+        );
+
+        expect(result.isAllowed, isFalse);
+        expect(result.runtimeAllowed, isFalse);
+      },
+    );
+
+    test('wrong role/module fails closed before permission use', () {
+      final result = service.authorize(
+        settings: _settings(),
+        role: _rideRole(),
+        request: _request(),
+      );
+
+      expect(result.isAllowed, isFalse);
+      expect(result.exactRoleBound, isFalse);
+      expect(result.exactModuleBound, isFalse);
+    });
+
+    test('missing trusted caller binding fails closed', () {
+      final result = service.authorize(
+        settings: _settings(),
+        role: _callRole(),
+        request: _request(caller: ''),
+      );
+
+      expect(result.isAllowed, isFalse);
+      expect(result.trustedContextBound, isFalse);
+    });
+
+    test('authorization is read-only and messages never grant authority', () {
+      expect(service.usesAgentPermissionEngine, isTrue);
+      expect(service.usesAgentRuntimeGate, isTrue);
+      expect(service.duplicatesPermissionLogic, isFalse);
+
+      expect(service.queryCanGrantPermission, isFalse);
+      expect(service.rawPhoneCanGrantPermission, isFalse);
+      expect(service.transcriptCanGrantPermission, isFalse);
+      expect(service.voiceCanGrantPermission, isFalse);
+      expect(service.currentFirebaseUserCanGrantPermission, isFalse);
+      expect(service.rideReferenceAloneCanGrantPermission, isFalse);
+
+      expect(service.writesRide, isFalse);
+      expect(service.cancelsRide, isFalse);
+      expect(service.reassignsDriver, isFalse);
+      expect(service.changesPayment, isFalse);
+      expect(service.issuesRefund, isFalse);
+      expect(service.changesFare, isFalse);
+
+      expect(service.invokesFirestore, isFalse);
+      expect(service.invokesFirebaseAuth, isFalse);
+      expect(service.invokesRideService, isFalse);
+      expect(service.invokesTelephonyProvider, isFalse);
+    });
+  });
+}

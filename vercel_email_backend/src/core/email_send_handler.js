@@ -1,0 +1,277 @@
+import { extractBearerToken } from '../security/bearer_token.js';
+
+const REQUIRED_HANDOFF_FIELDS = Object.freeze([
+  'handoffId',
+  'authorizationRequestId',
+  'approvalId',
+  'draftId',
+  'bindingFingerprint',
+  'senderIdentityId',
+  'providerId',
+  'fromAddress',
+  'subject',
+  'bodyText',
+]);
+
+function jsonResponse(status, body) {
+  return Response.json(body, {
+    status,
+    headers: {
+      'cache-control': 'no-store',
+    },
+  });
+}
+
+function nonEmptyString(value) {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+function validateHandoff(handoff) {
+  if (!handoff || typeof handoff !== 'object' || Array.isArray(handoff)) {
+    return 'HANDOFF_MISSING';
+  }
+
+  for (const field of REQUIRED_HANDOFF_FIELDS) {
+    if (!nonEmptyString(handoff[field])) {
+      return `HANDOFF_${field.toUpperCase()}_MISSING`;
+    }
+  }
+
+  for (const listField of ['to', 'cc', 'bcc', 'attachmentIds']) {
+    if (!Array.isArray(handoff[listField])) {
+      return `HANDOFF_${listField.toUpperCase()}_INVALID`;
+    }
+  }
+
+  if (handoff.to.length < 1) {
+    return 'HANDOFF_TO_EMPTY';
+  }
+
+  return '';
+}
+
+function exactApprovalMatches(approval, { handoff, uid }) {
+  return approval?.ok === true &&
+    approval?.consumed === true &&
+    approval?.callerUid === uid &&
+    approval?.roleId === 'email_agent' &&
+    approval?.actionId === 'email.send' &&
+    approval?.module === 'email' &&
+    approval?.approvalId === handoff.approvalId &&
+    approval?.authorizationRequestId === handoff.authorizationRequestId &&
+    approval?.draftId === handoff.draftId &&
+    approval?.bindingFingerprint === handoff.bindingFingerprint &&
+    approval?.exactActionScopeValidated === true;
+}
+
+function exactSenderMatches(sender, handoff) {
+  return sender?.ok === true &&
+    sender?.verified === true &&
+    sender?.enabled === true &&
+    sender?.senderIdentityId === handoff.senderIdentityId &&
+    sender?.providerId === handoff.providerId &&
+    sender?.fromAddress === handoff.fromAddress;
+}
+
+export function createEmailSendHandler({
+  config,
+  authVerifier,
+  superAdminAuthorizer,
+  masterToggleRechecker,
+  approvalRechecker,
+  senderVerifier,
+  replayGuard,
+  providerTransport,
+}) {
+  return async function handleEmailSend(request) {
+    if (request.method !== 'POST') {
+      return jsonResponse(405, {
+        ok: false,
+        code: 'METHOD_NOT_ALLOWED',
+      });
+    }
+
+    const idToken = extractBearerToken(request);
+    if (!idToken) {
+      return jsonResponse(401, {
+        ok: false,
+        code: 'AUTH_BEARER_REQUIRED',
+      });
+    }
+
+    let body;
+    try {
+      body = await request.json();
+    } catch (_) {
+      return jsonResponse(400, {
+        ok: false,
+        code: 'INVALID_JSON',
+      });
+    }
+
+    const handoff = body?.handoff;
+    const handoffError = validateHandoff(handoff);
+
+    if (handoffError) {
+      return jsonResponse(400, {
+        ok: false,
+        code: handoffError,
+      });
+    }
+
+    if (config?.liveSendEnabled !== true) {
+      return jsonResponse(503, {
+        ok: false,
+        code: 'SERVER_EMAIL_TRANSPORT_DISABLED',
+      });
+    }
+
+    if (authVerifier?.ready !== true) {
+      return jsonResponse(503, {
+        ok: false,
+        code: 'FIREBASE_ID_TOKEN_VERIFIER_NOT_READY',
+      });
+    }
+
+    const identity = await authVerifier.verifyIdToken(idToken);
+    if (identity?.ok !== true || !nonEmptyString(identity?.uid)) {
+      return jsonResponse(401, {
+        ok: false,
+        code: 'FIREBASE_ID_TOKEN_REJECTED',
+      });
+    }
+
+    if (superAdminAuthorizer?.ready !== true) {
+      return jsonResponse(503, {
+        ok: false,
+        code: 'SUPER_ADMIN_AUTHORIZER_NOT_READY',
+      });
+    }
+
+    const superAdmin =
+        await superAdminAuthorizer.authorize(identity);
+
+    if (superAdmin?.ok !== true ||
+        superAdmin?.authorized !== true ||
+        superAdmin?.uid !== identity.uid) {
+      return jsonResponse(403, {
+        ok: false,
+        code: 'SUPER_ADMIN_AUTHORIZATION_REQUIRED',
+      });
+    }
+
+    if (masterToggleRechecker?.ready !== true) {
+      return jsonResponse(503, {
+        ok: false,
+        code: 'EMAIL_MASTER_TOGGLE_RECHECK_NOT_READY',
+      });
+    }
+
+    const masterToggle =
+        await masterToggleRechecker
+            .recheckEmailAgentEnabled();
+
+    if (masterToggle?.ok !== true ||
+        masterToggle?.enabled !== true) {
+      return jsonResponse(403, {
+        ok: false,
+        code: 'EMAIL_AGENT_MASTER_SWITCH_OFF',
+      });
+    }
+
+    if (approvalRechecker?.ready !== true) {
+      return jsonResponse(503, {
+        ok: false,
+        code: 'APPROVAL_RECHECK_NOT_READY',
+      });
+    }
+
+    const approval = await approvalRechecker.recheckConsumedApproval({
+      callerUid: identity.uid,
+      approvalId: handoff.approvalId,
+      authorizationRequestId: handoff.authorizationRequestId,
+      draftId: handoff.draftId,
+      bindingFingerprint: handoff.bindingFingerprint,
+      roleId: 'email_agent',
+      actionId: 'email.send',
+      module: 'email',
+    });
+
+    if (!exactApprovalMatches(approval, {
+      handoff,
+      uid: identity.uid,
+    })) {
+      return jsonResponse(403, {
+        ok: false,
+        code: 'CONSUMED_APPROVAL_SCOPE_MISMATCH',
+      });
+    }
+
+    if (senderVerifier?.ready !== true) {
+      return jsonResponse(503, {
+        ok: false,
+        code: 'SENDER_VERIFIER_NOT_READY',
+      });
+    }
+
+    const sender = await senderVerifier.verifySenderIdentity({
+      senderIdentityId: handoff.senderIdentityId,
+      providerId: handoff.providerId,
+      fromAddress: handoff.fromAddress,
+    });
+
+    if (!exactSenderMatches(sender, handoff)) {
+      return jsonResponse(403, {
+        ok: false,
+        code: 'VERIFIED_SENDER_MISMATCH',
+      });
+    }
+
+    if (providerTransport?.ready !== true ||
+        providerTransport?.providerId !== handoff.providerId ||
+        providerTransport?.liveNetworkAllowed !== true) {
+      return jsonResponse(503, {
+        ok: false,
+        code: 'PROVIDER_TRANSPORT_NOT_READY',
+      });
+    }
+
+    if (replayGuard?.ready !== true) {
+      return jsonResponse(503, {
+        ok: false,
+        code: 'ANTI_REPLAY_GUARD_NOT_READY',
+      });
+    }
+
+    const replay = await replayGuard.claim({
+      approvalId: handoff.approvalId,
+      handoffId: handoff.handoffId,
+      authorizationRequestId: handoff.authorizationRequestId,
+      bindingFingerprint: handoff.bindingFingerprint,
+      providerId: handoff.providerId,
+    });
+
+    if (replay?.ok !== true || replay?.claimed !== true) {
+      return jsonResponse(409, {
+        ok: false,
+        code: 'EMAIL_HANDOFF_REPLAY_REJECTED',
+      });
+    }
+
+    const delivery = await providerTransport.deliver(handoff);
+
+    if (delivery?.ok !== true || delivery?.accepted !== true) {
+      return jsonResponse(502, {
+        ok: false,
+        code: 'PROVIDER_DELIVERY_NOT_ACCEPTED',
+      });
+    }
+
+    return jsonResponse(202, {
+      ok: true,
+      code: 'EMAIL_ACCEPTED',
+      providerId: handoff.providerId,
+      providerMessageId: delivery.providerMessageId ?? '',
+    });
+  };
+}

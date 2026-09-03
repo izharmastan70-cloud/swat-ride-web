@@ -1,0 +1,214 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+
+import {
+  LIVE_EXECUTOR_CONTRACT,
+  LIVE_EXECUTOR_DEFAULTS,
+  assertLiveExecutorDefaultDisarmed,
+  executeAtomicMigration,
+  executeTrustedBootstrap,
+} from '../src/trusted_admin_sdk_executor.mjs';
+
+test('trusted live executor is default-disarmed', () => {
+  assert.equal(assertLiveExecutorDefaultDisarmed(), true);
+  assert.equal(LIVE_EXECUTOR_DEFAULTS.executionArmed, false);
+
+  for (const [name, value] of Object.entries(LIVE_EXECUTOR_DEFAULTS)) {
+    if (name.startsWith('allow')) {
+      assert.equal(value, false, `${name} must default false`);
+    }
+  }
+});
+
+test('bootstrap blocks before Admin SDK dynamic import when not armed', async () => {
+  await assert.rejects(
+    executeTrustedBootstrap({
+      approvalId: 'not-used',
+      expectedBindingSha256: 'a'.repeat(64),
+      migrationIdSha256: 'b'.repeat(64),
+      actorReferenceSha256: 'c'.repeat(64),
+    }),
+    /bootstrap_execution_not_armed/,
+  );
+});
+
+test('migration blocks before Admin SDK dynamic import when not armed', async () => {
+  await assert.rejects(
+    executeAtomicMigration({
+      approvalId: 'not-used',
+      expectedBindingSha256: 'a'.repeat(64),
+      migrationIdSha256: 'b'.repeat(64),
+      actorReferenceSha256: 'c'.repeat(64),
+    }),
+    /migration_execution_not_armed/,
+  );
+});
+
+test('executor contract preserves post-migration fail-closed boundaries', () => {
+  assert.equal(LIVE_EXECUTOR_CONTRACT.bootstrapConsumesApproval, false);
+  assert.equal(LIVE_EXECUTOR_CONTRACT.migrationConsumesApproval, true);
+  assert.equal(LIVE_EXECUTOR_CONTRACT.migrationCreatesRoleEnabled, false);
+  assert.equal(LIVE_EXECUTOR_CONTRACT.migrationReleasesHold, false);
+  assert.equal(LIVE_EXECUTOR_CONTRACT.writesOldGuard, false);
+  assert.equal(LIVE_EXECUTOR_CONTRACT.writesOldArmingToken, false);
+  assert.equal(LIVE_EXECUTOR_CONTRACT.writesOldActivationReceipt, false);
+  assert.equal(LIVE_EXECUTOR_CONTRACT.repositoryAttachAuthorized, false);
+  assert.equal(LIVE_EXECUTOR_CONTRACT.repositoryArmAuthorized, false);
+  assert.equal(LIVE_EXECUTOR_CONTRACT.firstIncidentWriteAuthorized, false);
+  assert.equal(LIVE_EXECUTOR_CONTRACT.suggestOnlyAuthorized, false);
+  assert.equal(LIVE_EXECUTOR_CONTRACT.autoAuthorized, false);
+});
+
+test('executor source enforces persisted role document identity and complete role writes', async () => {
+  const source = await readFile(
+    new URL('../src/trusted_admin_sdk_executor.mjs', import.meta.url),
+    'utf8',
+  );
+
+  assert.match(
+    source,
+    /live_role_document_missing_role_id/,
+  );
+
+  assert.match(
+    source,
+    /live_role_document_id_role_id_mismatch/,
+  );
+
+  assert.match(
+    source,
+    /write2CreateDisabledRole/,
+  );
+
+  assert.match(
+    source,
+    /createdAt: FieldValue\.serverTimestamp\(\)/,
+  );
+
+  assert.match(
+    source,
+    /updatedAt: FieldValue\.serverTimestamp\(\)/,
+  );
+});
+
+test('executor source enforces approval document identity and exact system requester binding', async () => {
+  const source = await readFile(
+    new URL('../src/trusted_admin_sdk_executor.mjs', import.meta.url),
+    'utf8',
+  );
+
+  assert.match(
+    source,
+    /approval_payload_id_missing/,
+  );
+
+  assert.match(
+    source,
+    /approval_document_id_payload_id_mismatch/,
+  );
+
+  assert.match(
+    source,
+    /PHASE66_MIGRATION_COORDINATOR\|/,
+  );
+
+  assert.match(
+    source,
+    /phase66_migration_coordinator_sha256:/,
+  );
+
+  assert.match(
+    source,
+    /approval_system_requester_binding_mismatch/,
+  );
+
+  assert.match(
+    source,
+    /scope\.requestPrincipal/,
+  );
+
+  assert.match(
+    source,
+    /PHASE66_MIGRATION_COORDINATOR/,
+  );
+
+  assert.match(
+    source,
+    /owner_approver_must_not_equal_system_requester/,
+  );
+});
+
+test('executor source binds decidedBy exactly to actionScope Owner SHA pseudonym', async () => {
+  const source = await readFile(
+    new URL('../src/trusted_admin_sdk_executor.mjs', import.meta.url),
+    'utf8',
+  );
+
+  assert.match(
+    source,
+    /phase66_owner_sha256:/,
+  );
+
+  assert.match(
+    source,
+    /scope\.ownerApproverReferenceSha256/,
+  );
+
+  assert.match(
+    source,
+    /approval\.decidedBy !== expectedDecidedBy/,
+  );
+
+  assert.match(
+    source,
+    /approval_decided_by_owner_sha_binding_mismatch/,
+  );
+});
+
+test('executor source exact-locks T-Y/T-Z evidence and audit actor to Owner SHA', async () => {
+  const source = await readFile(
+    new URL('../src/trusted_admin_sdk_executor.mjs', import.meta.url),
+    'utf8',
+  );
+
+  assert.match(
+    source,
+    /3ba eafc2e8ce82d138f884f6f3990c4ff644d981be864a35182c5475997b1f1d/,
+  );
+
+  assert.match(
+    source,
+    /d16c6ff23b0d56a9e3b76146eefe22832d86196dee48bb05d6bc0129f48e2f2a/,
+  );
+
+  assert.match(
+    source,
+    /db72e5c0888ea558c07ef002d059c3d92f909fb77f223725a029f35fa6ee9b5e/,
+  );
+
+  assert.match(
+    source,
+    /6cb1df3565e6a9130cadb54d888e6cfe89d7ed393dda369a54ad32d40d937240/,
+  );
+
+  assert.match(
+    source,
+    /approval_locked_ty_tz_evidence_mismatch/,
+  );
+
+  assert.match(
+    source,
+    /bootstrap_live_ty_inventory_not_exact_locked_snapshot/,
+  );
+
+  assert.match(
+    source,
+    /migration_live_ty_inventory_not_exact_locked_snapshot/,
+  );
+
+  assert.match(
+    source,
+    /audit_actor_must_equal_expected_owner_sha/,
+  );
+});

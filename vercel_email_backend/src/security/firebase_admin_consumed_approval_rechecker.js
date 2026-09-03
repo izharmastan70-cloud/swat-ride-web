@@ -1,0 +1,205 @@
+import {
+  validateExactEmailApprovalActionScope,
+} from './email_approval_action_scope_validator.js';
+
+const APPROVAL_COLLECTION = 'agent_approvals';
+
+function nonEmptyString(value) {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+function timestampMillis(value) {
+  if (value && typeof value.toMillis === 'function') {
+    return value.toMillis();
+  }
+
+  if (value instanceof Date) {
+    return value.getTime();
+  }
+
+  return null;
+}
+
+function extractBindingFingerprint(actionScope) {
+  if (!actionScope ||
+      typeof actionScope !== 'object' ||
+      Array.isArray(actionScope)) {
+    return '';
+  }
+
+  if (nonEmptyString(actionScope.bindingFingerprint)) {
+    return actionScope.bindingFingerprint.trim();
+  }
+
+  const binding = actionScope.binding;
+
+  if (binding &&
+      typeof binding === 'object' &&
+      !Array.isArray(binding) &&
+      nonEmptyString(binding.fingerprint)) {
+    return binding.fingerprint.trim();
+  }
+
+  return '';
+}
+
+export class FirebaseAdminConsumedApprovalRechecker {
+  constructor({
+    firestore,
+  }) {
+    this.firestore = firestore;
+  }
+
+  get ready() {
+    return typeof this.firestore?.collection === 'function';
+  }
+
+  async recheckConsumedApproval(request) {
+    if (!this.ready ||
+        !nonEmptyString(request?.callerUid) ||
+        !nonEmptyString(request?.approvalId) ||
+        !nonEmptyString(request?.authorizationRequestId) ||
+        !nonEmptyString(request?.draftId) ||
+        !nonEmptyString(request?.bindingFingerprint) ||
+        !nonEmptyString(request?.roleId) ||
+        !nonEmptyString(request?.actionId) ||
+        !nonEmptyString(request?.module)) {
+      return this.#deny(
+          request,
+          'CONSUMED_APPROVAL_RECHECK_INPUT_INVALID');
+    }
+
+    try {
+      const snapshot =
+          await this.firestore
+              .collection(APPROVAL_COLLECTION)
+              .doc(request.approvalId.trim())
+              .get();
+
+      if (!snapshot?.exists) {
+        return this.#deny(
+            request,
+            'CONSUMED_APPROVAL_NOT_FOUND');
+      }
+
+      const data = snapshot.data() ?? {};
+      const scope =
+          data.actionScope &&
+          typeof data.actionScope === 'object' &&
+          !Array.isArray(data.actionScope)
+              ? data.actionScope
+              : null;
+
+      if (!scope) {
+        return this.#deny(
+            request,
+            'CONSUMED_APPROVAL_SCOPE_MISSING');
+      }
+
+      const exactActionScope =
+          validateExactEmailApprovalActionScope({
+            scope,
+            authorizationRequestId:
+                request.authorizationRequestId,
+            draftId:
+                request.draftId,
+            bindingFingerprint:
+                request.bindingFingerprint,
+          });
+
+      const topLevelExact =
+          data.approvalId === request.approvalId.trim() &&
+          data.status === 'CONSUMED' &&
+          data.consumedAt != null &&
+          data.roleId === request.roleId.trim() &&
+          data.actionId === request.actionId.trim() &&
+          data.module === request.module.trim() &&
+          data.requestedBy === request.callerUid.trim();
+
+      if (!topLevelExact ||
+          exactActionScope.ok !== true) {
+        return this.#deny(
+            request,
+            'CONSUMED_APPROVAL_EXACT_SCOPE_MISMATCH');
+      }
+
+      const consumedAtMillis =
+          timestampMillis(data.consumedAt);
+
+      const expiresAtMillis =
+          timestampMillis(data.expiresAt);
+
+      if (consumedAtMillis != null &&
+          expiresAtMillis != null &&
+          consumedAtMillis > expiresAtMillis) {
+        return this.#deny(
+            request,
+            'CONSUMED_APPROVAL_TIMESTAMP_CORRUPT');
+      }
+
+      return Object.freeze({
+        ok: true,
+        consumed: true,
+        callerUid: request.callerUid.trim(),
+        roleId: request.roleId.trim(),
+        actionId: request.actionId.trim(),
+        module: request.module.trim(),
+        approvalId: request.approvalId.trim(),
+        authorizationRequestId:
+            request.authorizationRequestId.trim(),
+        draftId: request.draftId.trim(),
+        bindingFingerprint:
+            request.bindingFingerprint.trim(),
+        handoffBindingExact: true,
+        exactActionScopeValidated: true,
+        reason: 'CONSUMED_APPROVAL_RECHECK_PASSED',
+      });
+    } catch (_) {
+      return this.#deny(
+          request,
+          'CONSUMED_APPROVAL_RECHECK_FAILED');
+    }
+  }
+
+  #deny(request, reason) {
+    return Object.freeze({
+      ok: false,
+      consumed: false,
+      callerUid:
+          typeof request?.callerUid === 'string'
+              ? request.callerUid.trim()
+              : '',
+      roleId:
+          typeof request?.roleId === 'string'
+              ? request.roleId.trim()
+              : '',
+      actionId:
+          typeof request?.actionId === 'string'
+              ? request.actionId.trim()
+              : '',
+      module:
+          typeof request?.module === 'string'
+              ? request.module.trim()
+              : '',
+      approvalId:
+          typeof request?.approvalId === 'string'
+              ? request.approvalId.trim()
+              : '',
+      authorizationRequestId:
+          typeof request?.authorizationRequestId === 'string'
+              ? request.authorizationRequestId.trim()
+              : '',
+      draftId:
+          typeof request?.draftId === 'string'
+              ? request.draftId.trim()
+              : '',
+      bindingFingerprint:
+          typeof request?.bindingFingerprint === 'string'
+              ? request.bindingFingerprint.trim()
+              : '',
+      handoffBindingExact: false,
+      exactActionScopeValidated: false,
+      reason,
+    });
+  }
+}

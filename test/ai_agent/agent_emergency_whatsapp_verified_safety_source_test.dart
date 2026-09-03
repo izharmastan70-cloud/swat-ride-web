@@ -1,0 +1,210 @@
+import 'package:flutter_test/flutter_test.dart';
+
+import 'package:swat_ride/ai_agent/models/agent_emergency_whatsapp_verified_safety_snapshot.dart';
+import 'package:swat_ride/ai_agent/services/agent_emergency_whatsapp_verified_safety_source.dart';
+import 'package:swat_ride/safety/models/safety_models.dart';
+
+SafetyIncidentModel _sensitiveIncident() {
+  final DateTime created = DateTime.utc(2026, 8, 18, 2, 0);
+
+  return SafetyIncidentModel(
+    incidentId: 'sensitive_incident_id',
+    context: SafetyContext(
+      serviceType: SafetyServiceType.normalRide,
+      referenceId: 'sensitive_ride_id',
+      initiatedByUserId: 'user_1',
+      initiatedByRole: SafetyUserRole.customer,
+      primaryPerson: const SafetyPersonSnapshot(
+        userId: 'driver_1',
+        role: SafetyUserRole.normalDriver,
+        fullName: 'Sensitive Driver Name',
+        phoneNumber: '03001234567',
+        profileImageUrl: 'https://example.invalid/private.jpg',
+        isVerified: true,
+        extraData: <String, dynamic>{'medical': 'must-not-leak'},
+      ),
+      currentLocation: SafetyLocation(
+        latitude: 34.771234,
+        longitude: 72.360987,
+        address: 'Exact private address',
+        placeName: 'Exact private place',
+        accuracy: 3.0,
+        recordedAt: created,
+      ),
+      metadata: const <String, dynamic>{
+        'guardianPhone': '03112223333',
+        'medicalCondition': 'private',
+      },
+    ),
+    category: SafetyEmergencyCategory.immediateDanger,
+    severity: SafetySeverity.critical,
+    status: SafetyIncidentStatus.responding,
+    createdAt: created,
+    updatedAt: created.add(const Duration(minutes: 2)),
+    description: 'Sensitive free-text emergency description',
+    currentLocation: SafetyLocation(
+      latitude: 34.771234,
+      longitude: 72.360987,
+      address: 'Exact private address',
+      placeName: 'Exact private place',
+      accuracy: 3.0,
+      recordedAt: created,
+    ),
+    lastKnownLocation: SafetyLocation(
+      latitude: 34.770001,
+      longitude: 72.360001,
+      address: 'Another private address',
+      recordedAt: created.subtract(const Duration(minutes: 1)),
+      isLastKnownLocation: true,
+    ),
+    locationHistory: <SafetyLocation>[
+      SafetyLocation(
+        latitude: 34.770001,
+        longitude: 72.360001,
+        recordedAt: created.subtract(const Duration(minutes: 1)),
+      ),
+    ],
+    networkStatus: SafetyNetworkStatus.online,
+    locationStatus: SafetyLocationStatus.available,
+    isSilentSos: true,
+    isTestIncident: false,
+    adminAcknowledged: true,
+    adminAcknowledgedBy: 'admin_private_id',
+    assignedSafetyAgentId: 'safety_agent_private_id',
+    emergencyServiceCalled: true,
+    trustedContactsAlerted: true,
+    userMarkedSafe: false,
+    adminNotes: const <String>['private admin note'],
+    evidenceReferences: const <String>['private-evidence-id'],
+    metadata: const <String, dynamic>{
+      'privateKey': 'must-not-leak',
+      'medical': 'must-not-leak',
+    },
+  );
+}
+
+void main() {
+  group('Phase 47 Step 4B verified safety sanitizer', () {
+    test('maps only verified privacy-minimized incident facts', () {
+      const sanitizer = AgentEmergencyWhatsAppVerifiedSafetySanitizer();
+
+      final snapshot = sanitizer.sanitize(
+        activeIncident: _sensitiveIncident(),
+        eligibleSosContactCountVerified: true,
+        eligibleSosContactCount: 2,
+      );
+
+      expect(snapshot.incidentSourceVerified, isTrue);
+      expect(snapshot.hasActiveIncident, isTrue);
+      expect(snapshot.status, SafetyIncidentStatus.responding.name);
+      expect(snapshot.category, SafetyEmergencyCategory.immediateDanger.name);
+      expect(snapshot.severity, SafetySeverity.critical.name);
+      expect(snapshot.serviceType, SafetyServiceType.normalRide.name);
+      expect(snapshot.initiatedByRole, SafetyUserRole.customer.name);
+      expect(snapshot.locationStatus, SafetyLocationStatus.available.name);
+      expect(snapshot.adminAcknowledged, isTrue);
+      expect(snapshot.emergencyServiceCalled, isTrue);
+      expect(snapshot.trustedContactsAlerted, isTrue);
+      expect(snapshot.userMarkedSafe, isFalse);
+      expect(snapshot.isTestIncident, isFalse);
+      expect(snapshot.eligibleSosContactCountVerified, isTrue);
+      expect(snapshot.eligibleSosContactCount, 2);
+    });
+
+    test(
+      'safe map excludes exact GPS/person/contact/admin/private content',
+      () {
+        const sanitizer = AgentEmergencyWhatsAppVerifiedSafetySanitizer();
+
+        final snapshot = sanitizer.sanitize(
+          activeIncident: _sensitiveIncident(),
+          eligibleSosContactCountVerified: true,
+          eligibleSosContactCount: 2,
+        );
+
+        final String safeText = snapshot.toSafeMap().toString().toLowerCase();
+
+        for (final forbidden in <String>[
+          '34.771234',
+          '72.360987',
+          'exact private address',
+          'exact private place',
+          'sensitive driver name',
+          '03001234567',
+          '03112223333',
+          'sensitive_incident_id',
+          'sensitive_ride_id',
+          'sensitive free-text emergency description',
+          'admin_private_id',
+          'safety_agent_private_id',
+          'private admin note',
+          'private-evidence-id',
+          'must-not-leak',
+        ]) {
+          expect(safeText, isNot(contains(forbidden)), reason: forbidden);
+        }
+
+        expect(snapshot.exactLocationIncluded, isFalse);
+        expect(snapshot.locationHistoryIncluded, isFalse);
+        expect(snapshot.personNameIncluded, isFalse);
+        expect(snapshot.personPhoneIncluded, isFalse);
+        expect(snapshot.medicalProfileIncluded, isFalse);
+        expect(snapshot.trustedContactNamesIncluded, isFalse);
+        expect(snapshot.trustedContactPhonesIncluded, isFalse);
+        expect(snapshot.adminIdentityIncluded, isFalse);
+        expect(snapshot.adminNotesIncluded, isFalse);
+        expect(snapshot.evidenceReferencesIncluded, isFalse);
+        expect(snapshot.rawMetadataIncluded, isFalse);
+        expect(snapshot.silentSosFlagIncluded, isFalse);
+      },
+    );
+
+    test('no active incident is verified absence, not a guessed incident', () {
+      const sanitizer = AgentEmergencyWhatsAppVerifiedSafetySanitizer();
+
+      final snapshot = sanitizer.sanitize(
+        activeIncident: null,
+        eligibleSosContactCountVerified: true,
+        eligibleSosContactCount: 0,
+      );
+
+      expect(snapshot.incidentSourceVerified, isTrue);
+      expect(snapshot.hasActiveIncident, isFalse);
+      expect(snapshot.status, isNull);
+      expect(snapshot.category, isNull);
+      expect(snapshot.severity, isNull);
+      expect(snapshot.eligibleSosContactCountVerified, isTrue);
+      expect(snapshot.eligibleSosContactCount, 0);
+    });
+
+    test(
+      'unverified contact count stays unavailable instead of guessed zero',
+      () {
+        const sanitizer = AgentEmergencyWhatsAppVerifiedSafetySanitizer();
+
+        final snapshot = sanitizer.sanitize(
+          activeIncident: _sensitiveIncident(),
+          eligibleSosContactCountVerified: false,
+          eligibleSosContactCount: null,
+        );
+
+        expect(snapshot.eligibleSosContactCountVerified, isFalse);
+        expect(snapshot.eligibleSosContactCount, isNull);
+      },
+    );
+
+    test('unavailable source contains no fabricated safety facts', () {
+      const snapshot = AgentEmergencyWhatsAppVerifiedSafetySnapshot.unavailable(
+        reason: 'source unavailable',
+      );
+
+      expect(snapshot.incidentSourceVerified, isFalse);
+      expect(snapshot.hasActiveIncident, isFalse);
+      expect(snapshot.status, isNull);
+      expect(snapshot.category, isNull);
+      expect(snapshot.severity, isNull);
+      expect(snapshot.eligibleSosContactCountVerified, isFalse);
+      expect(snapshot.eligibleSosContactCount, isNull);
+    });
+  });
+}

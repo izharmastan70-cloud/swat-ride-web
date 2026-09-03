@@ -1,0 +1,892 @@
+import 'dart:math';
+
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+
+import '../models/location_model.dart';
+import '../models/ride_model.dart';
+import '../models/vehicle_model.dart';
+import 'ride_service_control_service.dart';
+
+class RideService {
+  RideService({FirebaseFirestore? firestore, FirebaseAuth? auth})
+    : _firestore = firestore ?? FirebaseFirestore.instance,
+      _auth = auth ?? FirebaseAuth.instance;
+
+  final FirebaseFirestore _firestore;
+  final FirebaseAuth _auth;
+
+  CollectionReference<Map<String, dynamic>> get _ridesCollection =>
+      _firestore.collection('rides');
+
+  CollectionReference<Map<String, dynamic>> get _driversCollection =>
+      _firestore.collection('drivers');
+
+  CollectionReference<Map<String, dynamic>> get _driverEarningsCollection =>
+      _firestore.collection('driver_earnings');
+
+  CollectionReference<Map<String, dynamic>> get _commissionLedgerCollection =>
+      _firestore.collection('ride_commission_settlements');
+
+  DocumentReference<Map<String, dynamic>> get _adminWalletReference =>
+      _firestore.collection('ride_admin_settings').doc('admin_wallet');
+
+  User? get currentUser => _auth.currentUser;
+  String? get currentUserId => _auth.currentUser?.uid;
+
+  // =========================================================
+  // CREATE REAL RIDE REQUEST
+  // =========================================================
+
+  Future<String> createRide({
+    required LocationModel pickupLocation,
+    required LocationModel destinationLocation,
+    required VehicleModel selectedVehicle,
+    required double distanceKm,
+    required int estimatedMinutes,
+    required double baseFare,
+    required double estimatedFare,
+    required String paymentMethod,
+    String? promoCode,
+    double promoDiscount = 0,
+    double commissionAmount = 0,
+    String? riderName,
+    String? riderPhone,
+    Duration requestTimeout = const Duration(minutes: 3),
+  }) async {
+    final User? user = _auth.currentUser;
+
+    if (user == null) {
+      throw Exception('User is not logged in.');
+    }
+
+    _validateRideValues(
+      distanceKm: distanceKm,
+      estimatedMinutes: estimatedMinutes,
+      baseFare: baseFare,
+      estimatedFare: estimatedFare,
+      promoDiscount: promoDiscount,
+      commissionAmount: commissionAmount,
+    );
+
+    if (requestTimeout <= Duration.zero) {
+      throw Exception('Ride request timeout must be greater than zero.');
+    }
+
+    final String normalizedPayment = paymentMethod.trim().toLowerCase();
+    if (normalizedPayment.isEmpty) {
+      throw Exception('Payment method is required.');
+    }
+
+    // Clear old requests that were left in `searching` during testing or
+    // after the app/network closed before the expiry screen could update it.
+    await _closeExpiredSearchingRides(user.uid);
+
+    final RideModel? existingRide = await getCurrentActiveRide();
+    if (existingRide != null) {
+      throw Exception(
+        'You already have an active ride. Complete or cancel it first.',
+      );
+    }
+
+    final DocumentReference<Map<String, dynamic>> rideReference =
+        _ridesCollection.doc();
+    final DateTime now = DateTime.now();
+    final String rideStartPin = _generateRideStartPin();
+
+    final RideModel ride = RideModel(
+      rideId: rideReference.id,
+      userId: user.uid,
+      riderName:
+          _nullableText(riderName) ??
+          _nullableText(user.displayName) ??
+          'SWAT RIDE Passenger',
+      riderPhone: _nullableText(riderPhone) ?? _nullableText(user.phoneNumber),
+      pickupLocation: pickupLocation,
+      destinationLocation: destinationLocation,
+      vehicleId: selectedVehicle.id,
+      vehicleName: selectedVehicle.name,
+      distanceKm: distanceKm,
+      estimatedMinutes: estimatedMinutes,
+      baseFare: baseFare,
+      estimatedFare: estimatedFare,
+      promoCode: _nullableText(promoCode)?.toUpperCase(),
+      promoDiscount: promoDiscount,
+      paymentMethod: normalizedPayment,
+      paymentStatus: RideModel.paymentPending,
+      commissionAmount: commissionAmount,
+      status: RideModel.searching,
+      requestExpiresAt: now.add(requestTimeout),
+      rideStartPin: rideStartPin,
+      rideStartPinVerified: false,
+      rideStartPinFailedAttempts: 0,
+      createdAt: now,
+      updatedAt: now,
+    );
+
+    await rideReference.set(<String, dynamic>{
+      ...ride.toMap(),
+      'createdAt': FieldValue.serverTimestamp(),
+      'updatedAt': FieldValue.serverTimestamp(),
+      'requestExpiresAt': Timestamp.fromDate(now.add(requestTimeout)),
+      'matchingStartedAt': FieldValue.serverTimestamp(),
+    });
+
+    return rideReference.id;
+  }
+
+  void _validateRideValues({
+    required double distanceKm,
+    required int estimatedMinutes,
+    required double baseFare,
+    required double estimatedFare,
+    required double promoDiscount,
+    required double commissionAmount,
+  }) {
+    if (distanceKm < 0 ||
+        estimatedMinutes < 0 ||
+        baseFare < 0 ||
+        estimatedFare < 0 ||
+        promoDiscount < 0 ||
+        commissionAmount < 0) {
+      throw Exception('Ride amounts, distance and time cannot be negative.');
+    }
+
+    if (promoDiscount > baseFare) {
+      throw Exception('Promo discount cannot exceed the base fare.');
+    }
+  }
+
+  // =========================================================
+  // GET + WATCH ONE RIDE
+  // =========================================================
+
+  Future<RideModel?> getRide(String rideId) async {
+    final String id = rideId.trim();
+    if (id.isEmpty) return null;
+
+    final DocumentSnapshot<Map<String, dynamic>> snapshot =
+        await _ridesCollection.doc(id).get();
+    return _rideFromSnapshot(snapshot);
+  }
+
+  Stream<RideModel?> rideStream(String rideId) {
+    final String id = rideId.trim();
+    if (id.isEmpty) return Stream<RideModel?>.value(null);
+
+    return _ridesCollection.doc(id).snapshots().map(_rideFromSnapshot);
+  }
+
+  RideModel? _rideFromSnapshot(
+    DocumentSnapshot<Map<String, dynamic>> snapshot,
+  ) {
+    if (!snapshot.exists) return null;
+
+    return RideModel.fromMap(<String, dynamic>{
+      ...?snapshot.data(),
+      'rideId': snapshot.data()?['rideId'] ?? snapshot.id,
+    });
+  }
+
+  // =========================================================
+  // SAFE STATUS UPDATE
+  // =========================================================
+
+  Future<void> updateRideStatus({
+    required String rideId,
+    required String status,
+    String? actorId,
+  }) async {
+    final String id = rideId.trim();
+    final String nextStatus = status.trim();
+
+    if (id.isEmpty || nextStatus.isEmpty) {
+      throw Exception('Ride ID and status are required.');
+    }
+
+    if (!_allStatuses.contains(nextStatus)) {
+      throw Exception('Invalid ride status.');
+    }
+
+    if (nextStatus == RideModel.rideStarted) {
+      throw Exception('Use the Ride Start PIN to start this ride.');
+    }
+
+    final DocumentReference<Map<String, dynamic>> reference = _ridesCollection
+        .doc(id);
+
+    await _firestore.runTransaction((Transaction transaction) async {
+      final DocumentSnapshot<Map<String, dynamic>> snapshot = await transaction
+          .get(reference);
+
+      if (!snapshot.exists) throw Exception('Ride not found.');
+
+      final Map<String, dynamic> data = snapshot.data()!;
+      final String currentStatus =
+          data['status'] as String? ?? RideModel.searching;
+
+      if (currentStatus == nextStatus) return;
+
+      if (!_isAllowedTransition(currentStatus, nextStatus)) {
+        throw Exception(
+          'Ride cannot change from $currentStatus to $nextStatus.',
+        );
+      }
+
+      final String? assignedDriverId = _nullableText(
+        data['driverId']?.toString(),
+      );
+      final String? currentUserId = _auth.currentUser?.uid;
+
+      if (actorId != null &&
+          actorId.trim().isNotEmpty &&
+          assignedDriverId != null &&
+          actorId.trim() != assignedDriverId &&
+          actorId.trim() != currentUserId) {
+        throw Exception('You are not allowed to update this ride.');
+      }
+
+      transaction.update(reference, <String, dynamic>{
+        'status': nextStatus,
+        ..._timestampForStatus(nextStatus),
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+    });
+  }
+
+  bool _isAllowedTransition(String current, String next) {
+    const Map<String, Set<String>> transitions = <String, Set<String>>{
+      RideModel.searching: <String>{
+        RideModel.driverAssigned,
+        RideModel.cancelled,
+      },
+      RideModel.driverAssigned: <String>{
+        RideModel.driverArriving,
+        RideModel.cancelled,
+      },
+      RideModel.driverArriving: <String>{
+        RideModel.driverArrived,
+        RideModel.cancelled,
+      },
+      RideModel.driverArrived: <String>{
+        RideModel.rideStarted,
+        RideModel.cancelled,
+      },
+      RideModel.rideStarted: <String>{RideModel.completed},
+    };
+
+    return transitions[current]?.contains(next) ?? false;
+  }
+
+  Map<String, dynamic> _timestampForStatus(String status) {
+    switch (status) {
+      case RideModel.driverAssigned:
+        return <String, dynamic>{'acceptedAt': FieldValue.serverTimestamp()};
+      case RideModel.driverArriving:
+        return <String, dynamic>{
+          'driverArrivingAt': FieldValue.serverTimestamp(),
+        };
+      case RideModel.driverArrived:
+        return <String, dynamic>{
+          'driverArrivedAt': FieldValue.serverTimestamp(),
+        };
+      case RideModel.rideStarted:
+        return <String, dynamic>{'rideStartedAt': FieldValue.serverTimestamp()};
+      case RideModel.completed:
+        return <String, dynamic>{'completedAt': FieldValue.serverTimestamp()};
+      case RideModel.cancelled:
+        return <String, dynamic>{'cancelledAt': FieldValue.serverTimestamp()};
+      default:
+        return <String, dynamic>{};
+    }
+  }
+
+  // =========================================================
+  // SAFE DRIVER ASSIGNMENT (OLD API COMPATIBLE)
+  // =========================================================
+
+  Future<void> assignDriver({
+    required String rideId,
+    required String driverId,
+    String? driverName,
+    String? driverVehicleType,
+    String? driverVehicleNumber,
+  }) async {
+    final String id = rideId.trim();
+    final String normalizedDriverId = driverId.trim();
+
+    if (id.isEmpty || normalizedDriverId.isEmpty) {
+      throw Exception('Ride ID and Driver ID are required.');
+    }
+
+    final DocumentReference<Map<String, dynamic>> rideReference =
+        _ridesCollection.doc(id);
+    final DocumentReference<Map<String, dynamic>> driverReference =
+        _driversCollection.doc(normalizedDriverId);
+
+    await _firestore.runTransaction((Transaction transaction) async {
+      final DocumentSnapshot<Map<String, dynamic>> snapshot = await transaction
+          .get(rideReference);
+
+      if (!snapshot.exists) throw Exception('Ride not found.');
+
+      final Map<String, dynamic> data = snapshot.data()!;
+      if (data['status'] != RideModel.searching ||
+          _nullableText(data['driverId']?.toString()) != null) {
+        throw Exception('This ride is no longer available.');
+      }
+
+      final DateTime? expiresAt = _parseDate(data['requestExpiresAt']);
+      if (expiresAt != null && DateTime.now().isAfter(expiresAt)) {
+        throw Exception('This ride request has expired.');
+      }
+
+      transaction.update(rideReference, <String, dynamic>{
+        'driverId': normalizedDriverId,
+        'driverName': _nullableText(driverName),
+        'driverVehicleType': _nullableText(driverVehicleType),
+        'driverVehicleNumber': _nullableText(driverVehicleNumber),
+        'status': RideModel.driverAssigned,
+        'acceptedAt': FieldValue.serverTimestamp(),
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+
+      transaction.set(driverReference, <String, dynamic>{
+        'isOnline': true,
+        'isAvailable': false,
+        'activeRideId': id,
+        'updatedAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+    });
+  }
+
+  // =========================================================
+  // SAFE RIDER/DRIVER CANCELLATION
+  // =========================================================
+
+  Future<void> cancelRide(
+    String rideId, {
+    String reason = 'plans_changed',
+    String cancelledBy = 'rider',
+  }) async {
+    final String id = rideId.trim();
+    if (id.isEmpty) throw Exception('Ride ID is required.');
+
+    final DocumentReference<Map<String, dynamic>> rideReference =
+        _ridesCollection.doc(id);
+
+    await _firestore.runTransaction((Transaction transaction) async {
+      final DocumentSnapshot<Map<String, dynamic>> snapshot = await transaction
+          .get(rideReference);
+
+      if (!snapshot.exists) throw Exception('Ride not found.');
+
+      final Map<String, dynamic> data = snapshot.data()!;
+      final String status = data['status'] as String? ?? RideModel.searching;
+
+      if (status == RideModel.completed || status == RideModel.cancelled) {
+        throw Exception('This ride is already closed.');
+      }
+
+      if (status == RideModel.rideStarted) {
+        throw Exception('A started ride cannot be cancelled from this screen.');
+      }
+
+      final String? riderId = _nullableText(data['userId']?.toString());
+      final String? driverId = _nullableText(data['driverId']?.toString());
+      final String? userId = _auth.currentUser?.uid;
+
+      DocumentSnapshot<Map<String, dynamic>>? driverSnapshot;
+      if (driverId != null) {
+        driverSnapshot = await transaction.get(
+          _driversCollection.doc(driverId),
+        );
+      }
+
+      if (cancelledBy == 'rider' && riderId != null && userId != riderId) {
+        throw Exception('You are not allowed to cancel this ride.');
+      }
+
+      transaction.update(rideReference, <String, dynamic>{
+        'status': RideModel.cancelled,
+        'cancelledBy': cancelledBy.trim(),
+        'cancellationReason': reason.trim(),
+        'cancelledAt': FieldValue.serverTimestamp(),
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+
+      if (driverId != null) {
+        final bool driverOnline =
+            driverSnapshot?.data()?['isOnline'] as bool? ?? false;
+
+        transaction.set(_driversCollection.doc(driverId), <String, dynamic>{
+          'activeRideId': null,
+          'isAvailable': driverOnline,
+          'updatedAt': FieldValue.serverTimestamp(),
+        }, SetOptions(merge: true));
+      }
+    });
+  }
+
+  // =========================================================
+  // EXPIRE UNACCEPTED REQUEST
+  // =========================================================
+
+  Future<bool> expireRideIfNeeded(String rideId) async {
+    final String id = rideId.trim();
+    if (id.isEmpty) return false;
+
+    final DocumentReference<Map<String, dynamic>> reference = _ridesCollection
+        .doc(id);
+    bool expired = false;
+
+    await _firestore.runTransaction((Transaction transaction) async {
+      final DocumentSnapshot<Map<String, dynamic>> snapshot = await transaction
+          .get(reference);
+      if (!snapshot.exists) return;
+
+      final Map<String, dynamic> data = snapshot.data()!;
+      final DateTime? expiresAt = _parseDate(data['requestExpiresAt']);
+
+      if (data['status'] == RideModel.searching &&
+          expiresAt != null &&
+          DateTime.now().isAfter(expiresAt)) {
+        transaction.update(reference, <String, dynamic>{
+          'status': RideModel.cancelled,
+          'cancelledBy': 'system',
+          'cancellationReason': 'no_driver_found',
+          'cancelledAt': FieldValue.serverTimestamp(),
+          'updatedAt': FieldValue.serverTimestamp(),
+        });
+        expired = true;
+      }
+    });
+
+    return expired;
+  }
+
+  // =========================================================
+  // VERIFY RIDE START PIN + START RIDE
+  // =========================================================
+
+  // TESTING MODE: this Firestore transaction works without paid Cloud
+  // Functions. Before production launch, move PIN comparison to a callable
+  // Cloud Function and prevent Drivers from reading the stored PIN in rules.
+
+  Future<void> verifyRideStartPinAndStart({
+    required String rideId,
+    required String driverId,
+    required String enteredPin,
+  }) async {
+    final String id = rideId.trim();
+    final String normalizedDriverId = driverId.trim();
+    final String normalizedPin = enteredPin.trim();
+
+    if (id.isEmpty || normalizedDriverId.isEmpty) {
+      throw Exception('Ride ID and Driver ID are required.');
+    }
+
+    if (!RegExp(r'^\d{4}$').hasMatch(normalizedPin)) {
+      throw Exception('Enter the complete 4-digit Ride PIN.');
+    }
+
+    final DocumentReference<Map<String, dynamic>> reference = _ridesCollection
+        .doc(id);
+
+    final int verificationResult = await _firestore.runTransaction<int>((
+      Transaction transaction,
+    ) async {
+      final DocumentSnapshot<Map<String, dynamic>> snapshot = await transaction
+          .get(reference);
+
+      if (!snapshot.exists) throw Exception('Ride not found.');
+
+      final Map<String, dynamic> data = snapshot.data()!;
+      final String currentStatus =
+          data['status'] as String? ?? RideModel.searching;
+      final String? assignedDriverId = _nullableText(
+        data['driverId']?.toString(),
+      );
+      final bool alreadyVerified =
+          data['rideStartPinVerified'] as bool? ?? false;
+
+      if (assignedDriverId != normalizedDriverId) {
+        throw Exception('This ride is assigned to another Driver.');
+      }
+
+      if (alreadyVerified && currentStatus == RideModel.rideStarted) {
+        return 0;
+      }
+
+      if (currentStatus != RideModel.driverArrived) {
+        throw Exception('Confirm Driver arrival before starting the ride.');
+      }
+
+      final int failedAttempts =
+          (data['rideStartPinFailedAttempts'] as num?)?.toInt() ?? 0;
+
+      if (failedAttempts >= maxRideStartPinAttempts) {
+        return -1;
+      }
+
+      final String storedPin = data['rideStartPin']?.toString().trim() ?? '';
+      if (storedPin.isEmpty) {
+        throw Exception('Ride PIN is unavailable. Ask the Rider to rebook.');
+      }
+
+      if (storedPin != normalizedPin) {
+        final int newFailedAttempts = failedAttempts + 1;
+        transaction.update(reference, <String, dynamic>{
+          'rideStartPinFailedAttempts': newFailedAttempts,
+          'lastRideStartPinFailedAt': FieldValue.serverTimestamp(),
+          'updatedAt': FieldValue.serverTimestamp(),
+        });
+        return newFailedAttempts;
+      }
+
+      transaction.update(reference, <String, dynamic>{
+        'status': RideModel.rideStarted,
+        'rideStartPinVerified': true,
+        'rideStartPinVerifiedAt': FieldValue.serverTimestamp(),
+        'rideStartedAt': FieldValue.serverTimestamp(),
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+
+      return 0;
+    });
+
+    if (verificationResult == -1 ||
+        verificationResult >= maxRideStartPinAttempts) {
+      throw Exception(
+        'Too many wrong PIN attempts. Contact SWAT RIDE support.',
+      );
+    }
+
+    if (verificationResult > 0) {
+      final int attemptsLeft = maxRideStartPinAttempts - verificationResult;
+      throw Exception(
+        'Incorrect Ride PIN. $attemptsLeft attempt(s) remaining.',
+      );
+    }
+  }
+
+  // =========================================================
+  // COMPLETE RIDE (OLD API COMPATIBLE)
+  // =========================================================
+
+  Future<void> completeRide(String rideId) async {
+    final String id = rideId.trim();
+    if (id.isEmpty) throw Exception('Ride ID is required.');
+
+    final DocumentReference<Map<String, dynamic>> rideReference =
+        _ridesCollection.doc(id);
+    final DocumentReference<Map<String, dynamic>> earningReference =
+        _driverEarningsCollection.doc(id);
+    final DocumentReference<Map<String, dynamic>> ledgerReference =
+        _commissionLedgerCollection.doc(id);
+
+    await _firestore.runTransaction((Transaction transaction) async {
+      final DocumentSnapshot<Map<String, dynamic>> rideSnapshot =
+          await transaction.get(rideReference);
+
+      if (!rideSnapshot.exists) throw Exception('Ride not found.');
+
+      final Map<String, dynamic> rideData = rideSnapshot.data()!;
+      final String currentStatus =
+          rideData['status'] as String? ?? RideModel.searching;
+      final String? assignedDriverId = _nullableText(
+        rideData['driverId']?.toString(),
+      );
+
+      if (assignedDriverId == null) {
+        throw Exception('No Driver is assigned to this ride.');
+      }
+
+      if (currentStatus != RideModel.rideStarted &&
+          currentStatus != RideModel.completed) {
+        throw Exception('Only a started ride can be completed.');
+      }
+
+      final DocumentReference<Map<String, dynamic>> driverReference =
+          _driversCollection.doc(assignedDriverId);
+      final DocumentSnapshot<Map<String, dynamic>> driverSnapshot =
+          await transaction.get(driverReference);
+      final DocumentSnapshot<Map<String, dynamic>> earningSnapshot =
+          await transaction.get(earningReference);
+      final DocumentSnapshot<Map<String, dynamic>> adminWalletSnapshot =
+          await transaction.get(_adminWalletReference);
+
+      final bool driverOnline =
+          driverSnapshot.data()?['isOnline'] as bool? ?? false;
+      final double grossFare =
+          (rideData['estimatedFare'] as num?)?.toDouble() ?? 0;
+      final double rawCommission =
+          (rideData['commissionAmount'] as num?)?.toDouble() ?? 0;
+      final double commission = rawCommission.clamp(0, grossFare).toDouble();
+      final double netEarning = grossFare - commission;
+      final String paymentMethod =
+          rideData['paymentMethod']?.toString().trim().toLowerCase() ??
+          RideModel.cash;
+      final bool isCashRide = paymentMethod == RideModel.cash;
+      final bool isNewEarningRecord = !earningSnapshot.exists;
+
+      final Map<String, dynamic> driverData =
+          driverSnapshot.data() ?? <String, dynamic>{};
+      final Map<String, dynamic> adminWalletData =
+          adminWalletSnapshot.data() ?? <String, dynamic>{};
+
+      final double driverWalletBefore =
+          (driverData['walletBalance'] as num?)?.toDouble() ?? 0;
+      final double outstandingBefore =
+          (driverData['outstandingCommission'] as num?)?.toDouble() ?? 0;
+      final double totalCommissionPaidBefore =
+          (driverData['totalCommissionPaid'] as num?)?.toDouble() ?? 0;
+
+      final double adminBalanceBefore =
+          (adminWalletData['walletBalance'] as num?)?.toDouble() ?? 0;
+      final double adminCommissionReceivedBefore =
+          (adminWalletData['totalCommissionReceived'] as num?)?.toDouble() ?? 0;
+      final double adminOutstandingBefore =
+          (adminWalletData['totalOutstandingReceivable'] as num?)?.toDouble() ??
+          0;
+
+      double walletAfter = driverWalletBefore;
+      double autoDeductedCommission = 0;
+      double remainingOutstanding = 0;
+      double adminCreditNow = 0;
+
+      if (isNewEarningRecord) {
+        if (isCashRide) {
+          // Rider pays the full fare directly to the Driver in cash.
+          // Admin commission is therefore recovered from Driver Wallet.
+          autoDeductedCommission = driverWalletBefore >= commission
+              ? commission
+              : driverWalletBefore;
+          remainingOutstanding = commission - autoDeductedCommission;
+          walletAfter = driverWalletBefore - autoDeductedCommission;
+          adminCreditNow = autoDeductedCommission;
+        } else {
+          // Digital/online fare is collected by the platform.
+          // Commission is withheld automatically and only net earning
+          // is credited to the Driver Wallet.
+          autoDeductedCommission = commission;
+          remainingOutstanding = 0;
+          walletAfter = driverWalletBefore + netEarning;
+          adminCreditNow = commission;
+        }
+      }
+
+      if (currentStatus != RideModel.completed || isNewEarningRecord) {
+        transaction.update(rideReference, <String, dynamic>{
+          'status': RideModel.completed,
+          if (currentStatus != RideModel.completed)
+            'completedAt': FieldValue.serverTimestamp(),
+          'grossFare': grossFare,
+          'driverEarning': netEarning,
+          'commissionAutoDeducted': autoDeductedCommission,
+          'commissionOutstanding': remainingOutstanding,
+          'cashRide': isCashRide,
+          'earningRecorded': true,
+          'updatedAt': FieldValue.serverTimestamp(),
+        });
+      }
+
+      if (isNewEarningRecord) {
+        transaction.set(earningReference, <String, dynamic>{
+          'earningId': id,
+          'rideId': id,
+          'driverId': assignedDriverId,
+          'riderId': rideData['userId'],
+          'grossFare': grossFare,
+          'commissionAmount': commission,
+          'netDriverEarning': netEarning,
+          'paymentMethod': paymentMethod,
+          'paymentStatus':
+              rideData['paymentStatus'] ?? RideModel.paymentPending,
+          'settlementStatus': remainingOutstanding > 0
+              ? 'partially_settled'
+              : 'settled',
+          'commissionAutoDeducted': autoDeductedCommission,
+          'cashCommissionOutstanding': remainingOutstanding,
+          'createdAt': FieldValue.serverTimestamp(),
+          'updatedAt': FieldValue.serverTimestamp(),
+        });
+      }
+
+      transaction.set(driverReference, <String, dynamic>{
+        'activeRideId': null,
+        'isAvailable': driverOnline,
+        if (isNewEarningRecord) ...<String, dynamic>{
+          'completedRides': FieldValue.increment(1),
+          'lifetimeGrossFare': FieldValue.increment(grossFare),
+          'lifetimeCommission': FieldValue.increment(commission),
+          'lifetimeNetEarnings': FieldValue.increment(netEarning),
+          'walletBalance': walletAfter,
+          'outstandingCommission': outstandingBefore + remainingOutstanding,
+          'totalCommissionPaid': totalCommissionPaidBefore + adminCreditNow,
+        },
+        'updatedAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+
+      if (isNewEarningRecord) {
+        transaction.set(_adminWalletReference, <String, dynamic>{
+          'walletBalance': adminBalanceBefore + adminCreditNow,
+          'totalCommissionReceived':
+              adminCommissionReceivedBefore + adminCreditNow,
+          'totalOutstandingReceivable':
+              adminOutstandingBefore + remainingOutstanding,
+          'lastTransactionAt': FieldValue.serverTimestamp(),
+          'updatedAt': FieldValue.serverTimestamp(),
+        }, SetOptions(merge: true));
+
+        transaction.set(ledgerReference, <String, dynamic>{
+          'settlementId': id,
+          'serviceType': 'normal_ride',
+          'sourceType': 'driver',
+          'sourceId': assignedDriverId,
+          'rideId': id,
+          'paymentMode': isCashRide ? 'cash' : 'digital',
+          'grossAmount': grossFare,
+          'commissionAmount': commission,
+          'autoDeductedAmount': adminCreditNow,
+          'outstandingAmount': remainingOutstanding,
+          'netEarning': netEarning,
+          'status': remainingOutstanding > 0 ? 'partially_settled' : 'settled',
+          'createdAt': FieldValue.serverTimestamp(),
+          'updatedAt': FieldValue.serverTimestamp(),
+        });
+      }
+    });
+  }
+
+  // =========================================================
+  // CURRENT USER RIDES
+  // =========================================================
+
+  Stream<List<RideModel>> currentUserRidesStream() {
+    final String? userId = _auth.currentUser?.uid;
+    if (userId == null) return Stream<List<RideModel>>.value(<RideModel>[]);
+
+    return _ridesCollection
+        .where('userId', isEqualTo: userId)
+        .snapshots()
+        .map(_sortedRidesFromQuery);
+  }
+
+  Future<List<RideModel>> getCurrentUserRides() async {
+    final String? userId = _auth.currentUser?.uid;
+    if (userId == null) return <RideModel>[];
+
+    final QuerySnapshot<Map<String, dynamic>> snapshot = await _ridesCollection
+        .where('userId', isEqualTo: userId)
+        .get();
+    return _sortedRidesFromQuery(snapshot);
+  }
+
+  /// Closes only expired, unaccepted requests. Assigned/started rides are
+  /// deliberately preserved and must still be completed or cancelled.
+  Future<void> _closeExpiredSearchingRides(String userId) async {
+    final QuerySnapshot<Map<String, dynamic>> snapshot = await _ridesCollection
+        .where('userId', isEqualTo: userId)
+        .where('status', isEqualTo: RideModel.searching)
+        .get();
+
+    if (snapshot.docs.isEmpty) return;
+
+    final DateTime now = DateTime.now();
+    final WriteBatch batch = _firestore.batch();
+    bool hasExpiredRide = false;
+
+    for (final QueryDocumentSnapshot<Map<String, dynamic>> document
+        in snapshot.docs) {
+      final Map<String, dynamic> data = document.data();
+      final DateTime? createdAt = _parseDate(data['createdAt']);
+      final DateTime? storedExpiry = _parseDate(data['requestExpiresAt']);
+      final DateTime? effectiveExpiry =
+          storedExpiry ?? createdAt?.add(const Duration(minutes: 3));
+
+      if (effectiveExpiry == null || !now.isAfter(effectiveExpiry)) continue;
+
+      hasExpiredRide = true;
+      batch.update(document.reference, <String, dynamic>{
+        'status': RideModel.cancelled,
+        'cancelledBy': 'system',
+        'cancellationReason': 'request_expired',
+        'cancelledAt': FieldValue.serverTimestamp(),
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+    }
+
+    if (hasExpiredRide) await batch.commit();
+  }
+
+  List<RideModel> _sortedRidesFromQuery(
+    QuerySnapshot<Map<String, dynamic>> snapshot,
+  ) {
+    final List<RideModel> rides = snapshot.docs.map((document) {
+      return RideModel.fromMap(<String, dynamic>{
+        ...document.data(),
+        'rideId': document.data()['rideId'] ?? document.id,
+      });
+    }).toList();
+
+    rides.sort(
+      (RideModel a, RideModel b) => b.createdAt.compareTo(a.createdAt),
+    );
+    return rides;
+  }
+
+  // =========================================================
+  // CURRENT ACTIVE RIDE
+  // =========================================================
+
+  Future<RideModel?> getCurrentActiveRide() async {
+    final List<RideModel> rides = await getCurrentUserRides();
+    for (final RideModel ride in rides) {
+      if (ride.isActive) return ride;
+    }
+    return null;
+  }
+
+  Stream<RideModel?> currentActiveRideStream() {
+    return currentUserRidesStream().map((List<RideModel> rides) {
+      for (final RideModel ride in rides) {
+        if (ride.isActive) return ride;
+      }
+      return null;
+    });
+  }
+
+  // =========================================================
+  // HELPERS
+  // =========================================================
+
+  static const int maxRideStartPinAttempts = 5;
+
+  static const Set<String> _allStatuses = <String>{
+    RideModel.searching,
+    RideModel.driverAssigned,
+    RideModel.driverArriving,
+    RideModel.driverArrived,
+    RideModel.rideStarted,
+    RideModel.completed,
+    RideModel.cancelled,
+  };
+
+  String? _nullableText(String? value) {
+    final String text = value?.trim() ?? '';
+    return text.isEmpty ? null : text;
+  }
+
+  String _generateRideStartPin() {
+    final int pin = 1000 + Random.secure().nextInt(9000);
+    return pin.toString();
+  }
+
+  DateTime? _parseDate(dynamic value) {
+    if (value is Timestamp) return value.toDate();
+    if (value is DateTime) return value;
+    if (value is String) return DateTime.tryParse(value);
+    return null;
+  }
+}

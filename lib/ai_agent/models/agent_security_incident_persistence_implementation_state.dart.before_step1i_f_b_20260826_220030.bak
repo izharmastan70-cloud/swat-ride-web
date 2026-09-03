@@ -1,0 +1,22 @@
+abstract final class AgentSecurityIncidentPersistenceImplementationState {
+  static const bool repositoryCodeImplemented = true;
+  static const bool firestoreRulesSourceImplemented = true;
+  static const bool phase63RetentionMappingImplemented = true;
+
+  // Runtime/live authority remains deliberately absent in Step1I-E.
+  static const bool repositoryRuntimeAttached = false;
+  static const bool firestoreRulesDeployed = false;
+  static const bool liveCollectionActivated = false;
+  static const bool productionPersistenceActive = false;
+
+  // The repository requires an immutable-audit-ready authorization signal,
+  // but atomic audit persistence is not claimed by this offline step.
+  static const bool atomicImmutableAuditPersistenceImplemented = false;
+
+  static const bool changesRolloutStage = false;
+  static const bool changesAgentMode = false;
+  static const bool changesEmergencyStop = false;
+
+  static const bool authorizesSuggestOnly = false;
+  static const bool authorizesAuto = false;
+}

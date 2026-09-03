@@ -1,0 +1,1386 @@
+// lib/food/admin/screens/food_admin_dashboard_screen.dart
+// =============================================================
+// SWAT RIDE - FOOD DELIVERY
+// Food Admin Dashboard Screen
+//
+// Connected with:
+// - Cloud Firestore
+// - FoodDeliveryRiderService
+// - FoodDeliveryRiderModel
+// - FoodOrderModel
+//
+// Real features:
+// - Live summary of restaurants, riders and orders
+// - Pending approvals count
+// - Active / delivered / cancelled orders
+// - Food revenue, commission and settlement summary
+// - Restaurant/rider earnings and outstanding commission
+// - Quick navigation to Food Admin screens
+//
+// Existing non-Food modules remain untouched.
+// =============================================================
+
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:flutter/material.dart';
+
+import '../../models/food_order_model.dart';
+import '../../rider/models/food_delivery_rider_model.dart';
+import '../../rider/services/food_delivery_rider_service.dart';
+
+class FoodAdminDashboardScreen extends StatefulWidget {
+  const FoodAdminDashboardScreen({super.key});
+
+  @override
+  State<FoodAdminDashboardScreen> createState() =>
+      _FoodAdminDashboardScreenState();
+}
+
+class _FoodAdminDashboardScreenState extends State<FoodAdminDashboardScreen> {
+  static const Color yellow = Color(0xFFFFD60A);
+  static const Color background = Color(0xFF0D0D0D);
+  static const Color cardColor = Color(0xFF1A1A1A);
+
+  final FirebaseFirestore _firestore = FirebaseFirestore.instance;
+
+  final FoodDeliveryRiderService _riderService = FoodDeliveryRiderService();
+
+  static const String restaurantsCollection = 'food_restaurant_partners';
+
+  static const String partnerSettlementsCollection = 'food_partner_settlements';
+
+  static const String riderSettlementsCollection = 'food_rider_settlements';
+
+  Stream<List<_FoodAdminRestaurantSummary>> _watchRestaurants() {
+    return _firestore.collection(restaurantsCollection).snapshots().map((
+      QuerySnapshot<Map<String, dynamic>> snapshot,
+    ) {
+      return snapshot.docs.map((
+        QueryDocumentSnapshot<Map<String, dynamic>> document,
+      ) {
+        return _FoodAdminRestaurantSummary.fromMap(
+          id: document.id,
+          map: document.data(),
+        );
+      }).toList();
+    });
+  }
+
+  Stream<List<FoodOrderModel>> _watchOrders() {
+    return _firestore.collection('food_orders').snapshots().map((
+      QuerySnapshot<Map<String, dynamic>> snapshot,
+    ) {
+      final List<FoodOrderModel> orders = snapshot.docs.map((
+        QueryDocumentSnapshot<Map<String, dynamic>> document,
+      ) {
+        final Map<String, dynamic> data = Map<String, dynamic>.from(
+          document.data(),
+        );
+
+        data['orderId'] = document.id;
+
+        return FoodOrderModel.fromMap(data);
+      }).toList();
+
+      orders.sort(
+        (FoodOrderModel first, FoodOrderModel second) =>
+            second.createdAt.compareTo(first.createdAt),
+      );
+
+      return orders;
+    });
+  }
+
+  Stream<List<_FoodAdminSettlement>> _watchPartnerSettlements() {
+    return _firestore.collection(partnerSettlementsCollection).snapshots().map((
+      QuerySnapshot<Map<String, dynamic>> snapshot,
+    ) {
+      return snapshot.docs
+          .map(
+            (QueryDocumentSnapshot<Map<String, dynamic>> document) =>
+                _FoodAdminSettlement.fromMap(
+                  id: document.id,
+                  map: document.data(),
+                ),
+          )
+          .toList();
+    });
+  }
+
+  Stream<List<_FoodAdminSettlement>> _watchRiderSettlements() {
+    return _firestore.collection(riderSettlementsCollection).snapshots().map((
+      QuerySnapshot<Map<String, dynamic>> snapshot,
+    ) {
+      return snapshot.docs
+          .map(
+            (QueryDocumentSnapshot<Map<String, dynamic>> document) =>
+                _FoodAdminSettlement.fromMap(
+                  id: document.id,
+                  map: document.data(),
+                ),
+          )
+          .toList();
+    });
+  }
+
+  bool _isActiveOrder(FoodOrderStatus status) {
+    return status == FoodOrderStatus.pending ||
+        status == FoodOrderStatus.accepted ||
+        status == FoodOrderStatus.preparing ||
+        status == FoodOrderStatus.readyForPickup ||
+        status == FoodOrderStatus.pickedUp ||
+        status == FoodOrderStatus.onTheWay;
+  }
+
+  double _deliveredRevenue(List<FoodOrderModel> orders) {
+    return orders
+        .where(
+          (FoodOrderModel order) => order.status == FoodOrderStatus.delivered,
+        )
+        .fold<double>(
+          0,
+          (double total, FoodOrderModel order) => total + order.grandTotal,
+        );
+  }
+
+  double _serviceFeeRevenue(List<FoodOrderModel> orders) {
+    return orders
+        .where(
+          (FoodOrderModel order) => order.status == FoodOrderStatus.delivered,
+        )
+        .fold<double>(
+          0,
+          (double total, FoodOrderModel order) => total + order.serviceFee,
+        );
+  }
+
+  double _restaurantNetEarnings(
+    List<FoodOrderModel> orders,
+    List<_FoodAdminRestaurantSummary> restaurants,
+  ) {
+    final Map<String, double> rates = <String, double>{
+      for (final _FoodAdminRestaurantSummary restaurant in restaurants)
+        restaurant.restaurantId: restaurant.commissionPercentage,
+    };
+
+    return orders
+        .where(
+          (FoodOrderModel order) => order.status == FoodOrderStatus.delivered,
+        )
+        .fold<double>(0, (double total, FoodOrderModel order) {
+          final double gross = (order.itemsTotal - order.discount)
+              .clamp(0, double.infinity)
+              .toDouble();
+
+          final double rate = rates[order.restaurantId] ?? 0;
+
+          return total + (gross - (gross * rate / 100));
+        });
+  }
+
+  double _restaurantCommission(
+    List<FoodOrderModel> orders,
+    List<_FoodAdminRestaurantSummary> restaurants,
+  ) {
+    final Map<String, double> rates = <String, double>{
+      for (final _FoodAdminRestaurantSummary restaurant in restaurants)
+        restaurant.restaurantId: restaurant.commissionPercentage,
+    };
+
+    return orders
+        .where(
+          (FoodOrderModel order) => order.status == FoodOrderStatus.delivered,
+        )
+        .fold<double>(0, (double total, FoodOrderModel order) {
+          final double gross = (order.itemsTotal - order.discount)
+              .clamp(0, double.infinity)
+              .toDouble();
+
+          final double rate = rates[order.restaurantId] ?? 0;
+
+          return total + (gross * rate / 100);
+        });
+  }
+
+  double _riderNetEarnings(
+    List<FoodOrderModel> orders,
+    List<FoodDeliveryRiderModel> riders,
+  ) {
+    final Map<String, double> rates = <String, double>{
+      for (final FoodDeliveryRiderModel rider in riders)
+        rider.riderId: rider.commissionPercentage,
+    };
+
+    return orders
+        .where(
+          (FoodOrderModel order) =>
+              order.status == FoodOrderStatus.delivered &&
+              order.riderId.trim().isNotEmpty,
+        )
+        .fold<double>(0, (double total, FoodOrderModel order) {
+          final double gross = order.deliveryFee;
+
+          final double rate = rates[order.riderId] ?? 0;
+
+          return total + (gross - (gross * rate / 100));
+        });
+  }
+
+  double _riderCommission(
+    List<FoodOrderModel> orders,
+    List<FoodDeliveryRiderModel> riders,
+  ) {
+    final Map<String, double> rates = <String, double>{
+      for (final FoodDeliveryRiderModel rider in riders)
+        rider.riderId: rider.commissionPercentage,
+    };
+
+    return orders
+        .where(
+          (FoodOrderModel order) =>
+              order.status == FoodOrderStatus.delivered &&
+              order.riderId.trim().isNotEmpty,
+        )
+        .fold<double>(0, (double total, FoodOrderModel order) {
+          final double rate = rates[order.riderId] ?? 0;
+
+          return total + (order.deliveryFee * rate / 100);
+        });
+  }
+
+  double _totalOutstandingCommission(List<FoodDeliveryRiderModel> riders) {
+    return riders.fold<double>(
+      0,
+      (double total, FoodDeliveryRiderModel rider) =>
+          total + rider.outstandingCommission,
+    );
+  }
+
+  double _totalCommissionPaid(List<FoodDeliveryRiderModel> riders) {
+    return riders.fold<double>(
+      0,
+      (double total, FoodDeliveryRiderModel rider) =>
+          total + rider.totalCommissionPaid,
+    );
+  }
+
+  double _settlementAmount(
+    List<_FoodAdminSettlement> settlements, {
+    required String type,
+  }) {
+    return settlements
+        .where((_FoodAdminSettlement settlement) {
+          switch (type) {
+            case 'pending':
+              return settlement.isPending;
+            case 'paid':
+              return settlement.isPaid;
+            case 'rejected':
+              return settlement.isRejected;
+            default:
+              return false;
+          }
+        })
+        .fold<double>(
+          0,
+          (double total, _FoodAdminSettlement settlement) =>
+              total + settlement.amount,
+        );
+  }
+
+  void _openRoute(String routeName) {
+    Navigator.pushNamed(context, routeName);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: background,
+      appBar: AppBar(
+        backgroundColor: background,
+        title: const Text(
+          'Food Admin Dashboard',
+          style: TextStyle(fontWeight: FontWeight.bold),
+        ),
+        actions: <Widget>[
+          IconButton(
+            tooltip: 'Refresh',
+            onPressed: () {
+              setState(() {});
+            },
+            icon: const Icon(Icons.refresh),
+          ),
+        ],
+      ),
+      body: SafeArea(
+        child: StreamBuilder<List<_FoodAdminRestaurantSummary>>(
+          stream: _watchRestaurants(),
+          builder:
+              (
+                BuildContext context,
+                AsyncSnapshot<List<_FoodAdminRestaurantSummary>>
+                restaurantSnapshot,
+              ) {
+                return StreamBuilder<List<FoodDeliveryRiderModel>>(
+                  stream: _riderService.watchAllApplications(),
+                  builder:
+                      (
+                        BuildContext context,
+                        AsyncSnapshot<List<FoodDeliveryRiderModel>>
+                        riderSnapshot,
+                      ) {
+                        return StreamBuilder<List<FoodOrderModel>>(
+                          stream: _watchOrders(),
+                          builder:
+                              (
+                                BuildContext context,
+                                AsyncSnapshot<List<FoodOrderModel>>
+                                orderSnapshot,
+                              ) {
+                                return StreamBuilder<
+                                  List<_FoodAdminSettlement>
+                                >(
+                                  stream: _watchPartnerSettlements(),
+                                  builder:
+                                      (
+                                        BuildContext context,
+                                        AsyncSnapshot<
+                                          List<_FoodAdminSettlement>
+                                        >
+                                        partnerSettlementSnapshot,
+                                      ) {
+                                        return StreamBuilder<
+                                          List<_FoodAdminSettlement>
+                                        >(
+                                          stream: _watchRiderSettlements(),
+                                          builder:
+                                              (
+                                                BuildContext context,
+                                                AsyncSnapshot<
+                                                  List<_FoodAdminSettlement>
+                                                >
+                                                riderSettlementSnapshot,
+                                              ) {
+                                                if ((restaurantSnapshot
+                                                                .connectionState ==
+                                                            ConnectionState
+                                                                .waiting ||
+                                                        riderSnapshot
+                                                                .connectionState ==
+                                                            ConnectionState
+                                                                .waiting ||
+                                                        orderSnapshot
+                                                                .connectionState ==
+                                                            ConnectionState
+                                                                .waiting ||
+                                                        partnerSettlementSnapshot
+                                                                .connectionState ==
+                                                            ConnectionState
+                                                                .waiting ||
+                                                        riderSettlementSnapshot
+                                                                .connectionState ==
+                                                            ConnectionState
+                                                                .waiting) &&
+                                                    !restaurantSnapshot
+                                                        .hasData &&
+                                                    !riderSnapshot.hasData &&
+                                                    !orderSnapshot.hasData &&
+                                                    !partnerSettlementSnapshot
+                                                        .hasData &&
+                                                    !riderSettlementSnapshot
+                                                        .hasData) {
+                                                  return const Center(
+                                                    child:
+                                                        CircularProgressIndicator(
+                                                          color: yellow,
+                                                        ),
+                                                  );
+                                                }
+
+                                                if (restaurantSnapshot
+                                                        .hasError ||
+                                                    riderSnapshot.hasError ||
+                                                    orderSnapshot.hasError ||
+                                                    partnerSettlementSnapshot
+                                                        .hasError ||
+                                                    riderSettlementSnapshot
+                                                        .hasError) {
+                                                  return _buildErrorState();
+                                                }
+
+                                                final List<
+                                                  _FoodAdminRestaurantSummary
+                                                >
+                                                restaurants =
+                                                    restaurantSnapshot.data ??
+                                                    const <
+                                                      _FoodAdminRestaurantSummary
+                                                    >[];
+
+                                                final List<
+                                                  FoodDeliveryRiderModel
+                                                >
+                                                riders =
+                                                    riderSnapshot.data ??
+                                                    const <
+                                                      FoodDeliveryRiderModel
+                                                    >[];
+
+                                                final List<FoodOrderModel>
+                                                orders =
+                                                    orderSnapshot.data ??
+                                                    const <FoodOrderModel>[];
+
+                                                final List<_FoodAdminSettlement>
+                                                partnerSettlements =
+                                                    partnerSettlementSnapshot
+                                                        .data ??
+                                                    const <
+                                                      _FoodAdminSettlement
+                                                    >[];
+
+                                                final List<_FoodAdminSettlement>
+                                                riderSettlements =
+                                                    riderSettlementSnapshot
+                                                        .data ??
+                                                    const <
+                                                      _FoodAdminSettlement
+                                                    >[];
+
+                                                final int
+                                                pendingRestaurants = restaurants
+                                                    .where(
+                                                      (
+                                                        _FoodAdminRestaurantSummary
+                                                        restaurant,
+                                                      ) =>
+                                                          !restaurant
+                                                              .isApproved &&
+                                                          !restaurant
+                                                              .isRejected,
+                                                    )
+                                                    .length;
+
+                                                final int
+                                                approvedRestaurants = restaurants
+                                                    .where(
+                                                      (
+                                                        _FoodAdminRestaurantSummary
+                                                        restaurant,
+                                                      ) =>
+                                                          restaurant.isApproved,
+                                                    )
+                                                    .length;
+
+                                                final int pendingRiders = riders
+                                                    .where(
+                                                      (
+                                                        FoodDeliveryRiderModel
+                                                        rider,
+                                                      ) =>
+                                                          rider.status ==
+                                                              FoodDeliveryRiderStatus
+                                                                  .pending ||
+                                                          rider.status ==
+                                                              FoodDeliveryRiderStatus
+                                                                  .underReview,
+                                                    )
+                                                    .length;
+
+                                                final int
+                                                approvedRiders = riders
+                                                    .where(
+                                                      (
+                                                        FoodDeliveryRiderModel
+                                                        rider,
+                                                      ) =>
+                                                          rider.status ==
+                                                              FoodDeliveryRiderStatus
+                                                                  .approved &&
+                                                          !rider.isSuspended,
+                                                    )
+                                                    .length;
+
+                                                final int activeOrders = orders
+                                                    .where(
+                                                      (FoodOrderModel order) =>
+                                                          _isActiveOrder(
+                                                            order.status,
+                                                          ),
+                                                    )
+                                                    .length;
+
+                                                final int
+                                                deliveredOrders = orders
+                                                    .where(
+                                                      (FoodOrderModel order) =>
+                                                          order.status ==
+                                                          FoodOrderStatus
+                                                              .delivered,
+                                                    )
+                                                    .length;
+
+                                                final int
+                                                cancelledOrders = orders
+                                                    .where(
+                                                      (FoodOrderModel order) =>
+                                                          order.status ==
+                                                          FoodOrderStatus
+                                                              .cancelled,
+                                                    )
+                                                    .length;
+
+                                                final double revenue =
+                                                    _deliveredRevenue(orders);
+
+                                                final double serviceFees =
+                                                    _serviceFeeRevenue(orders);
+
+                                                final double
+                                                restaurantCommission =
+                                                    _restaurantCommission(
+                                                      orders,
+                                                      restaurants,
+                                                    );
+
+                                                final double
+                                                restaurantNetEarnings =
+                                                    _restaurantNetEarnings(
+                                                      orders,
+                                                      restaurants,
+                                                    );
+
+                                                final double riderCommission =
+                                                    _riderCommission(
+                                                      orders,
+                                                      riders,
+                                                    );
+
+                                                final double riderNetEarnings =
+                                                    _riderNetEarnings(
+                                                      orders,
+                                                      riders,
+                                                    );
+
+                                                final double
+                                                outstandingCommission =
+                                                    _totalOutstandingCommission(
+                                                      riders,
+                                                    );
+
+                                                final double commissionPaid =
+                                                    _totalCommissionPaid(
+                                                      riders,
+                                                    );
+
+                                                final double partnerPending =
+                                                    _settlementAmount(
+                                                      partnerSettlements,
+                                                      type: 'pending',
+                                                    );
+
+                                                final double partnerPaid =
+                                                    _settlementAmount(
+                                                      partnerSettlements,
+                                                      type: 'paid',
+                                                    );
+
+                                                final double riderPending =
+                                                    _settlementAmount(
+                                                      riderSettlements,
+                                                      type: 'pending',
+                                                    );
+
+                                                final double riderPaid =
+                                                    _settlementAmount(
+                                                      riderSettlements,
+                                                      type: 'paid',
+                                                    );
+
+                                                final double adminGross =
+                                                    serviceFees +
+                                                    restaurantCommission +
+                                                    riderCommission;
+
+                                                return RefreshIndicator(
+                                                  color: yellow,
+                                                  onRefresh: () async {
+                                                    setState(() {});
+                                                  },
+                                                  child: ListView(
+                                                    physics:
+                                                        const AlwaysScrollableScrollPhysics(),
+                                                    padding:
+                                                        const EdgeInsets.fromLTRB(
+                                                          16,
+                                                          14,
+                                                          16,
+                                                          30,
+                                                        ),
+                                                    children: <Widget>[
+                                                      _buildHeader(
+                                                        approvedRestaurants:
+                                                            approvedRestaurants,
+                                                        approvedRiders:
+                                                            approvedRiders,
+                                                        activeOrders:
+                                                            activeOrders,
+                                                      ),
+                                                      const SizedBox(
+                                                        height: 16,
+                                                      ),
+                                                      _buildStatsGrid(
+                                                        pendingRestaurants:
+                                                            pendingRestaurants,
+                                                        pendingRiders:
+                                                            pendingRiders,
+                                                        deliveredOrders:
+                                                            deliveredOrders,
+                                                        cancelledOrders:
+                                                            cancelledOrders,
+                                                        revenue: revenue,
+                                                        totalOrders:
+                                                            orders.length,
+                                                        restaurantNetEarnings:
+                                                            restaurantNetEarnings,
+                                                        riderNetEarnings:
+                                                            riderNetEarnings,
+                                                        adminGross: adminGross,
+                                                        outstandingCommission:
+                                                            outstandingCommission,
+                                                        commissionPaid:
+                                                            commissionPaid,
+                                                        partnerPending:
+                                                            partnerPending,
+                                                        partnerPaid:
+                                                            partnerPaid,
+                                                        riderPending:
+                                                            riderPending,
+                                                        riderPaid: riderPaid,
+                                                      ),
+                                                      const SizedBox(
+                                                        height: 22,
+                                                      ),
+                                                      const Text(
+                                                        'Food Admin Tools',
+                                                        style: TextStyle(
+                                                          fontSize: 20,
+                                                          fontWeight:
+                                                              FontWeight.bold,
+                                                        ),
+                                                      ),
+                                                      const SizedBox(
+                                                        height: 12,
+                                                      ),
+                                                      _buildAdminTools(),
+                                                      const SizedBox(
+                                                        height: 22,
+                                                      ),
+                                                      _buildRecentOrders(
+                                                        orders,
+                                                      ),
+                                                    ],
+                                                  ),
+                                                );
+                                              },
+                                        );
+                                      },
+                                );
+                              },
+                        );
+                      },
+                );
+              },
+        ),
+      ),
+    );
+  }
+
+  Widget _buildHeader({
+    required int approvedRestaurants,
+    required int approvedRiders,
+    required int activeOrders,
+  }) {
+    return Container(
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        color: yellow,
+        borderRadius: BorderRadius.circular(22),
+      ),
+      child: Row(
+        children: <Widget>[
+          const CircleAvatar(
+            radius: 32,
+            backgroundColor: Colors.black,
+            child: Icon(
+              Icons.admin_panel_settings_outlined,
+              color: yellow,
+              size: 35,
+            ),
+          ),
+          const SizedBox(width: 15),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                const Text(
+                  'SWAT RIDE Food Admin',
+                  style: TextStyle(
+                    color: Colors.black,
+                    fontSize: 21,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(height: 5),
+                Text(
+                  '$approvedRestaurants restaurants Ã¢â‚¬Â¢ '
+                  '$approvedRiders riders Ã¢â‚¬Â¢ '
+                  '$activeOrders active orders',
+                  style: const TextStyle(
+                    color: Colors.black87,
+                    fontSize: 12,
+                    height: 1.35,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildStatsGrid({
+    required int pendingRestaurants,
+    required int pendingRiders,
+    required int deliveredOrders,
+    required int cancelledOrders,
+    required double revenue,
+    required int totalOrders,
+    required double restaurantNetEarnings,
+    required double riderNetEarnings,
+    required double adminGross,
+    required double outstandingCommission,
+    required double commissionPaid,
+    required double partnerPending,
+    required double partnerPaid,
+    required double riderPending,
+    required double riderPaid,
+  }) {
+    final List<_FoodAdminStat> stats = <_FoodAdminStat>[
+      _FoodAdminStat(
+        title: 'Pending Restaurants',
+        value: '$pendingRestaurants',
+        icon: Icons.storefront_outlined,
+      ),
+      _FoodAdminStat(
+        title: 'Pending Riders',
+        value: '$pendingRiders',
+        icon: Icons.delivery_dining,
+      ),
+      _FoodAdminStat(
+        title: 'Total Orders',
+        value: '$totalOrders',
+        icon: Icons.receipt_long_outlined,
+      ),
+      _FoodAdminStat(
+        title: 'Delivered',
+        value: '$deliveredOrders',
+        icon: Icons.task_alt,
+      ),
+      _FoodAdminStat(
+        title: 'Cancelled',
+        value: '$cancelledOrders',
+        icon: Icons.cancel_outlined,
+      ),
+      _FoodAdminStat(
+        title: 'Revenue',
+        value: 'Rs. ${revenue.toStringAsFixed(0)}',
+        icon: Icons.payments_outlined,
+      ),
+      _FoodAdminStat(
+        title: 'Restaurant Net',
+        value: 'Rs. ${restaurantNetEarnings.toStringAsFixed(0)}',
+        icon: Icons.storefront_outlined,
+      ),
+      _FoodAdminStat(
+        title: 'Rider Net',
+        value: 'Rs. ${riderNetEarnings.toStringAsFixed(0)}',
+        icon: Icons.delivery_dining,
+      ),
+      _FoodAdminStat(
+        title: 'Admin Gross',
+        value: 'Rs. ${adminGross.toStringAsFixed(0)}',
+        icon: Icons.account_balance_outlined,
+      ),
+      _FoodAdminStat(
+        title: 'Outstanding Commission',
+        value: 'Rs. ${outstandingCommission.toStringAsFixed(0)}',
+        icon: Icons.warning_amber_outlined,
+      ),
+      _FoodAdminStat(
+        title: 'Commission Paid',
+        value: 'Rs. ${commissionPaid.toStringAsFixed(0)}',
+        icon: Icons.verified_outlined,
+      ),
+      _FoodAdminStat(
+        title: 'Partner Pending',
+        value: 'Rs. ${partnerPending.toStringAsFixed(0)}',
+        icon: Icons.schedule,
+      ),
+      _FoodAdminStat(
+        title: 'Partner Paid',
+        value: 'Rs. ${partnerPaid.toStringAsFixed(0)}',
+        icon: Icons.check_circle_outline,
+      ),
+      _FoodAdminStat(
+        title: 'Rider Settlement Pending',
+        value: 'Rs. ${riderPending.toStringAsFixed(0)}',
+        icon: Icons.schedule,
+      ),
+      _FoodAdminStat(
+        title: 'Rider Settlement Paid',
+        value: 'Rs. ${riderPaid.toStringAsFixed(0)}',
+        icon: Icons.task_alt,
+      ),
+    ];
+
+    return GridView.builder(
+      itemCount: stats.length,
+      shrinkWrap: true,
+      physics: const NeverScrollableScrollPhysics(),
+      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+        crossAxisCount: 2,
+        crossAxisSpacing: 12,
+        mainAxisSpacing: 12,
+        childAspectRatio: 1.24,
+      ),
+      itemBuilder: (BuildContext context, int index) {
+        final _FoodAdminStat stat = stats[index];
+
+        return Container(
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            color: cardColor,
+            borderRadius: BorderRadius.circular(19),
+            border: Border.all(color: Colors.white10),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: <Widget>[
+              Icon(stat.icon, color: yellow, size: 27),
+              Text(
+                stat.value,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              Text(
+                stat.title,
+                style: const TextStyle(color: Colors.grey, fontSize: 11),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildAdminTools() {
+    final List<_FoodAdminTool> tools = <_FoodAdminTool>[
+      const _FoodAdminTool(
+        title: 'Restaurants',
+        subtitle: 'Approve and manage partners',
+        icon: Icons.storefront_outlined,
+        routeName: '/food_admin_restaurants',
+      ),
+      const _FoodAdminTool(
+        title: 'Food Riders',
+        subtitle: 'Approve and manage riders',
+        icon: Icons.delivery_dining,
+        routeName: '/food_admin_riders',
+      ),
+      const _FoodAdminTool(
+        title: 'Food Orders',
+        subtitle: 'Monitor all orders',
+        icon: Icons.receipt_long_outlined,
+        routeName: '/food_admin_orders',
+      ),
+      const _FoodAdminTool(
+        title: 'Disputes',
+        subtitle: 'Review disputes and refunds',
+        icon: Icons.gavel_outlined,
+        routeName: '/food_admin_disputes',
+      ),
+      const _FoodAdminTool(
+        title: 'Food Reviews',
+        subtitle: 'Moderate Food ratings and reviews',
+        icon: Icons.rate_review_outlined,
+        routeName: '/food_admin_reviews',
+      ),
+      const _FoodAdminTool(
+        title: 'Menu & Categories',
+        subtitle: 'Control food listings',
+        icon: Icons.restaurant_menu,
+        routeName: '/food_admin_menu',
+      ),
+      const _FoodAdminTool(
+        title: 'Commissions',
+        subtitle: 'Rates and settlements',
+        icon: Icons.percent,
+        routeName: '/food_admin_commissions',
+      ),
+      const _FoodAdminTool(
+        title: 'Promo Codes',
+        subtitle: 'Discounts and campaigns',
+        icon: Icons.local_offer_outlined,
+        routeName: '/food_admin_promos',
+      ),
+      const _FoodAdminTool(
+        title: 'Reports',
+        subtitle: 'Revenue and performance',
+        icon: Icons.analytics_outlined,
+        routeName: '/food_admin_reports',
+      ),
+      const _FoodAdminTool(
+        title: 'Settings',
+        subtitle: 'Food module controls',
+        icon: Icons.settings_outlined,
+        routeName: '/food_admin_settings',
+      ),
+    ];
+
+    return GridView.builder(
+      itemCount: tools.length,
+      shrinkWrap: true,
+      physics: const NeverScrollableScrollPhysics(),
+      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+        crossAxisCount: 2,
+        crossAxisSpacing: 12,
+        mainAxisSpacing: 12,
+        childAspectRatio: 1.12,
+      ),
+      itemBuilder: (BuildContext context, int index) {
+        final _FoodAdminTool tool = tools[index];
+
+        return Material(
+          color: cardColor,
+          borderRadius: BorderRadius.circular(19),
+          child: InkWell(
+            borderRadius: BorderRadius.circular(19),
+            onTap: () => _openRoute(tool.routeName),
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  CircleAvatar(
+                    backgroundColor: yellow.withValues(alpha: 0.12),
+                    child: Icon(tool.icon, color: yellow),
+                  ),
+                  const Spacer(),
+                  Text(
+                    tool.title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 15,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    tool.subtitle,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: Colors.grey,
+                      fontSize: 10,
+                      height: 1.3,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildRecentOrders(List<FoodOrderModel> orders) {
+    final List<FoodOrderModel> recentOrders = orders.take(5).toList();
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: <Widget>[
+        Row(
+          children: <Widget>[
+            const Expanded(
+              child: Text(
+                'Recent Food Orders',
+                style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+              ),
+            ),
+            TextButton(
+              onPressed: () => _openRoute('/food_admin_orders'),
+              child: const Text('View All', style: TextStyle(color: yellow)),
+            ),
+          ],
+        ),
+        const SizedBox(height: 8),
+        if (recentOrders.isEmpty)
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(28),
+            decoration: BoxDecoration(
+              color: cardColor,
+              borderRadius: BorderRadius.circular(19),
+            ),
+            child: const Column(
+              children: <Widget>[
+                Icon(Icons.receipt_long_outlined, color: yellow, size: 54),
+                SizedBox(height: 12),
+                Text(
+                  'No food orders yet',
+                  style: TextStyle(fontWeight: FontWeight.bold),
+                ),
+              ],
+            ),
+          )
+        else
+          ...recentOrders.map(
+            (FoodOrderModel order) => Padding(
+              padding: const EdgeInsets.only(bottom: 10),
+              child: _RecentOrderCard(
+                order: order,
+                onTap: () {
+                  Navigator.pushNamed(
+                    context,
+                    '/food_admin_order_details',
+                    arguments: order,
+                  );
+                },
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+
+  Widget _buildErrorState() {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(30),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: <Widget>[
+            const Icon(Icons.cloud_off, color: Colors.redAccent, size: 72),
+            const SizedBox(height: 16),
+            const Text(
+              'Unable to load Food Admin dashboard',
+              textAlign: TextAlign.center,
+              style: TextStyle(fontSize: 21, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              'Check Firestore connection, rules and indexes.',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: Colors.grey, height: 1.4),
+            ),
+            const SizedBox(height: 18),
+            ElevatedButton(
+              onPressed: () {
+                setState(() {});
+              },
+              style: ElevatedButton.styleFrom(
+                backgroundColor: yellow,
+                foregroundColor: Colors.black,
+              ),
+              child: const Text('Try Again'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _RecentOrderCard extends StatelessWidget {
+  const _RecentOrderCard({required this.order, required this.onTap});
+
+  static const Color yellow = Color(0xFFFFD60A);
+  static const Color cardColor = Color(0xFF1A1A1A);
+
+  final FoodOrderModel order;
+  final VoidCallback onTap;
+
+  String get _shortId {
+    if (order.orderId.length <= 8) {
+      return order.orderId;
+    }
+
+    return order.orderId.substring(0, 8);
+  }
+
+  Color get _statusColor {
+    switch (order.status) {
+      case FoodOrderStatus.pending:
+        return yellow;
+      case FoodOrderStatus.accepted:
+      case FoodOrderStatus.preparing:
+        return Colors.orangeAccent;
+      case FoodOrderStatus.readyForPickup:
+      case FoodOrderStatus.pickedUp:
+      case FoodOrderStatus.onTheWay:
+        return Colors.lightBlueAccent;
+      case FoodOrderStatus.delivered:
+        return Colors.greenAccent;
+      case FoodOrderStatus.cancelled:
+        return Colors.redAccent;
+    }
+  }
+
+  String get _statusText {
+    switch (order.status) {
+      case FoodOrderStatus.pending:
+        return 'Pending';
+      case FoodOrderStatus.accepted:
+        return 'Accepted';
+      case FoodOrderStatus.preparing:
+        return 'Preparing';
+      case FoodOrderStatus.readyForPickup:
+        return 'Ready';
+      case FoodOrderStatus.pickedUp:
+        return 'Picked Up';
+      case FoodOrderStatus.onTheWay:
+        return 'On The Way';
+      case FoodOrderStatus.delivered:
+        return 'Delivered';
+      case FoodOrderStatus.cancelled:
+        return 'Cancelled';
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: cardColor,
+      borderRadius: BorderRadius.circular(18),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(18),
+        child: Padding(
+          padding: const EdgeInsets.all(15),
+          child: Row(
+            children: <Widget>[
+              CircleAvatar(
+                backgroundColor: _statusColor.withValues(alpha: 0.14),
+                child: const Icon(Icons.receipt_long_outlined, color: yellow),
+              ),
+              const SizedBox(width: 11),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: <Widget>[
+                    Text(
+                      'Order #$_shortId',
+                      style: const TextStyle(fontWeight: FontWeight.bold),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      '${order.items.length} item(s) Ã¢â‚¬Â¢ '
+                      'Rs. ${order.grandTotal.toStringAsFixed(0)}',
+                      style: const TextStyle(color: Colors.grey, fontSize: 11),
+                    ),
+                  ],
+                ),
+              ),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+                decoration: BoxDecoration(
+                  color: _statusColor.withValues(alpha: 0.12),
+                  borderRadius: BorderRadius.circular(20),
+                ),
+                child: Text(
+                  _statusText,
+                  style: TextStyle(
+                    color: _statusColor,
+                    fontSize: 9,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _FoodAdminRestaurantSummary {
+  const _FoodAdminRestaurantSummary({
+    required this.id,
+    required this.restaurantId,
+    required this.restaurantName,
+    required this.isApproved,
+    required this.isRejected,
+    required this.commissionPercentage,
+  });
+
+  final String id;
+  final String restaurantId;
+  final String restaurantName;
+  final bool isApproved;
+  final bool isRejected;
+  final double commissionPercentage;
+
+  factory _FoodAdminRestaurantSummary.fromMap({
+    required String id,
+    required Map<String, dynamic> map,
+  }) {
+    return _FoodAdminRestaurantSummary(
+      id: id,
+      restaurantId: map['restaurantId']?.toString().trim().isNotEmpty == true
+          ? map['restaurantId'].toString().trim()
+          : id,
+      restaurantName: map['restaurantName']?.toString().trim() ?? '',
+      isApproved: _boolValue(map['isApproved']),
+      isRejected: _boolValue(map['isRejected']),
+      commissionPercentage: _doubleValue(map['commissionPercentage']),
+    );
+  }
+
+  static double _doubleValue(dynamic value) {
+    if (value is num) {
+      return value.toDouble();
+    }
+
+    return double.tryParse(value?.toString() ?? '') ?? 0;
+  }
+
+  static bool _boolValue(dynamic value) {
+    if (value is bool) {
+      return value;
+    }
+
+    if (value is num) {
+      return value != 0;
+    }
+
+    final String text = value?.toString().trim().toLowerCase() ?? '';
+
+    return text == 'true' || text == '1' || text == 'yes';
+  }
+}
+
+class _FoodAdminSettlement {
+  const _FoodAdminSettlement({
+    required this.id,
+    required this.amount,
+    required this.status,
+    required this.createdAt,
+  });
+
+  final String id;
+  final double amount;
+  final String status;
+  final DateTime createdAt;
+
+  bool get isPending {
+    final String value = status.toLowerCase();
+
+    return value == 'pending' ||
+        value == 'requested' ||
+        value == 'processing' ||
+        value == 'approved';
+  }
+
+  bool get isPaid {
+    final String value = status.toLowerCase();
+
+    return value == 'paid' || value == 'completed' || value == 'settled';
+  }
+
+  bool get isRejected => status.toLowerCase() == 'rejected';
+
+  factory _FoodAdminSettlement.fromMap({
+    required String id,
+    required Map<String, dynamic> map,
+  }) {
+    return _FoodAdminSettlement(
+      id: id,
+      amount: _doubleValue(
+        map['amount'] ?? map['settlementAmount'] ?? map['netAmount'],
+      ),
+      status: map['status']?.toString().trim() ?? 'pending',
+      createdAt:
+          _dateValue(map['createdAt'] ?? map['requestedAt'] ?? map['paidAt']) ??
+          DateTime.now(),
+    );
+  }
+
+  static double _doubleValue(dynamic value) {
+    if (value is num) {
+      return value.toDouble();
+    }
+
+    return double.tryParse(value?.toString() ?? '') ?? 0;
+  }
+
+  static DateTime? _dateValue(dynamic value) {
+    if (value == null) {
+      return null;
+    }
+
+    if (value is DateTime) {
+      return value;
+    }
+
+    if (value is Timestamp) {
+      return value.toDate();
+    }
+
+    try {
+      final dynamic converted = value.toDate();
+
+      if (converted is DateTime) {
+        return converted;
+      }
+    } catch (_) {
+      // Safe fallback for strings.
+    }
+
+    return DateTime.tryParse(value.toString());
+  }
+}
+
+class _FoodAdminStat {
+  const _FoodAdminStat({
+    required this.title,
+    required this.value,
+    required this.icon,
+  });
+
+  final String title;
+  final String value;
+  final IconData icon;
+}
+
+class _FoodAdminTool {
+  const _FoodAdminTool({
+    required this.title,
+    required this.subtitle,
+    required this.icon,
+    required this.routeName,
+  });
+
+  final String title;
+  final String subtitle;
+  final IconData icon;
+  final String routeName;
+}

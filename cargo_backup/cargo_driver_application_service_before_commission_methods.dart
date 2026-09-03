@@ -1,0 +1,206 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
+
+import '../models/cargo_driver_application_model.dart';
+
+class CargoDriverApplicationService {
+  CargoDriverApplicationService({FirebaseFirestore? firestore})
+    : _firestore = firestore ?? FirebaseFirestore.instance;
+
+  final FirebaseFirestore _firestore;
+
+  static const String collectionName = 'cargo_driver_applications';
+
+  CollectionReference<Map<String, dynamic>> get _applications =>
+      _firestore.collection(collectionName);
+
+  Future<String> submitApplication({
+    required String userId,
+    required String fullName,
+    required String phone,
+    required String cnicNumber,
+    required String vehicleType,
+    required String vehicleNumber,
+    required String address,
+    String? cnicFrontUrl,
+    String? cnicBackUrl,
+    String? licenseFrontUrl,
+    String? licenseBackUrl,
+    String? vehicleRegistrationUrl,
+    String? vehiclePhotoUrl,
+    String? driverPhotoUrl,
+  }) async {
+    final String cleanUserId = userId.trim();
+    final String cleanVehicleType = vehicleType.trim();
+
+    if (cleanUserId.isEmpty) {
+      throw ArgumentError('userId cannot be empty.');
+    }
+
+    if (fullName.trim().isEmpty) {
+      throw ArgumentError('fullName cannot be empty.');
+    }
+
+    if (phone.trim().isEmpty) {
+      throw ArgumentError('phone cannot be empty.');
+    }
+
+    if (cnicNumber.trim().isEmpty) {
+      throw ArgumentError('cnicNumber cannot be empty.');
+    }
+
+    if (!CargoDriverApplicationModel.supportedVehicleTypes.contains(
+      cleanVehicleType,
+    )) {
+      throw ArgumentError('Unsupported Cargo vehicle type: $cleanVehicleType');
+    }
+
+    if (vehicleNumber.trim().isEmpty) {
+      throw ArgumentError('vehicleNumber cannot be empty.');
+    }
+
+    final QuerySnapshot<Map<String, dynamic>> existing = await _applications
+        .where('userId', isEqualTo: cleanUserId)
+        .get();
+
+    for (final QueryDocumentSnapshot<Map<String, dynamic>> doc
+        in existing.docs) {
+      final CargoDriverApplicationModel application =
+          CargoDriverApplicationModel.fromMap(<String, dynamic>{
+            ...doc.data(),
+            'applicationId': doc.id,
+          });
+
+      if (application.status == CargoDriverApplicationModel.pending ||
+          application.status == CargoDriverApplicationModel.approved) {
+        throw StateError('An active Cargo Driver application already exists.');
+      }
+    }
+
+    final DocumentReference<Map<String, dynamic>> reference = _applications
+        .doc();
+
+    final CargoDriverApplicationModel application = CargoDriverApplicationModel(
+      applicationId: reference.id,
+      userId: cleanUserId,
+      fullName: fullName.trim(),
+      phone: phone.trim(),
+      cnicNumber: cnicNumber.trim(),
+      vehicleType: cleanVehicleType,
+      vehicleNumber: vehicleNumber.trim(),
+      address: address.trim(),
+      status: CargoDriverApplicationModel.pending,
+      cnicFrontUrl: _nullableText(cnicFrontUrl),
+      cnicBackUrl: _nullableText(cnicBackUrl),
+      licenseFrontUrl: _nullableText(licenseFrontUrl),
+      licenseBackUrl: _nullableText(licenseBackUrl),
+      vehicleRegistrationUrl: _nullableText(vehicleRegistrationUrl),
+      vehiclePhotoUrl: _nullableText(vehiclePhotoUrl),
+      driverPhotoUrl: _nullableText(driverPhotoUrl),
+      createdAt: DateTime.now(),
+    );
+
+    await reference.set(application.toMap());
+
+    return reference.id;
+  }
+
+  Future<CargoDriverApplicationModel?> getApplication(
+    String applicationId,
+  ) async {
+    final String id = applicationId.trim();
+
+    if (id.isEmpty) {
+      return null;
+    }
+
+    final DocumentSnapshot<Map<String, dynamic>> snapshot = await _applications
+        .doc(id)
+        .get();
+
+    final Map<String, dynamic>? data = snapshot.data();
+
+    if (!snapshot.exists || data == null) {
+      return null;
+    }
+
+    return CargoDriverApplicationModel.fromMap(<String, dynamic>{
+      ...data,
+      'applicationId': snapshot.id,
+    });
+  }
+
+  Stream<CargoDriverApplicationModel?> watchApplication(String applicationId) {
+    final String id = applicationId.trim();
+
+    if (id.isEmpty) {
+      return Stream<CargoDriverApplicationModel?>.value(null);
+    }
+
+    return _applications.doc(id).snapshots().map((snapshot) {
+      final Map<String, dynamic>? data = snapshot.data();
+
+      if (!snapshot.exists || data == null) {
+        return null;
+      }
+
+      return CargoDriverApplicationModel.fromMap(<String, dynamic>{
+        ...data,
+        'applicationId': snapshot.id,
+      });
+    });
+  }
+
+  Stream<List<CargoDriverApplicationModel>> watchUserApplications(
+    String userId,
+  ) {
+    final String id = userId.trim();
+
+    if (id.isEmpty) {
+      return Stream<List<CargoDriverApplicationModel>>.value(
+        <CargoDriverApplicationModel>[],
+      );
+    }
+
+    return _applications.where('userId', isEqualTo: id).snapshots().map((
+      snapshot,
+    ) {
+      final List<CargoDriverApplicationModel> applications = snapshot.docs.map((
+        doc,
+      ) {
+        return CargoDriverApplicationModel.fromMap(<String, dynamic>{
+          ...doc.data(),
+          'applicationId': doc.id,
+        });
+      }).toList();
+
+      applications.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+
+      return applications;
+    });
+  }
+
+  Stream<List<CargoDriverApplicationModel>> watchPendingApplications() {
+    return _applications
+        .where('status', isEqualTo: CargoDriverApplicationModel.pending)
+        .snapshots()
+        .map((snapshot) {
+          final List<CargoDriverApplicationModel> applications = snapshot.docs
+              .map((doc) {
+                return CargoDriverApplicationModel.fromMap(<String, dynamic>{
+                  ...doc.data(),
+                  'applicationId': doc.id,
+                });
+              })
+              .toList();
+
+          applications.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+
+          return applications;
+        });
+  }
+
+  static String? _nullableText(String? value) {
+    final String result = value?.trim() ?? '';
+    return result.isEmpty ? null : result;
+  }
+}

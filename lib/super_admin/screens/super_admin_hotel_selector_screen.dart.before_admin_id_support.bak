@@ -1,0 +1,490 @@
+﻿import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:flutter/material.dart';
+
+import '../../hotel_admin/screens/hotel_admin_dashboard.dart';
+
+// =========================================================
+// SWAT RIDE — SUPER ADMIN HOTEL SELECTOR
+// =========================================================
+//
+// Read-only hotel selector for the global Super Admin.
+//
+// Firestore:
+//   hotels/{documentId}
+//
+// Hotel identity:
+//   hotelId field when available
+//   otherwise Firestore document ID
+//
+// Hotel name:
+//   hotelName field
+//   fallback: name
+//   fallback: Hotel
+//
+// This screen does NOT modify hotel data.
+// Selecting a hotel opens the existing HotelAdminDashboard.
+
+class SuperAdminHotelSelectorScreen extends StatefulWidget {
+  const SuperAdminHotelSelectorScreen({super.key});
+
+  @override
+  State<SuperAdminHotelSelectorScreen> createState() =>
+      _SuperAdminHotelSelectorScreenState();
+}
+
+class _SuperAdminHotelSelectorScreenState
+    extends State<SuperAdminHotelSelectorScreen> {
+  static const Color _background = Color(0xFF0D0D0D);
+  static const Color _card = Color(0xFF1A1A1A);
+  static const Color _yellow = Color(0xFFFFD60A);
+
+  final FirebaseFirestore _firestore = FirebaseFirestore.instance;
+  final TextEditingController _searchController = TextEditingController();
+
+  String _search = '';
+
+  @override
+  void initState() {
+    super.initState();
+
+    _searchController.addListener(() {
+      final String next = _searchController.text.trim().toLowerCase();
+
+      if (next != _search && mounted) {
+        setState(() {
+          _search = next;
+        });
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    super.dispose();
+  }
+
+  String _readString(
+    Map<String, dynamic> data,
+    String key, {
+    String fallback = '',
+  }) {
+    final Object? value = data[key];
+
+    if (value == null) {
+      return fallback;
+    }
+
+    final String result = value.toString().trim();
+
+    return result.isEmpty ? fallback : result;
+  }
+
+  String _hotelId(
+    QueryDocumentSnapshot<Map<String, dynamic>> document,
+  ) {
+    return _readString(
+      document.data(),
+      'hotelId',
+      fallback: document.id,
+    );
+  }
+
+  String _hotelName(
+    QueryDocumentSnapshot<Map<String, dynamic>> document,
+  ) {
+    final Map<String, dynamic> data = document.data();
+
+    final String hotelName = _readString(
+      data,
+      'hotelName',
+    );
+
+    if (hotelName.isNotEmpty) {
+      return hotelName;
+    }
+
+    final String name = _readString(
+      data,
+      'name',
+    );
+
+    return name.isNotEmpty ? name : 'Hotel';
+  }
+
+  bool _matchesSearch(
+    QueryDocumentSnapshot<Map<String, dynamic>> document,
+  ) {
+    if (_search.isEmpty) {
+      return true;
+    }
+
+    final Map<String, dynamic> data = document.data();
+
+    final String hotelId = _hotelId(document).toLowerCase();
+    final String hotelName = _hotelName(document).toLowerCase();
+    final String city = _readString(data, 'city').toLowerCase();
+    final String location = _readString(data, 'location').toLowerCase();
+    final String address = _readString(data, 'address').toLowerCase();
+
+    return hotelId.contains(_search) ||
+        hotelName.contains(_search) ||
+        city.contains(_search) ||
+        location.contains(_search) ||
+        address.contains(_search);
+  }
+
+  String _statusText(Map<String, dynamic> data) {
+    final String status = _readString(data, 'status');
+
+    if (status.isNotEmpty) {
+      return status;
+    }
+
+    final Object? enabled = data['enabled'];
+
+    if (enabled is bool) {
+      return enabled ? 'Enabled' : 'Disabled';
+    }
+
+    final Object? active = data['isActive'];
+
+    if (active is bool) {
+      return active ? 'Active' : 'Inactive';
+    }
+
+    return 'Status not set';
+  }
+
+  void _openHotel(
+    QueryDocumentSnapshot<Map<String, dynamic>> document,
+  ) {
+    final String hotelId = _hotelId(document);
+    final String hotelName = _hotelName(document);
+
+    if (hotelId.trim().isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Hotel ID is missing.'),
+        ),
+      );
+      return;
+    }
+
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => HotelAdminDashboard(
+          hotelId: hotelId,
+          hotelName: hotelName,
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: _background,
+      appBar: AppBar(
+        backgroundColor: _background,
+        foregroundColor: Colors.white,
+        title: const Text(
+          'Select Hotel',
+          style: TextStyle(
+            fontWeight: FontWeight.w800,
+          ),
+        ),
+      ),
+      body: Column(
+        children: <Widget>[
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 10),
+            child: TextField(
+              controller: _searchController,
+              style: const TextStyle(
+                color: Colors.white,
+              ),
+              decoration: InputDecoration(
+                hintText: 'Search hotel, city or Hotel ID',
+                hintStyle: const TextStyle(
+                  color: Colors.white38,
+                ),
+                prefixIcon: const Icon(
+                  Icons.search,
+                  color: Colors.white54,
+                ),
+                suffixIcon: _searchController.text.isEmpty
+                    ? null
+                    : IconButton(
+                        onPressed: _searchController.clear,
+                        icon: const Icon(
+                          Icons.close,
+                          color: Colors.white54,
+                        ),
+                      ),
+                filled: true,
+                fillColor: _card,
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(16),
+                  borderSide: BorderSide.none,
+                ),
+              ),
+            ),
+          ),
+          Expanded(
+            child: StreamBuilder<
+                QuerySnapshot<Map<String, dynamic>>>(
+              stream: _firestore
+                  .collection('hotels')
+                  .snapshots(),
+              builder: (
+                BuildContext context,
+                AsyncSnapshot<
+                        QuerySnapshot<Map<String, dynamic>>>
+                    snapshot,
+              ) {
+                if (snapshot.hasError) {
+                  return Center(
+                    child: Padding(
+                      padding: const EdgeInsets.all(24),
+                      child: Text(
+                        'Unable to load hotels.\n${snapshot.error}',
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(
+                          color: Colors.redAccent,
+                        ),
+                      ),
+                    ),
+                  );
+                }
+
+                if (!snapshot.hasData) {
+                  return const Center(
+                    child: CircularProgressIndicator(
+                      color: _yellow,
+                    ),
+                  );
+                }
+
+                final List<
+                        QueryDocumentSnapshot<
+                            Map<String, dynamic>>>
+                    hotels = snapshot.data!.docs
+                        .where(_matchesSearch)
+                        .toList(growable: false)
+                      ..sort(
+                        (
+                          QueryDocumentSnapshot<
+                                  Map<String, dynamic>>
+                              a,
+                          QueryDocumentSnapshot<
+                                  Map<String, dynamic>>
+                              b,
+                        ) =>
+                            _hotelName(a).toLowerCase().compareTo(
+                                  _hotelName(b).toLowerCase(),
+                                ),
+                      );
+
+                if (snapshot.data!.docs.isEmpty) {
+                  return const _HotelSelectorEmptyState(
+                    title: 'No hotels found',
+                    message:
+                        'No hotel documents exist in Firestore yet.',
+                  );
+                }
+
+                if (hotels.isEmpty) {
+                  return const _HotelSelectorEmptyState(
+                    title: 'No matching hotel',
+                    message:
+                        'Try another hotel name, city or Hotel ID.',
+                  );
+                }
+
+                return ListView.separated(
+                  padding: const EdgeInsets.fromLTRB(
+                    16,
+                    6,
+                    16,
+                    24,
+                  ),
+                  itemCount: hotels.length,
+                  separatorBuilder: (_, _) =>
+                      const SizedBox(height: 10),
+                  itemBuilder: (
+                    BuildContext context,
+                    int index,
+                  ) {
+                    final QueryDocumentSnapshot<
+                            Map<String, dynamic>>
+                        document = hotels[index];
+
+                    final Map<String, dynamic> data =
+                        document.data();
+
+                    final String hotelId =
+                        _hotelId(document);
+                    final String hotelName =
+                        _hotelName(document);
+
+                    final String city =
+                        _readString(data, 'city');
+
+                    final String location =
+                        _readString(data, 'location');
+
+                    final String secondary =
+                        city.isNotEmpty
+                            ? city
+                            : location;
+
+                    return Material(
+                      color: _card,
+                      borderRadius:
+                          BorderRadius.circular(16),
+                      child: InkWell(
+                        borderRadius:
+                            BorderRadius.circular(16),
+                        onTap: () => _openHotel(document),
+                        child: Padding(
+                          padding:
+                              const EdgeInsets.all(16),
+                          child: Row(
+                            children: <Widget>[
+                              Container(
+                                width: 48,
+                                height: 48,
+                                decoration: BoxDecoration(
+                                  color: _yellow.withValues(
+                                    alpha: 0.12,
+                                  ),
+                                  borderRadius:
+                                      BorderRadius.circular(14),
+                                ),
+                                child: const Icon(
+                                  Icons.hotel_outlined,
+                                  color: _yellow,
+                                ),
+                              ),
+                              const SizedBox(width: 14),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment:
+                                      CrossAxisAlignment
+                                          .start,
+                                  children: <Widget>[
+                                    Text(
+                                      hotelName,
+                                      style:
+                                          const TextStyle(
+                                        color: Colors.white,
+                                        fontWeight:
+                                            FontWeight.w800,
+                                        fontSize: 16,
+                                      ),
+                                    ),
+                                    if (secondary.isNotEmpty) ...[
+                                      const SizedBox(
+                                        height: 4,
+                                      ),
+                                      Text(
+                                        secondary,
+                                        style:
+                                            const TextStyle(
+                                          color:
+                                              Colors.white54,
+                                        ),
+                                      ),
+                                    ],
+                                    const SizedBox(height: 5),
+                                    Text(
+                                      'ID: $hotelId',
+                                      style:
+                                          const TextStyle(
+                                        color:
+                                            Colors.white38,
+                                        fontSize: 12,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 3),
+                                    Text(
+                                      _statusText(data),
+                                      style:
+                                          const TextStyle(
+                                        color: _yellow,
+                                        fontSize: 12,
+                                        fontWeight:
+                                            FontWeight.w600,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              const Icon(
+                                Icons.chevron_right,
+                                color: Colors.white38,
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    );
+                  },
+                );
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _HotelSelectorEmptyState extends StatelessWidget {
+  const _HotelSelectorEmptyState({
+    required this.title,
+    required this.message,
+  });
+
+  final String title;
+  final String message;
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(28),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            const Icon(
+              Icons.hotel_outlined,
+              color: Colors.white38,
+              size: 48,
+            ),
+            const SizedBox(height: 14),
+            Text(
+              title,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 18,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+            const SizedBox(height: 7),
+            Text(
+              message,
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                color: Colors.white54,
+                height: 1.4,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+

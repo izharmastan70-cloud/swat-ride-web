@@ -1,0 +1,554 @@
+import 'package:flutter_test/flutter_test.dart';
+
+import '../../lib/ai_agent/constants/agent_performance_dashboard_constants.dart';
+import '../../lib/ai_agent/constants/agent_performance_dashboard_privacy_constants.dart';
+import '../../lib/ai_agent/constants/agent_performance_scoring_constants.dart';
+import '../../lib/ai_agent/models/agent_performance_dashboard_agent_summary.dart';
+import '../../lib/ai_agent/models/agent_performance_dashboard_read_model.dart';
+import '../../lib/ai_agent/services/agent_performance_dashboard_failure_isolation_boundary.dart';
+import '../../lib/ai_agent/services/agent_performance_dashboard_freshness_policy.dart';
+import '../../lib/ai_agent/services/agent_performance_dashboard_privacy_redaction_policy.dart';
+import '../../lib/ai_agent/services/agent_performance_dashboard_safe_projection_service.dart';
+
+void main() {
+  const AgentPerformanceDashboardPrivacyRedactionPolicy privacyPolicy =
+      AgentPerformanceDashboardPrivacyRedactionPolicy();
+  const AgentPerformanceDashboardFreshnessPolicy freshnessPolicy =
+      AgentPerformanceDashboardFreshnessPolicy();
+  const AgentPerformanceDashboardFailureIsolationBoundary
+  failureIsolationBoundary =
+      AgentPerformanceDashboardFailureIsolationBoundary();
+  const AgentPerformanceDashboardSafeProjectionService service =
+      AgentPerformanceDashboardSafeProjectionService();
+
+  final DateTime evaluatedAtUtc = DateTime.utc(2026, 8, 23, 18, 0);
+  final DateTime freshGeneratedAtUtc = evaluatedAtUtc.subtract(
+    const Duration(minutes: 10),
+  );
+
+  AgentPerformanceDashboardAgentSummary summary({
+    String agentId = 'ride_agent',
+    String cohortKey = 'support:v1',
+    String windowId = 'LAST_7_DAYS',
+    double? overallScore = 90,
+    String confidence = AgentPerformanceScoreConfidence.high,
+    bool comparisonEligible = true,
+  }) {
+    return AgentPerformanceDashboardAgentSummary(
+      agentId: agentId,
+      cohortKey: cohortKey,
+      windowId: windowId,
+      scoreContractVersion: AgentPerformanceScoreContract.version,
+      scoreStatus: AgentPerformanceScoreStatus.scoredHighConfidence,
+      overallScore: overallScore,
+      confidence: confidence,
+      comparisonEligible: comparisonEligible,
+      includedScorableMetricIds: AgentPerformanceScoreContract.scorableMetricIds
+          .toList(),
+      contextMetricValues: const <String, double>{},
+      insufficientContextMetricIds: const <String>{},
+    );
+  }
+
+  AgentPerformanceDashboardReadModel readySource({
+    String queryId = 'dashboard:privacy',
+    List<AgentPerformanceDashboardAgentSummary>? summaries,
+    String reasonCode = 'read_only_dashboard_projection_ready',
+  }) {
+    final List<AgentPerformanceDashboardAgentSummary> values =
+        summaries ?? <AgentPerformanceDashboardAgentSummary>[summary()];
+
+    return AgentPerformanceDashboardReadModel(
+      status: AgentPerformanceDashboardStatus.ready,
+      queryId: queryId,
+      summaries: values,
+      totalMatchedBeforeLimit: values.length,
+      truncated: false,
+      reasonCode: reasonCode,
+    );
+  }
+
+  group('Phase 61 Step 1F privacy and redaction', () {
+    test('opaque identifiers are accepted', () {
+      expect(privacyPolicy.isSafeOpaqueIdentifier('ride_agent'), true);
+      expect(privacyPolicy.isSafeOpaqueIdentifier('support:v1'), true);
+      expect(privacyPolicy.isSafeOpaqueIdentifier('LAST_7_DAYS'), true);
+      expect(privacyPolicy.isSafeOpaqueIdentifier('query.61-1F'), true);
+    });
+
+    test('obvious private or secret-like identifiers are rejected', () {
+      expect(privacyPolicy.isSafeOpaqueIdentifier('user@example.com'), false);
+      expect(privacyPolicy.isSafeOpaqueIdentifier('03001234567'), false);
+      expect(privacyPolicy.isSafeOpaqueIdentifier('https:example.com'), false);
+      expect(
+        privacyPolicy.isSafeOpaqueIdentifier(
+          'sk-abcdefghijklmnopqrstuvwxyz123456',
+        ),
+        false,
+      );
+      expect(
+        privacyPolicy.isSafeOpaqueIdentifier(
+          'abcdefghijklmnop.qrstuvwxyzabcdef.ghijklmnopqrstuv',
+        ),
+        false,
+      );
+      expect(privacyPolicy.isSafeOpaqueIdentifier(' ride_agent '), false);
+    });
+
+    test('unsafe query id is blocked and replaced', () {
+      final projection = service.build(
+        source: readySource(queryId: 'user@example.com'),
+        snapshotGeneratedAtUtc: freshGeneratedAtUtc,
+        evaluatedAtUtc: evaluatedAtUtc,
+      );
+
+      expect(
+        projection.status,
+        AgentPerformanceDashboardSafeProjectionStatus.blockedPrivacy,
+      );
+      expect(projection.queryId, 'redacted:query');
+      expect(projection.summaries, isEmpty);
+      expect(
+        projection.reasonCode,
+        AgentPerformanceDashboardSafeReasonCode.unsafeQueryId,
+      );
+    });
+
+    test('one unsafe summary is fully redacted, safe one survives', () {
+      final projection = service.build(
+        source: readySource(
+          summaries: <AgentPerformanceDashboardAgentSummary>[
+            summary(agentId: 'ride_agent'),
+            summary(agentId: 'user@example.com'),
+          ],
+        ),
+        snapshotGeneratedAtUtc: freshGeneratedAtUtc,
+        evaluatedAtUtc: evaluatedAtUtc,
+      );
+
+      expect(
+        projection.status,
+        AgentPerformanceDashboardSafeProjectionStatus.degraded,
+      );
+      expect(projection.summaries.length, 1);
+      expect(projection.summaries.single.agentId, 'ride_agent');
+      expect(projection.redactedSummaryCount, 1);
+      expect(projection.isolatedFailureCount, 0);
+      expect(
+        projection.reasonCode,
+        AgentPerformanceDashboardSafeReasonCode.degraded,
+      );
+    });
+
+    test('all unsafe summaries fail closed with zero visibility', () {
+      final projection = service.build(
+        source: readySource(
+          summaries: <AgentPerformanceDashboardAgentSummary>[
+            summary(agentId: 'user@example.com'),
+          ],
+        ),
+        snapshotGeneratedAtUtc: freshGeneratedAtUtc,
+        evaluatedAtUtc: evaluatedAtUtc,
+      );
+
+      expect(
+        projection.status,
+        AgentPerformanceDashboardSafeProjectionStatus.blockedPrivacy,
+      );
+      expect(projection.summaries, isEmpty);
+      expect(projection.redactedSummaryCount, 1);
+      expect(
+        projection.reasonCode,
+        AgentPerformanceDashboardSafeReasonCode.allSummariesRedacted,
+      );
+    });
+  });
+
+  group('Phase 61 Step 1F failure isolation', () {
+    test('one malformed summary is isolated without crashing safe data', () {
+      final malformed = summary(agentId: '');
+
+      final projection = service.build(
+        source: readySource(
+          summaries: <AgentPerformanceDashboardAgentSummary>[
+            summary(agentId: 'ride_agent'),
+            malformed,
+          ],
+        ),
+        snapshotGeneratedAtUtc: freshGeneratedAtUtc,
+        evaluatedAtUtc: evaluatedAtUtc,
+      );
+
+      expect(
+        projection.status,
+        AgentPerformanceDashboardSafeProjectionStatus.degraded,
+      );
+      expect(projection.summaries.length, 1);
+      expect(projection.summaries.single.agentId, 'ride_agent');
+      expect(projection.redactedSummaryCount, 0);
+      expect(projection.isolatedFailureCount, 1);
+      expect(projection.rawExceptionTextExposed, false);
+    });
+
+    test('all malformed summaries fail closed', () {
+      final projection = service.build(
+        source: readySource(
+          summaries: <AgentPerformanceDashboardAgentSummary>[
+            summary(agentId: ''),
+          ],
+        ),
+        snapshotGeneratedAtUtc: freshGeneratedAtUtc,
+        evaluatedAtUtc: evaluatedAtUtc,
+      );
+
+      expect(
+        projection.status,
+        AgentPerformanceDashboardSafeProjectionStatus.blockedSource,
+      );
+      expect(projection.summaries, isEmpty);
+      expect(projection.isolatedFailureCount, 1);
+      expect(
+        projection.reasonCode,
+        AgentPerformanceDashboardSafeReasonCode.allSummariesFailed,
+      );
+    });
+
+    test('duplicate identity still fails closed', () {
+      final same = summary(agentId: 'ride_agent');
+
+      final projection = service.build(
+        source: readySource(
+          summaries: <AgentPerformanceDashboardAgentSummary>[same, same],
+        ),
+        snapshotGeneratedAtUtc: freshGeneratedAtUtc,
+        evaluatedAtUtc: evaluatedAtUtc,
+      );
+
+      expect(
+        projection.status,
+        AgentPerformanceDashboardSafeProjectionStatus.blockedSource,
+      );
+      expect(projection.summaries, isEmpty);
+      expect(
+        projection.reasonCode,
+        AgentPerformanceDashboardSafeReasonCode.duplicateSummary,
+      );
+    });
+
+    test('failure isolation budget fails closed', () {
+      final malformed = List<AgentPerformanceDashboardAgentSummary>.generate(
+        AgentPerformanceDashboardPrivacyLimits.maxIsolatedFailures + 1,
+        (int index) => summary(agentId: ''),
+      );
+
+      final projection = service.build(
+        source: readySource(summaries: malformed),
+        snapshotGeneratedAtUtc: freshGeneratedAtUtc,
+        evaluatedAtUtc: evaluatedAtUtc,
+      );
+
+      expect(
+        projection.status,
+        AgentPerformanceDashboardSafeProjectionStatus.blockedSource,
+      );
+      expect(projection.summaries, isEmpty);
+      expect(
+        projection.reasonCode,
+        AgentPerformanceDashboardSafeReasonCode.isolationBudgetExceeded,
+      );
+    });
+
+    test('isolation boundary never propagates summary validation error', () {
+      final result = failureIsolationBoundary.isolate(
+        summaries: <AgentPerformanceDashboardAgentSummary>[
+          summary(agentId: ''),
+          summary(agentId: 'ride_agent'),
+        ],
+        privacyPolicy: privacyPolicy,
+      );
+
+      expect(result.safeSummaries.length, 1);
+      expect(result.isolatedFailureCount, 1);
+      expect(result.failureBudgetExceeded, false);
+    });
+  });
+
+  group('Phase 61 Step 1F freshness and stale data', () {
+    test('fresh snapshot is visible', () {
+      final projection = service.build(
+        source: readySource(),
+        snapshotGeneratedAtUtc: freshGeneratedAtUtc,
+        evaluatedAtUtc: evaluatedAtUtc,
+      );
+
+      expect(
+        projection.status,
+        AgentPerformanceDashboardSafeProjectionStatus.ready,
+      );
+      expect(
+        projection.freshnessState,
+        AgentPerformanceDashboardFreshnessState.fresh,
+      );
+      expect(projection.summaries.length, 1);
+    });
+
+    test('stale snapshot fails closed with no summaries', () {
+      final projection = service.build(
+        source: readySource(),
+        snapshotGeneratedAtUtc: evaluatedAtUtc.subtract(
+          const Duration(minutes: 31),
+        ),
+        evaluatedAtUtc: evaluatedAtUtc,
+      );
+
+      expect(
+        projection.status,
+        AgentPerformanceDashboardSafeProjectionStatus.blockedStaleData,
+      );
+      expect(
+        projection.freshnessState,
+        AgentPerformanceDashboardFreshnessState.stale,
+      );
+      expect(projection.summaries, isEmpty);
+      expect(
+        projection.reasonCode,
+        AgentPerformanceDashboardSafeReasonCode.staleSnapshot,
+      );
+    });
+
+    test('future timestamp beyond skew fails closed', () {
+      final projection = service.build(
+        source: readySource(),
+        snapshotGeneratedAtUtc: evaluatedAtUtc.add(const Duration(minutes: 6)),
+        evaluatedAtUtc: evaluatedAtUtc,
+      );
+
+      expect(
+        projection.status,
+        AgentPerformanceDashboardSafeProjectionStatus.blockedClockSkew,
+      );
+      expect(
+        projection.freshnessState,
+        AgentPerformanceDashboardFreshnessState.futureClockSkew,
+      );
+      expect(projection.summaries, isEmpty);
+    });
+
+    test('small future skew inside five minutes remains fresh', () {
+      final decision = freshnessPolicy.evaluate(
+        snapshotGeneratedAtUtc: evaluatedAtUtc.add(const Duration(minutes: 4)),
+        evaluatedAtUtc: evaluatedAtUtc,
+      );
+
+      expect(decision.fresh, true);
+    });
+
+    test('non-UTC timestamp fails closed', () {
+      final projection = service.build(
+        source: readySource(),
+        snapshotGeneratedAtUtc: DateTime(2026, 8, 23, 18, 0),
+        evaluatedAtUtc: evaluatedAtUtc,
+      );
+
+      expect(
+        projection.status,
+        AgentPerformanceDashboardSafeProjectionStatus.blockedClockSkew,
+      );
+      expect(projection.summaries, isEmpty);
+    });
+
+    test('custom stricter max age is honored', () {
+      final projection = service.build(
+        source: readySource(),
+        snapshotGeneratedAtUtc: evaluatedAtUtc.subtract(
+          const Duration(minutes: 11),
+        ),
+        evaluatedAtUtc: evaluatedAtUtc,
+        maxAge: const Duration(minutes: 10),
+      );
+
+      expect(projection.staleBlocked, true);
+    });
+  });
+
+  group('Phase 61 Step 1F source isolation and safe output', () {
+    test('source EMPTY remains empty and fresh', () {
+      final source = AgentPerformanceDashboardReadModel(
+        status: AgentPerformanceDashboardStatus.empty,
+        queryId: 'dashboard:empty',
+        summaries: const <AgentPerformanceDashboardAgentSummary>[],
+        totalMatchedBeforeLimit: 0,
+        truncated: false,
+        reasonCode: 'no_matching_summaries',
+      );
+
+      final projection = service.build(
+        source: source,
+        snapshotGeneratedAtUtc: freshGeneratedAtUtc,
+        evaluatedAtUtc: evaluatedAtUtc,
+      );
+
+      expect(
+        projection.status,
+        AgentPerformanceDashboardSafeProjectionStatus.empty,
+      );
+      expect(projection.summaries, isEmpty);
+    });
+
+    test('blocked Step 1E source never exposes summaries', () {
+      final source = AgentPerformanceDashboardReadModel(
+        status: AgentPerformanceDashboardStatus.blockedInvalidInput,
+        queryId: 'dashboard:blocked',
+        summaries: const <AgentPerformanceDashboardAgentSummary>[],
+        totalMatchedBeforeLimit: 0,
+        truncated: false,
+        reasonCode: 'raw_exception_password_should_not_escape',
+      );
+
+      final projection = service.build(
+        source: source,
+        snapshotGeneratedAtUtc: freshGeneratedAtUtc,
+        evaluatedAtUtc: evaluatedAtUtc,
+      );
+
+      expect(
+        projection.status,
+        AgentPerformanceDashboardSafeProjectionStatus.blockedSource,
+      );
+      expect(projection.summaries, isEmpty);
+      expect(
+        projection.reasonCode,
+        AgentPerformanceDashboardSafeReasonCode.sourceBlocked,
+      );
+      expect(projection.reasonCode.contains('password'), false);
+    });
+
+    test('invalid source envelope fails closed without exception details', () {
+      final source = AgentPerformanceDashboardReadModel(
+        status: 'UNKNOWN_STATUS',
+        queryId: 'dashboard:invalid',
+        summaries: const <AgentPerformanceDashboardAgentSummary>[],
+        totalMatchedBeforeLimit: 0,
+        truncated: false,
+        reasonCode: 'sensitive backend failure detail',
+      );
+
+      final projection = service.build(
+        source: source,
+        snapshotGeneratedAtUtc: freshGeneratedAtUtc,
+        evaluatedAtUtc: evaluatedAtUtc,
+      );
+
+      expect(
+        projection.status,
+        AgentPerformanceDashboardSafeProjectionStatus.blockedSource,
+      );
+      expect(projection.summaries, isEmpty);
+      expect(
+        projection.reasonCode,
+        AgentPerformanceDashboardSafeReasonCode.invalidSourceEnvelope,
+      );
+      expect(projection.reasonCode.contains('sensitive'), false);
+    });
+
+    test('safe projection list is unmodifiable', () {
+      final projection = service.build(
+        source: readySource(),
+        snapshotGeneratedAtUtc: freshGeneratedAtUtc,
+        evaluatedAtUtc: evaluatedAtUtc,
+      );
+
+      expect(
+        () => projection.summaries.add(summary(agentId: 'food_agent')),
+        throwsUnsupportedError,
+      );
+    });
+
+    test('safe projection carries no rank or authority', () {
+      final projection = service.build(
+        source: readySource(),
+        snapshotGeneratedAtUtc: freshGeneratedAtUtc,
+        evaluatedAtUtc: evaluatedAtUtc,
+      );
+
+      expect(projection.readOnlyVisibilityOnly, true);
+      expect(projection.safeProjectionOnly, true);
+      expect(projection.exposesRankNumber, false);
+      expect(projection.globalLeaderboardCreated, false);
+      expect(projection.permanentRankAssigned, false);
+      expect(projection.disciplinaryDecisionMade, false);
+      expect(projection.routingDecisionMade, false);
+      expect(projection.payDecisionMade, false);
+      expect(projection.accessDecisionMade, false);
+      expect(projection.grantsPermission, false);
+      expect(projection.createsApproval, false);
+      expect(projection.expandsScope, false);
+      expect(projection.assignsRole, false);
+      expect(projection.grantsOwnerAuthority, false);
+      expect(projection.authorizesBusinessExecution, false);
+      expect(projection.executesBusinessAction, false);
+      expect(projection.mutatesAgentState, false);
+      expect(projection.mutatesRouting, false);
+      expect(projection.mutatesBudget, false);
+      expect(projection.persistsProjection, false);
+      expect(projection.securityAuthorityAlwaysAboveDashboard, true);
+    });
+
+    test('service keeps all mutation and security authority disabled', () {
+      expect(service.consumesStep1EReadModelOnly, true);
+      expect(service.privacyRedactionBeforeVisibility, true);
+      expect(service.malformedSummaryFailureIsolated, true);
+      expect(service.staleDataFailsClosed, true);
+      expect(service.futureClockSkewFailsClosed, true);
+      expect(service.rawExceptionTextNeverExposed, true);
+      expect(service.blockedProjectionContainsNoSummaries, true);
+      expect(service.createsLeaderboard, false);
+      expect(service.assignsPermanentRank, false);
+      expect(service.disciplinesAgent, false);
+      expect(service.changesRouting, false);
+      expect(service.changesPay, false);
+      expect(service.changesAccess, false);
+      expect(service.grantsPermission, false);
+      expect(service.createsApproval, false);
+      expect(service.expandsScope, false);
+      expect(service.assignsRole, false);
+      expect(service.grantsOwnerAuthority, false);
+      expect(service.executesBusinessAction, false);
+      expect(service.modifiesSecurityEngine, false);
+      expect(service.firestoreWriteImplementedHere, false);
+      expect(service.providerInvocationImplementedHere, false);
+      expect(service.routingMutationImplementedHere, false);
+      expect(service.agentStateMutationImplementedHere, false);
+      expect(service.budgetMutationImplementedHere, false);
+      expect(service.persistenceImplementedHere, false);
+      expect(service.securityAuthorityAlwaysAboveDashboard, true);
+      expect(service.step1GFinalCloseoutSeparate, true);
+    });
+
+    test('freshness policy has no hidden clock/network authority', () {
+      expect(freshnessPolicy.staleDataFailsClosed, true);
+      expect(freshnessPolicy.excessiveFutureClockSkewFailsClosed, true);
+      expect(freshnessPolicy.evaluationTimeMustBeExplicit, true);
+      expect(freshnessPolicy.hiddenWallClockReadUsed, false);
+      expect(freshnessPolicy.networkTimeLookupImplementedHere, false);
+      expect(freshnessPolicy.persistenceImplementedHere, false);
+    });
+
+    test('privacy policy has no business/security authority', () {
+      expect(privacyPolicy.wholeSummaryRedactionOnUnsafeIdentifier, true);
+      expect(privacyPolicy.rawPromptForbidden, true);
+      expect(privacyPolicy.rawConversationForbidden, true);
+      expect(privacyPolicy.displayNameForbidden, true);
+      expect(privacyPolicy.emailForbidden, true);
+      expect(privacyPolicy.phoneForbidden, true);
+      expect(privacyPolicy.urlForbidden, true);
+      expect(privacyPolicy.secretLikeValueForbidden, true);
+      expect(privacyPolicy.tokenLikeValueForbidden, true);
+      expect(privacyPolicy.exceptionTextForbidden, true);
+      expect(privacyPolicy.grantsPermission, false);
+      expect(privacyPolicy.createsApproval, false);
+      expect(privacyPolicy.executesBusinessAction, false);
+      expect(privacyPolicy.persistenceImplementedHere, false);
+    });
+  });
+}

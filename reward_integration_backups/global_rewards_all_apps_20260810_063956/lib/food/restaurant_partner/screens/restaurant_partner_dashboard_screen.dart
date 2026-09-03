@@ -1,0 +1,1354 @@
+// lib/food/restaurant_partner/screens/restaurant_partner_dashboard_screen.dart
+// =============================================================
+// SWAT RIDE - FOOD DELIVERY
+// Restaurant Partner Dashboard
+//
+// Connected with:
+// - RestaurantPartnerModel
+// - RestaurantPartnerService
+// - FoodOrderService
+//
+// This screen is for approved Restaurant Partners only.
+// Existing Ride, Hotel, Tourism, Cargo, Student and Driver
+// modules remain untouched.
+// =============================================================
+
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:flutter/material.dart';
+
+import '../../models/food_order_model.dart';
+import '../../services/food_order_service.dart';
+import '../models/restaurant_partner_model.dart';
+import '../services/restaurant_partner_service.dart';
+import '../services/restaurant_partner_analytics_service.dart';
+import '../services/restaurant_partner_notification_service.dart';
+import '../services/restaurant_partner_settlement_service.dart';
+
+class RestaurantPartnerDashboardScreen extends StatefulWidget {
+  const RestaurantPartnerDashboardScreen({
+    required this.partner,
+    super.key,
+  });
+
+  final RestaurantPartnerModel partner;
+
+  @override
+  State<RestaurantPartnerDashboardScreen> createState() =>
+      _RestaurantPartnerDashboardScreenState();
+}
+
+class _RestaurantPartnerDashboardScreenState
+    extends State<RestaurantPartnerDashboardScreen> {
+  static const Color yellow = Color(0xFFFFD60A);
+  static const Color background = Color(0xFF0D0D0D);
+  static const Color cardColor = Color(0xFF1A1A1A);
+
+  final RestaurantPartnerService _partnerService =
+      RestaurantPartnerService();
+
+  final FoodOrderService _orderService =
+      FoodOrderService();
+
+  final RestaurantPartnerAnalyticsService
+      _analyticsService =
+      RestaurantPartnerAnalyticsService();
+
+  final RestaurantPartnerNotificationService
+      _notificationService =
+      RestaurantPartnerNotificationService();
+
+  final RestaurantPartnerSettlementService
+      _settlementService =
+      RestaurantPartnerSettlementService();
+
+  bool _isUpdatingOpenStatus = false;
+
+  RestaurantPartnerModel get partner => widget.partner;
+
+  bool get _hasRestaurant {
+    return partner.restaurantId.trim().isNotEmpty;
+  }
+
+  void _showMessage(String message) {
+    if (!mounted) {
+      return;
+    }
+
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Text(message),
+        ),
+      );
+  }
+
+  Future<void> _toggleRestaurantStatus(
+    bool isOpen,
+  ) async {
+    if (_isUpdatingOpenStatus) {
+      return;
+    }
+
+    if (!_hasRestaurant) {
+      _showMessage(
+        'Approved restaurant record is not available.',
+      );
+      return;
+    }
+
+    setState(() {
+      _isUpdatingOpenStatus = true;
+    });
+
+    try {
+      await _partnerService.setRestaurantOpenStatus(
+        partnerId: partner.partnerId,
+        isOpen: isOpen,
+      );
+
+      _showMessage(
+        isOpen
+            ? 'Restaurant is now open.'
+            : 'Restaurant is now closed.',
+      );
+    } on RestaurantPartnerServiceException catch (error) {
+      _showMessage(error.message);
+    } catch (error) {
+      _showMessage(
+        'Unable to update restaurant status: $error',
+      );
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isUpdatingOpenStatus = false;
+        });
+      }
+    }
+  }
+
+  void _openNamedRoute(
+    String routeName, {
+    Object? arguments,
+  }) {
+    Navigator.pushNamed(
+      context,
+      routeName,
+      arguments: arguments ?? partner,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!partner.canAccessPartnerDashboard) {
+      return _buildAccessDenied();
+    }
+
+    return Scaffold(
+      backgroundColor: background,
+      appBar: AppBar(
+        backgroundColor: background,
+        elevation: 0,
+        title: Text(
+          partner.restaurantName.trim().isEmpty
+              ? 'Restaurant Dashboard'
+              : partner.restaurantName,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: const TextStyle(
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+        actions: <Widget>[
+          StreamBuilder<
+              QuerySnapshot<Map<String, dynamic>>>(
+            stream: _notificationService
+                .watchUnreadNotifications(
+              partner.partnerId,
+            ),
+            builder: (
+              BuildContext context,
+              AsyncSnapshot<
+                      QuerySnapshot<Map<String, dynamic>>>
+                  snapshot,
+            ) {
+              final int unreadCount =
+                  snapshot.data?.docs.length ?? 0;
+
+              return IconButton(
+                tooltip: unreadCount > 0
+                    ? '$unreadCount unread notification(s)'
+                    : 'Notifications',
+                onPressed: () {
+                  _openNamedRoute(
+                    '/food_partner_notifications',
+                    arguments: partner,
+                  );
+                },
+                icon: Stack(
+                  clipBehavior: Clip.none,
+                  children: <Widget>[
+                    const Icon(
+                      Icons.notifications_outlined,
+                    ),
+                    if (unreadCount > 0)
+                      Positioned(
+                        right: -6,
+                        top: -7,
+                        child: Container(
+                          constraints:
+                              const BoxConstraints(
+                            minWidth: 18,
+                            minHeight: 18,
+                          ),
+                          padding:
+                              const EdgeInsets.symmetric(
+                            horizontal: 5,
+                          ),
+                          decoration:
+                              const BoxDecoration(
+                            color: Colors.redAccent,
+                            shape: BoxShape.circle,
+                          ),
+                          alignment: Alignment.center,
+                          child: Text(
+                            unreadCount > 99
+                                ? '99+'
+                                : '$unreadCount',
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 9,
+                              fontWeight:
+                                  FontWeight.bold,
+                            ),
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              );
+            },
+          ),
+          IconButton(
+            tooltip: 'Profile',
+            onPressed: () {
+              _openNamedRoute(
+                '/food_partner_profile',
+              );
+            },
+            icon: const Icon(
+              Icons.account_circle_outlined,
+            ),
+          ),
+        ],
+      ),
+      body: SafeArea(
+        child: StreamBuilder<List<FoodOrderModel>>(
+          stream: _hasRestaurant
+              ? _orderService.watchRestaurantOrders(
+                  partner.restaurantId,
+                )
+              : Stream<List<FoodOrderModel>>.value(
+                  const <FoodOrderModel>[],
+                ),
+          builder: (
+            BuildContext context,
+            AsyncSnapshot<List<FoodOrderModel>> snapshot,
+          ) {
+            final List<FoodOrderModel> orders =
+                snapshot.data ??
+                    const <FoodOrderModel>[];
+
+            final _DashboardStats stats =
+                _DashboardStats.fromOrders(
+              orders,
+            );
+
+            return RefreshIndicator(
+              color: yellow,
+              onRefresh: () async {
+                setState(() {});
+              },
+              child: ListView(
+                physics:
+                    const AlwaysScrollableScrollPhysics(),
+                padding: const EdgeInsets.fromLTRB(
+                  16,
+                  12,
+                  16,
+                  30,
+                ),
+                children: <Widget>[
+                  _buildHeaderCard(),
+                  const SizedBox(height: 16),
+                  _buildOpenCloseCard(),
+                  const SizedBox(height: 18),
+                  _buildStatsGrid(stats),
+                  const SizedBox(height: 16),
+                  _buildBusinessOverview(),
+                  const SizedBox(height: 22),
+                  const Text(
+                    'Restaurant Management',
+                    style: TextStyle(
+                      fontSize: 20,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  _buildManagementGrid(),
+                  const SizedBox(height: 22),
+                  _buildRecentOrdersSection(
+                    orders,
+                    snapshot.connectionState,
+                    snapshot.hasError,
+                  ),
+                ],
+              ),
+            );
+          },
+        ),
+      ),
+    );
+  }
+
+  Widget _buildHeaderCard() {
+    return Container(
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        color: yellow,
+        borderRadius: BorderRadius.circular(22),
+      ),
+      child: Row(
+        children: <Widget>[
+          const CircleAvatar(
+            radius: 31,
+            backgroundColor: Colors.black,
+            child: Icon(
+              Icons.restaurant_menu,
+              color: yellow,
+              size: 34,
+            ),
+          ),
+          const SizedBox(width: 15),
+          Expanded(
+            child: Column(
+              crossAxisAlignment:
+                  CrossAxisAlignment.start,
+              children: <Widget>[
+                const Text(
+                  'Restaurant Partner',
+                  style: TextStyle(
+                    color: Colors.black87,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  partner.restaurantName.trim().isEmpty
+                      ? 'Approved Restaurant'
+                      : partner.restaurantName,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: Colors.black,
+                    fontSize: 21,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(height: 5),
+                Text(
+                  '${partner.city} • ${partner.applicationStatus.displayName}',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: Colors.black87,
+                    fontSize: 12,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const Icon(
+            Icons.verified,
+            color: Colors.black,
+            size: 30,
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildOpenCloseCard() {
+    return StreamBuilder<RestaurantPartnerModel?>(
+      stream: _partnerService.watchPartnerById(
+        partner.partnerId,
+      ),
+      initialData: partner,
+      builder: (
+        BuildContext context,
+        AsyncSnapshot<RestaurantPartnerModel?> snapshot,
+      ) {
+        final RestaurantPartnerModel currentPartner =
+            snapshot.data ?? partner;
+
+        return Container(
+          padding: const EdgeInsets.all(17),
+          decoration: BoxDecoration(
+            color: cardColor,
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(
+              color: Colors.white10,
+            ),
+          ),
+          child: Row(
+            children: <Widget>[
+              CircleAvatar(
+                backgroundColor:
+                    currentPartner.isActive
+                        ? Colors.green.withValues(
+                            alpha: 0.16,
+                          )
+                        : Colors.red.withValues(
+                            alpha: 0.14,
+                          ),
+                child: Icon(
+                  currentPartner.isActive
+                      ? Icons.storefront
+                      : Icons.storefront_outlined,
+                  color: currentPartner.isActive
+                      ? Colors.greenAccent
+                      : Colors.redAccent,
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment:
+                      CrossAxisAlignment.start,
+                  children: <Widget>[
+                    const Text(
+                      'Restaurant availability',
+                      style: TextStyle(
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      currentPartner.isActive
+                          ? 'Partner account is active'
+                          : 'Partner account is inactive',
+                      style: const TextStyle(
+                        color: Colors.grey,
+                        fontSize: 12,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              if (_isUpdatingOpenStatus)
+                const SizedBox(
+                  width: 24,
+                  height: 24,
+                  child: CircularProgressIndicator(
+                    color: yellow,
+                    strokeWidth: 2,
+                  ),
+                )
+              else
+                PopupMenuButton<bool>(
+                  color: cardColor,
+                  onSelected: _toggleRestaurantStatus,
+                  itemBuilder: (
+                    BuildContext context,
+                  ) {
+                    return const <PopupMenuEntry<bool>>[
+                      PopupMenuItem<bool>(
+                        value: true,
+                        child: Row(
+                          children: <Widget>[
+                            Icon(
+                              Icons.lock_open_outlined,
+                              color: Colors.greenAccent,
+                            ),
+                            SizedBox(width: 10),
+                            Text('Open Restaurant'),
+                          ],
+                        ),
+                      ),
+                      PopupMenuItem<bool>(
+                        value: false,
+                        child: Row(
+                          children: <Widget>[
+                            Icon(
+                              Icons.lock_outline,
+                              color: Colors.redAccent,
+                            ),
+                            SizedBox(width: 10),
+                            Text('Close Restaurant'),
+                          ],
+                        ),
+                      ),
+                    ];
+                  },
+                  icon: const Icon(
+                    Icons.more_vert,
+                  ),
+                ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildStatsGrid(
+    _DashboardStats stats,
+  ) {
+    final List<_StatItem> items = <_StatItem>[
+      _StatItem(
+        title: 'New Orders',
+        value: '${stats.newOrders}',
+        icon: Icons.notifications_active_outlined,
+      ),
+      _StatItem(
+        title: 'Preparing',
+        value: '${stats.preparingOrders}',
+        icon: Icons.soup_kitchen_outlined,
+      ),
+      _StatItem(
+        title: 'Completed',
+        value: '${stats.completedOrders}',
+        icon: Icons.task_alt,
+      ),
+      _StatItem(
+        title: 'Restaurant Sales',
+        value:
+            'Rs. ${stats.totalSales.toStringAsFixed(0)}',
+        icon: Icons.payments_outlined,
+      ),
+    ];
+
+    return GridView.builder(
+      itemCount: items.length,
+      shrinkWrap: true,
+      physics:
+          const NeverScrollableScrollPhysics(),
+      gridDelegate:
+          const SliverGridDelegateWithFixedCrossAxisCount(
+        crossAxisCount: 2,
+        crossAxisSpacing: 12,
+        mainAxisSpacing: 12,
+        childAspectRatio: 1.45,
+      ),
+      itemBuilder: (
+        BuildContext context,
+        int index,
+      ) {
+        final _StatItem item = items[index];
+
+        return Container(
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            color: cardColor,
+            borderRadius: BorderRadius.circular(19),
+            border: Border.all(
+              color: Colors.white10,
+            ),
+          ),
+          child: Column(
+            crossAxisAlignment:
+                CrossAxisAlignment.start,
+            mainAxisAlignment:
+                MainAxisAlignment.spaceBetween,
+            children: <Widget>[
+              Icon(
+                item.icon,
+                color: yellow,
+                size: 27,
+              ),
+              Text(
+                item.value,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  fontSize: 20,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              Text(
+                item.title,
+                style: const TextStyle(
+                  color: Colors.grey,
+                  fontSize: 12,
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildBusinessOverview() {
+    if (!_hasRestaurant) {
+      return _buildInfoMessage(
+        icon: Icons.analytics_outlined,
+        title: 'Business overview unavailable',
+        message:
+            'The approved restaurant record is not connected yet.',
+      );
+    }
+
+    return FutureBuilder<List<Object>>(
+      future: Future.wait<Object>(
+        <Future<Object>>[
+          _analyticsService.dashboardSummary(
+            partner.restaurantId,
+          ),
+          _settlementService.pendingAmount(
+            partner.partnerId,
+          ),
+          _settlementService.paidAmount(
+            partner.partnerId,
+          ),
+        ],
+      ),
+      builder: (
+        BuildContext context,
+        AsyncSnapshot<List<Object>> snapshot,
+      ) {
+        if (snapshot.connectionState ==
+            ConnectionState.waiting) {
+          return Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(20),
+            decoration: BoxDecoration(
+              color: cardColor,
+              borderRadius: BorderRadius.circular(19),
+              border: Border.all(
+                color: Colors.white10,
+              ),
+            ),
+            child: const Center(
+              child: CircularProgressIndicator(
+                color: yellow,
+                strokeWidth: 2,
+              ),
+            ),
+          );
+        }
+
+        if (snapshot.hasError ||
+            snapshot.data == null ||
+            snapshot.data!.length < 3) {
+          return _buildInfoMessage(
+            icon: Icons.analytics_outlined,
+            title: 'Unable to load business overview',
+            message:
+                'Check Firestore rules, indexes and internet connection.',
+          );
+        }
+
+        final Map<String, dynamic> analytics =
+            Map<String, dynamic>.from(
+          snapshot.data![0] as Map,
+        );
+
+        final double pendingSettlement =
+            snapshot.data![1] as double;
+
+        final double paidSettlement =
+            snapshot.data![2] as double;
+
+        final double averageOrderValue =
+            _numberValue(
+          analytics['averageOrderValue'],
+        );
+
+        final int cancelledOrders =
+            _intValue(
+          analytics['cancelledOrders'],
+        );
+
+        return Container(
+          width: double.infinity,
+          padding: const EdgeInsets.all(17),
+          decoration: BoxDecoration(
+            color: cardColor,
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(
+              color: Colors.white10,
+            ),
+          ),
+          child: Column(
+            crossAxisAlignment:
+                CrossAxisAlignment.start,
+            children: <Widget>[
+              const Row(
+                children: <Widget>[
+                  Icon(
+                    Icons.analytics_outlined,
+                    color: yellow,
+                  ),
+                  SizedBox(width: 9),
+                  Text(
+                    'Business Overview',
+                    style: TextStyle(
+                      fontSize: 17,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 15),
+              _OverviewRow(
+                label: 'Average order value',
+                value:
+                    'Rs. ${averageOrderValue.toStringAsFixed(0)}',
+              ),
+              const Divider(
+                color: Colors.white12,
+              ),
+              _OverviewRow(
+                label: 'Cancelled orders',
+                value: '$cancelledOrders',
+              ),
+              const Divider(
+                color: Colors.white12,
+              ),
+              _OverviewRow(
+                label: 'Pending settlement',
+                value:
+                    'Rs. ${pendingSettlement.toStringAsFixed(0)}',
+                highlight: true,
+              ),
+              const Divider(
+                color: Colors.white12,
+              ),
+              _OverviewRow(
+                label: 'Paid settlement',
+                value:
+                    'Rs. ${paidSettlement.toStringAsFixed(0)}',
+              ),
+              const SizedBox(height: 14),
+              SizedBox(
+                width: double.infinity,
+                child: OutlinedButton.icon(
+                  onPressed: () {
+                    _openNamedRoute(
+                      '/food_partner_earnings',
+                      arguments: partner,
+                    );
+                  },
+                  icon: const Icon(
+                    Icons.account_balance_wallet_outlined,
+                  ),
+                  label: const Text(
+                    'Open Earnings & Settlements',
+                  ),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: yellow,
+                    side: const BorderSide(
+                      color: yellow,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  static double _numberValue(
+    dynamic value,
+  ) {
+    if (value is num) {
+      return value.toDouble();
+    }
+
+    return double.tryParse(
+          value?.toString() ?? '',
+        ) ??
+        0;
+  }
+
+  static int _intValue(
+    dynamic value,
+  ) {
+    if (value is int) {
+      return value;
+    }
+
+    if (value is num) {
+      return value.toInt();
+    }
+
+    return int.tryParse(
+          value?.toString() ?? '',
+        ) ??
+        0;
+  }
+
+  Widget _buildManagementGrid() {
+    final List<_DashboardAction> actions =
+        <_DashboardAction>[
+      _DashboardAction(
+        title: 'Live Orders',
+        subtitle: 'Accept and prepare',
+        icon: Icons.receipt_long_outlined,
+        routeName: '/food_partner_orders',
+      ),
+      _DashboardAction(
+        title: 'Menu',
+        subtitle: 'Items and categories',
+        icon: Icons.restaurant_menu,
+        routeName:
+            '/food_partner_menu_management',
+      ),
+      _DashboardAction(
+        title: 'Add Food Item',
+        subtitle: 'Create new dish',
+        icon: Icons.add_circle_outline,
+        routeName:
+            '/food_partner_add_menu_item',
+      ),
+      _DashboardAction(
+        title: 'Earnings',
+        subtitle: 'Sales and commission',
+        icon: Icons.account_balance_wallet_outlined,
+        routeName:
+            '/food_partner_earnings',
+      ),
+      _DashboardAction(
+        title: 'Reviews',
+        subtitle: 'Ratings and feedback',
+        icon: Icons.star_outline,
+        routeName:
+            '/food_partner_reviews',
+      ),
+      _DashboardAction(
+        title: 'Profile',
+        subtitle: 'Restaurant details',
+        icon: Icons.store_mall_directory_outlined,
+        routeName:
+            '/food_partner_profile',
+      ),
+      _DashboardAction(
+        title: 'Settings',
+        subtitle: 'Business controls',
+        icon: Icons.settings_outlined,
+        routeName:
+            '/food_partner_settings',
+      ),
+      _DashboardAction(
+        title: 'Notifications',
+        subtitle: 'Order and admin alerts',
+        icon: Icons.notifications_outlined,
+        routeName:
+            '/food_partner_notifications',
+      ),
+    ];
+
+    return GridView.builder(
+      itemCount: actions.length,
+      shrinkWrap: true,
+      physics:
+          const NeverScrollableScrollPhysics(),
+      gridDelegate:
+          const SliverGridDelegateWithFixedCrossAxisCount(
+        crossAxisCount: 2,
+        crossAxisSpacing: 12,
+        mainAxisSpacing: 12,
+        childAspectRatio: 1.15,
+      ),
+      itemBuilder: (
+        BuildContext context,
+        int index,
+      ) {
+        final _DashboardAction action =
+            actions[index];
+
+        return Material(
+          color: cardColor,
+          borderRadius: BorderRadius.circular(19),
+          clipBehavior: Clip.antiAlias,
+          child: InkWell(
+            onTap: () {
+              _openNamedRoute(
+                action.routeName,
+              );
+            },
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment:
+                    CrossAxisAlignment.start,
+                children: <Widget>[
+                  CircleAvatar(
+                    backgroundColor:
+                        yellow.withValues(
+                      alpha: 0.12,
+                    ),
+                    child: Icon(
+                      action.icon,
+                      color: yellow,
+                    ),
+                  ),
+                  const Spacer(),
+                  Text(
+                    action.title,
+                    maxLines: 1,
+                    overflow:
+                        TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontWeight: FontWeight.bold,
+                      fontSize: 15,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    action.subtitle,
+                    maxLines: 1,
+                    overflow:
+                        TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: Colors.grey,
+                      fontSize: 11,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildRecentOrdersSection(
+    List<FoodOrderModel> orders,
+    ConnectionState connectionState,
+    bool hasError,
+  ) {
+    final List<FoodOrderModel> recentOrders =
+        orders.take(5).toList();
+
+    return Column(
+      crossAxisAlignment:
+          CrossAxisAlignment.start,
+      children: <Widget>[
+        Row(
+          children: <Widget>[
+            const Expanded(
+              child: Text(
+                'Recent Orders',
+                style: TextStyle(
+                  fontSize: 20,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+            TextButton(
+              onPressed: () {
+                _openNamedRoute(
+                  '/food_partner_orders',
+                );
+              },
+              child: const Text(
+                'View All',
+                style: TextStyle(
+                  color: yellow,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 8),
+        if (connectionState ==
+                ConnectionState.waiting &&
+            orders.isEmpty)
+          const Center(
+            child: Padding(
+              padding: EdgeInsets.all(24),
+              child: CircularProgressIndicator(
+                color: yellow,
+              ),
+            ),
+          )
+        else if (hasError)
+          _buildInfoMessage(
+            icon: Icons.cloud_off,
+            title: 'Unable to load orders',
+            message:
+                'Check Firestore connection and rules.',
+          )
+        else if (recentOrders.isEmpty)
+          _buildInfoMessage(
+            icon: Icons.receipt_long_outlined,
+            title: 'No food orders yet',
+            message:
+                'New customer orders will appear here.',
+          )
+        else
+          ...recentOrders.map(
+            (FoodOrderModel order) =>
+                _RecentOrderTile(
+              order: order,
+              onTap: () {
+                Navigator.pushNamed(
+                  context,
+                  '/food_partner_order_details',
+                  arguments: order,
+                );
+              },
+            ),
+          ),
+      ],
+    );
+  }
+
+  Widget _buildInfoMessage({
+    required IconData icon,
+    required String title,
+    required String message,
+  }) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(24),
+      decoration: BoxDecoration(
+        color: cardColor,
+        borderRadius: BorderRadius.circular(19),
+      ),
+      child: Column(
+        children: <Widget>[
+          Icon(
+            icon,
+            color: yellow,
+            size: 46,
+          ),
+          const SizedBox(height: 12),
+          Text(
+            title,
+            style: const TextStyle(
+              fontWeight: FontWeight.bold,
+              fontSize: 16,
+            ),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            message,
+            textAlign: TextAlign.center,
+            style: const TextStyle(
+              color: Colors.grey,
+              fontSize: 12,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildAccessDenied() {
+    return Scaffold(
+      backgroundColor: background,
+      appBar: AppBar(
+        backgroundColor: background,
+        title: const Text(
+          'Restaurant Partner',
+        ),
+      ),
+      body: Center(
+        child: Padding(
+          padding: const EdgeInsets.all(30),
+          child: Column(
+            mainAxisAlignment:
+                MainAxisAlignment.center,
+            children: <Widget>[
+              const Icon(
+                Icons.lock_outline,
+                color: Colors.redAccent,
+                size: 72,
+              ),
+              const SizedBox(height: 16),
+              const Text(
+                'Dashboard access unavailable',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontSize: 21,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                'Restaurant Partner dashboard is available only after admin approval.',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  color: Colors.grey,
+                  height: 1.4,
+                ),
+              ),
+              const SizedBox(height: 22),
+              ElevatedButton(
+                onPressed: () {
+                  Navigator.pop(context);
+                },
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: yellow,
+                  foregroundColor: Colors.black,
+                ),
+                child: const Text('Go Back'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _RecentOrderTile extends StatelessWidget {
+  const _RecentOrderTile({
+    required this.order,
+    required this.onTap,
+  });
+
+  static const Color yellow = Color(0xFFFFD60A);
+  static const Color cardColor = Color(0xFF1A1A1A);
+
+  final FoodOrderModel order;
+  final VoidCallback onTap;
+
+  String get _statusText {
+    switch (order.status) {
+      case FoodOrderStatus.pending:
+        return 'New';
+      case FoodOrderStatus.accepted:
+        return 'Accepted';
+      case FoodOrderStatus.preparing:
+        return 'Preparing';
+      case FoodOrderStatus.readyForPickup:
+        return 'Ready';
+      case FoodOrderStatus.pickedUp:
+        return 'Picked Up';
+      case FoodOrderStatus.onTheWay:
+        return 'On The Way';
+      case FoodOrderStatus.delivered:
+        return 'Delivered';
+      case FoodOrderStatus.cancelled:
+        return 'Cancelled';
+    }
+  }
+
+  Color get _statusColor {
+    switch (order.status) {
+      case FoodOrderStatus.pending:
+        return yellow;
+      case FoodOrderStatus.accepted:
+      case FoodOrderStatus.preparing:
+        return Colors.orangeAccent;
+      case FoodOrderStatus.readyForPickup:
+      case FoodOrderStatus.pickedUp:
+      case FoodOrderStatus.onTheWay:
+        return Colors.lightBlueAccent;
+      case FoodOrderStatus.delivered:
+        return Colors.greenAccent;
+      case FoodOrderStatus.cancelled:
+        return Colors.redAccent;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      decoration: BoxDecoration(
+        color: cardColor,
+        borderRadius: BorderRadius.circular(17),
+      ),
+      child: ListTile(
+        onTap: onTap,
+        contentPadding:
+            const EdgeInsets.symmetric(
+          horizontal: 15,
+          vertical: 7,
+        ),
+        leading: CircleAvatar(
+          backgroundColor:
+              _statusColor.withValues(
+            alpha: 0.13,
+          ),
+          child: Icon(
+            Icons.receipt_long_outlined,
+            color: _statusColor,
+          ),
+        ),
+        title: Text(
+          'Order #${order.orderId.length > 8 ? order.orderId.substring(0, 8) : order.orderId}',
+          style: const TextStyle(
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+        subtitle: Text(
+          '${order.items.length} item(s) • Rs. ${order.grandTotal.toStringAsFixed(0)}',
+          style: const TextStyle(
+            color: Colors.grey,
+            fontSize: 12,
+          ),
+        ),
+        trailing: Container(
+          padding: const EdgeInsets.symmetric(
+            horizontal: 9,
+            vertical: 5,
+          ),
+          decoration: BoxDecoration(
+            color: _statusColor.withValues(
+              alpha: 0.12,
+            ),
+            borderRadius: BorderRadius.circular(20),
+          ),
+          child: Text(
+            _statusText,
+            style: TextStyle(
+              color: _statusColor,
+              fontSize: 11,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _DashboardStats {
+  const _DashboardStats({
+    required this.newOrders,
+    required this.preparingOrders,
+    required this.completedOrders,
+    required this.totalSales,
+  });
+
+  final int newOrders;
+  final int preparingOrders;
+  final int completedOrders;
+  final double totalSales;
+
+  factory _DashboardStats.fromOrders(
+    List<FoodOrderModel> orders,
+  ) {
+    int newOrders = 0;
+    int preparingOrders = 0;
+    int completedOrders = 0;
+    double totalSales = 0;
+
+    for (final FoodOrderModel order in orders) {
+      switch (order.status) {
+        case FoodOrderStatus.pending:
+          newOrders++;
+          break;
+
+        case FoodOrderStatus.accepted:
+        case FoodOrderStatus.preparing:
+        case FoodOrderStatus.readyForPickup:
+          preparingOrders++;
+          break;
+
+        case FoodOrderStatus.delivered:
+          completedOrders++;
+
+          // Restaurant sales exclude delivery and service fees.
+          // Discount is applied to the restaurant item subtotal.
+          final double restaurantSale =
+              (order.itemsTotal - order.discount)
+                  .clamp(0, double.infinity)
+                  .toDouble();
+
+          totalSales += restaurantSale;
+          break;
+
+        case FoodOrderStatus.pickedUp:
+        case FoodOrderStatus.onTheWay:
+        case FoodOrderStatus.cancelled:
+          break;
+      }
+    }
+
+    return _DashboardStats(
+      newOrders: newOrders,
+      preparingOrders: preparingOrders,
+      completedOrders: completedOrders,
+      totalSales: totalSales,
+    );
+  }
+}
+
+class _OverviewRow extends StatelessWidget {
+  const _OverviewRow({
+    required this.label,
+    required this.value,
+    this.highlight = false,
+  });
+
+  static const Color yellow = Color(0xFFFFD60A);
+
+  final String label;
+  final String value;
+  final bool highlight;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: <Widget>[
+        Expanded(
+          child: Text(
+            label,
+            style: const TextStyle(
+              color: Colors.grey,
+              fontSize: 12,
+            ),
+          ),
+        ),
+        const SizedBox(width: 12),
+        Text(
+          value,
+          style: TextStyle(
+            color: highlight
+                ? yellow
+                : Colors.white,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _StatItem {
+  const _StatItem({
+    required this.title,
+    required this.value,
+    required this.icon,
+  });
+
+  final String title;
+  final String value;
+  final IconData icon;
+}
+
+class _DashboardAction {
+  const _DashboardAction({
+    required this.title,
+    required this.subtitle,
+    required this.icon,
+    required this.routeName,
+  });
+
+  final String title;
+  final String subtitle;
+  final IconData icon;
+  final String routeName;
+}

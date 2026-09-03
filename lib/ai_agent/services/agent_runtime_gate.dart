@@ -1,0 +1,170 @@
+import '../constants/agent_enums.dart';
+import '../models/agent_master_settings.dart';
+import '../models/agent_permission_decision.dart';
+import '../models/agent_role.dart';
+
+// =========================================================
+// AI AGENT ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â RUNTIME MASTER GATE
+// =========================================================
+//
+// Final safety gate placed after Permission Engine and before any
+// future tool execution.
+//
+// This gate is pure: no Firestore reads/writes.
+// Caller supplies current AgentMasterSettings snapshot.
+
+class AgentRuntimeGate {
+  const AgentRuntimeGate();
+
+  AgentPermissionDecision apply({
+    required AgentMasterSettings settings,
+    required AgentRole role,
+    required AgentPermissionDecision permissionDecision,
+  }) {
+    if (!settings.masterEnabled) {
+      return AgentPermissionDecision.deny(
+        roleId: role.roleId,
+        actionId: permissionDecision.actionId,
+        reason: 'AI Master Control is OFF.',
+        effectiveMode: AgentMode.off,
+      );
+    }
+
+    if (permissionDecision.isDenied) {
+      return permissionDecision;
+    }
+
+    if (settings.emergencyReadOnly) {
+      // During Emergency Stop, only already-allowed read/monitor decisions
+      // may proceed. Any approval/write path is blocked.
+      if (permissionDecision.needsApproval) {
+        return AgentPermissionDecision.deny(
+          roleId: role.roleId,
+          actionId: permissionDecision.actionId,
+          reason: 'Emergency Read-Only mode blocks approval/write actions.',
+          effectiveMode: role.mode,
+        );
+      }
+
+      if (role.mode != AgentMode.monitorOnly &&
+          role.mode != AgentMode.suggestOnly) {
+        return AgentPermissionDecision.deny(
+          roleId: role.roleId,
+          actionId: permissionDecision.actionId,
+          reason:
+              'Emergency Read-Only mode permits only monitor/suggest roles.',
+          effectiveMode: role.mode,
+        );
+      }
+    }
+
+    if (role.aiClass == AiClass.freeAi && !settings.freeAiEnabled) {
+      return AgentPermissionDecision.deny(
+        roleId: role.roleId,
+        actionId: permissionDecision.actionId,
+        reason: 'Free AI provider class is disabled.',
+        effectiveMode: role.mode,
+      );
+    }
+
+    if (role.aiClass == AiClass.localAi && !settings.localAiEnabled) {
+      return AgentPermissionDecision.deny(
+        roleId: role.roleId,
+        actionId: permissionDecision.actionId,
+        reason: 'Local AI provider class is disabled.',
+        effectiveMode: role.mode,
+      );
+    }
+
+    if (role.aiClass == AiClass.paidCodeAi) {
+      if (!settings.paidCodeAiEnabled) {
+        return AgentPermissionDecision.deny(
+          roleId: role.roleId,
+          actionId: permissionDecision.actionId,
+          reason: 'Paid Code AI is disabled.',
+          effectiveMode: role.mode,
+        );
+      }
+
+      if (!settings.paidBudgetAvailable) {
+        return AgentPermissionDecision.deny(
+          roleId: role.roleId,
+          actionId: permissionDecision.actionId,
+          reason: 'Paid Code AI monthly budget is exhausted/unconfigured.',
+          effectiveMode: role.mode,
+        );
+      }
+    }
+
+    if (role.roleId == 'customer_whatsapp_agent' &&
+        !settings.customerWhatsAppAgentEnabled) {
+      return AgentPermissionDecision.deny(
+        roleId: role.roleId,
+
+        actionId: permissionDecision.actionId,
+
+        reason: 'Customer WhatsApp Agent master switch is OFF.',
+
+        effectiveMode: role.mode,
+      );
+    }
+
+    if (role.roleId == 'owner_whatsapp_agent' &&
+        !settings.ownerWhatsAppAgentEnabled) {
+      return AgentPermissionDecision.deny(
+        roleId: role.roleId,
+        actionId: permissionDecision.actionId,
+        reason: 'Owner WhatsApp Agent master switch is OFF.',
+        effectiveMode: role.mode,
+      );
+    }
+
+    if (role.roleId == 'emergency_whatsapp_agent' &&
+        !settings.emergencyWhatsAppAgentEnabled) {
+      return AgentPermissionDecision.deny(
+        roleId: role.roleId,
+        actionId: permissionDecision.actionId,
+        reason: 'Emergency WhatsApp Agent master switch is OFF.',
+        effectiveMode: role.mode,
+      );
+    }
+
+    if (role.roleId == 'voice_super_admin_agent' &&
+        !settings.voiceSuperAdminAgentEnabled) {
+      return AgentPermissionDecision.deny(
+        roleId: role.roleId,
+        actionId: permissionDecision.actionId,
+        reason: 'Voice Super Admin Agent master switch is OFF.',
+        effectiveMode: role.mode,
+      );
+    }
+
+    if (role.roleId == 'email_agent' && !settings.emailAgentEnabled) {
+      return AgentPermissionDecision.deny(
+        roleId: role.roleId,
+        actionId: permissionDecision.actionId,
+        reason: 'Email Agent master switch is OFF.',
+        effectiveMode: role.mode,
+      );
+    }
+    if (role.roleId == 'call_agent' && !settings.callAgentEnabled) {
+      return AgentPermissionDecision.deny(
+        roleId: role.roleId,
+        actionId: permissionDecision.actionId,
+        reason: 'Call Agent master switch is OFF.',
+        effectiveMode: role.mode,
+      );
+    }
+
+    if (permissionDecision.needsApproval && !settings.approvalEngineEnabled) {
+      return AgentPermissionDecision.deny(
+        roleId: role.roleId,
+        actionId: permissionDecision.actionId,
+        reason: 'Action requires approval but Approval Engine is OFF.',
+        effectiveMode: role.mode,
+      );
+    }
+
+    return permissionDecision;
+  }
+}

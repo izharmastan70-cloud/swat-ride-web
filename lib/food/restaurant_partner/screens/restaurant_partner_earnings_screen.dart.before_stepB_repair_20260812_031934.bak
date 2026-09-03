@@ -1,0 +1,1208 @@
+// lib/food/restaurant_partner/screens/restaurant_partner_earnings_screen.dart
+// SWAT RIDE - FOOD DELIVERY
+// Live restaurant earnings, commission and settlement history.
+
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/material.dart';
+
+enum _Period { today, week, month, lifetime }
+enum _SettlementFilter { all, pending, paid }
+
+class RestaurantPartnerEarningsScreen extends StatefulWidget {
+  const RestaurantPartnerEarningsScreen({
+    super.key,
+    this.partnerId = '',
+    this.restaurantId = '',
+  });
+
+  final String partnerId;
+  final String restaurantId;
+
+  @override
+  State<RestaurantPartnerEarningsScreen> createState() =>
+      _RestaurantPartnerEarningsScreenState();
+}
+
+class _RestaurantPartnerEarningsScreenState
+    extends State<RestaurantPartnerEarningsScreen> {
+  static const Color yellow = Color(0xFFFFD60A);
+  static const Color background = Color(0xFF0D0D0D);
+  static const Color card = Color(0xFF1A1A1A);
+
+  final FirebaseFirestore _db = FirebaseFirestore.instance;
+
+  _Period _period = _Period.month;
+  _SettlementFilter _settlementFilter = _SettlementFilter.all;
+  Future<_PartnerData>? _partnerFuture;
+
+  @override
+  void initState() {
+    super.initState();
+    _partnerFuture = _resolvePartner();
+  }
+
+  Future<_PartnerData> _resolvePartner() async {
+    if (widget.partnerId.trim().isNotEmpty) {
+      final snapshot = await _db
+          .collection('food_restaurant_partners')
+          .doc(widget.partnerId.trim())
+          .get();
+
+      final data = snapshot.data() ?? <String, dynamic>{};
+
+      return _PartnerData(
+        partnerId: snapshot.id,
+        restaurantId: widget.restaurantId.trim().isNotEmpty
+            ? widget.restaurantId.trim()
+            : _text(data['restaurantId']),
+        name: _text(data['restaurantName']),
+        commission: _number(data['commissionPercentage']),
+      );
+    }
+
+    if (widget.restaurantId.trim().isNotEmpty) {
+      return _PartnerData(
+        partnerId: '',
+        restaurantId: widget.restaurantId.trim(),
+        name: '',
+        commission: 0,
+      );
+    }
+
+    final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+    if (uid.isEmpty) {
+      throw StateError('Please sign in to view restaurant earnings.');
+    }
+
+    final query = await _db
+        .collection('food_restaurant_partners')
+        .where('userId', isEqualTo: uid)
+        .limit(1)
+        .get();
+
+    if (query.docs.isEmpty) {
+      throw StateError('Restaurant partner account was not found.');
+    }
+
+    final document = query.docs.first;
+    final data = document.data();
+
+    return _PartnerData(
+      partnerId: document.id,
+      restaurantId: _text(data['restaurantId']),
+      name: _text(data['restaurantName']),
+      commission: _number(data['commissionPercentage']),
+    );
+  }
+
+  Stream<List<_OrderEarning>> _watchOrders(String restaurantId) {
+    return _db
+        .collection('food_orders')
+        .where('restaurantId', isEqualTo: restaurantId)
+        .snapshots()
+        .map((snapshot) {
+      final values = snapshot.docs
+          .map(_OrderEarning.fromDocument)
+          .toList();
+
+      values.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+      return values;
+    });
+  }
+
+  Stream<List<_Settlement>> _watchSettlements(_PartnerData partner) {
+    Query<Map<String, dynamic>> query =
+        _db.collection('food_partner_settlements');
+
+    query = partner.partnerId.isNotEmpty
+        ? query.where('partnerId', isEqualTo: partner.partnerId)
+        : query.where(
+            'restaurantId',
+            isEqualTo: partner.restaurantId,
+          );
+
+    return query.snapshots().map((snapshot) {
+      final values =
+          snapshot.docs.map(_Settlement.fromDocument).toList();
+
+      values.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+      return values;
+    });
+  }
+
+  List<_OrderEarning> _periodOrders(List<_OrderEarning> orders) {
+    if (_period == _Period.lifetime) return orders;
+
+    final now = DateTime.now();
+    late DateTime start;
+
+    switch (_period) {
+      case _Period.today:
+        start = DateTime(now.year, now.month, now.day);
+        break;
+      case _Period.week:
+        final today = DateTime(now.year, now.month, now.day);
+        start = today.subtract(Duration(days: now.weekday - 1));
+        break;
+      case _Period.month:
+        start = DateTime(now.year, now.month, 1);
+        break;
+      case _Period.lifetime:
+        return orders;
+    }
+
+    return orders.where((order) => !order.createdAt.isBefore(start)).toList();
+  }
+
+  _Summary _summary(
+    List<_OrderEarning> orders,
+    double fallbackCommission,
+  ) {
+    double gross = 0;
+    double itemSales = 0;
+    double discounts = 0;
+    double deliveryFees = 0;
+    double serviceFees = 0;
+    double commission = 0;
+    double net = 0;
+    int delivered = 0;
+    int cancelled = 0;
+
+    for (final order in orders) {
+      if (order.isCancelled) {
+        cancelled++;
+        continue;
+      }
+
+      if (!order.isDelivered) continue;
+
+      delivered++;
+      gross += order.grandTotal;
+      itemSales += order.itemsTotal;
+      discounts += order.discount;
+      deliveryFees += order.deliveryFee;
+      serviceFees += order.serviceFee;
+
+      final rate = order.commissionRate > 0
+          ? order.commissionRate
+          : fallbackCommission;
+
+      final orderCommission = order.commissionAmount > 0
+          ? order.commissionAmount
+          : order.itemsTotal * (rate / 100);
+
+      commission += orderCommission;
+
+      final calculatedNet = order.itemsTotal -
+          order.discount -
+          orderCommission;
+
+      net += order.netEarning > 0
+          ? order.netEarning
+          : calculatedNet.clamp(0, double.infinity);
+    }
+
+    return _Summary(
+      totalOrders: orders.length,
+      delivered: delivered,
+      cancelled: cancelled,
+      gross: gross,
+      itemSales: itemSales,
+      discounts: discounts,
+      deliveryFees: deliveryFees,
+      serviceFees: serviceFees,
+      commission: commission,
+      net: net,
+    );
+  }
+
+  List<_Settlement> _filterSettlements(List<_Settlement> values) {
+    switch (_settlementFilter) {
+      case _SettlementFilter.all:
+        return values;
+      case _SettlementFilter.pending:
+        return values.where((item) => item.isPending).toList();
+      case _SettlementFilter.paid:
+        return values.where((item) => item.isPaid).toList();
+    }
+  }
+
+  void _retry() {
+    setState(() {
+      _partnerFuture = _resolvePartner();
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: background,
+      appBar: AppBar(
+        backgroundColor: background,
+        title: const Text(
+          'Restaurant Earnings',
+          style: TextStyle(fontWeight: FontWeight.bold),
+        ),
+      ),
+      body: FutureBuilder<_PartnerData>(
+        future: _partnerFuture,
+        builder: (context, partnerSnapshot) {
+          if (partnerSnapshot.connectionState ==
+                  ConnectionState.waiting &&
+              !partnerSnapshot.hasData) {
+            return const Center(
+              child: CircularProgressIndicator(color: yellow),
+            );
+          }
+
+          if (partnerSnapshot.hasError) {
+            return _ErrorView(
+              message: partnerSnapshot.error.toString(),
+              onRetry: _retry,
+            );
+          }
+
+          final partner = partnerSnapshot.data;
+          if (partner == null || partner.restaurantId.isEmpty) {
+            return _ErrorView(
+              message:
+                  'Approved restaurant ID is missing. Complete admin approval first.',
+              onRetry: _retry,
+            );
+          }
+
+          return StreamBuilder<List<_OrderEarning>>(
+            stream: _watchOrders(partner.restaurantId),
+            builder: (context, orderSnapshot) {
+              return StreamBuilder<List<_Settlement>>(
+                stream: _watchSettlements(partner),
+                builder: (context, settlementSnapshot) {
+                  if ((orderSnapshot.connectionState ==
+                              ConnectionState.waiting ||
+                          settlementSnapshot.connectionState ==
+                              ConnectionState.waiting) &&
+                      !orderSnapshot.hasData &&
+                      !settlementSnapshot.hasData) {
+                    return const Center(
+                      child: CircularProgressIndicator(color: yellow),
+                    );
+                  }
+
+                  if (orderSnapshot.hasError ||
+                      settlementSnapshot.hasError) {
+                    return _ErrorView(
+                      message:
+                          'Unable to load earnings. Check Firestore rules and indexes.',
+                      onRetry: () => setState(() {}),
+                    );
+                  }
+
+                  final allOrders =
+                      orderSnapshot.data ?? const <_OrderEarning>[];
+                  final settlements =
+                      settlementSnapshot.data ?? const <_Settlement>[];
+
+                  final summary = _summary(
+                    _periodOrders(allOrders),
+                    partner.commission,
+                  );
+
+                  final pending = settlements
+                      .where((item) => item.isPending)
+                      .fold<double>(0, (total, item) => total + item.amount);
+
+                  final paid = settlements
+                      .where((item) => item.isPaid)
+                      .fold<double>(0, (total, item) => total + item.amount);
+
+                  final visibleSettlements =
+                      _filterSettlements(settlements);
+
+                  return RefreshIndicator(
+                    color: yellow,
+                    onRefresh: () async => _retry(),
+                    child: ListView(
+                      physics:
+                          const AlwaysScrollableScrollPhysics(),
+                      padding: const EdgeInsets.fromLTRB(
+                        16,
+                        14,
+                        16,
+                        30,
+                      ),
+                      children: [
+                        _header(partner, summary),
+                        const SizedBox(height: 15),
+                        _periodSelector(),
+                        const SizedBox(height: 15),
+                        _summaryGrid(summary),
+                        const SizedBox(height: 15),
+                        _section(
+                          title: 'Settlement Overview',
+                          icon: Icons.account_balance_outlined,
+                          children: [
+                            _AmountRow(
+                              label: 'Pending settlement',
+                              value: pending,
+                              color: Colors.orangeAccent,
+                            ),
+                            const Divider(color: Colors.white12),
+                            _AmountRow(
+                              label: 'Paid settlement',
+                              value: paid,
+                              color: Colors.greenAccent,
+                            ),
+                            const Divider(color: Colors.white12),
+                            _AmountRow(
+                              label: 'Admin commission',
+                              value: summary.commission,
+                              color: Colors.redAccent,
+                            ),
+                            const Divider(color: Colors.white12),
+                            _AmountRow(
+                              label: 'Restaurant net earnings',
+                              value: summary.net,
+                              color: yellow,
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 15),
+                        _section(
+                          title: 'Earnings Breakdown',
+                          icon: Icons.analytics_outlined,
+                          children: [
+                            _AmountRow(
+                              label: 'Food item sales',
+                              value: summary.itemSales,
+                            ),
+                            const Divider(color: Colors.white12),
+                            _AmountRow(
+                              label: 'Discounts',
+                              value: -summary.discounts,
+                              color: Colors.redAccent,
+                            ),
+                            const Divider(color: Colors.white12),
+                            _AmountRow(
+                              label: 'Customer service fees',
+                              value: summary.serviceFees,
+                              color: Colors.grey,
+                            ),
+                            const Divider(color: Colors.white12),
+                            _AmountRow(
+                              label: 'Delivery fees',
+                              value: summary.deliveryFees,
+                              color: Colors.grey,
+                            ),
+                            const Divider(color: Colors.white12),
+                            _AmountRow(
+                              label: 'Admin commission',
+                              value: -summary.commission,
+                              color: Colors.redAccent,
+                            ),
+                            const Divider(color: Colors.white12),
+                            _AmountRow(
+                              label: 'Restaurant net',
+                              value: summary.net,
+                              color: yellow,
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 18),
+                        Row(
+                          children: [
+                            const Expanded(
+                              child: Text(
+                                'Settlement History',
+                                style: TextStyle(
+                                  fontSize: 20,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            ),
+                            Text(
+                              '${settlements.length} record(s)',
+                              style: const TextStyle(
+                                color: Colors.grey,
+                                fontSize: 11,
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 10),
+                        _settlementFilters(),
+                        const SizedBox(height: 12),
+                        if (visibleSettlements.isEmpty)
+                          _emptySettlements()
+                        else
+                          ...visibleSettlements.map(
+                            (item) => Padding(
+                              padding:
+                                  const EdgeInsets.only(bottom: 10),
+                              child: _SettlementCard(
+                                settlement: item,
+                                onTap: () =>
+                                    _showSettlementDetails(item),
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+                  );
+                },
+              );
+            },
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _header(_PartnerData partner, _Summary summary) {
+    return Container(
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        color: yellow,
+        borderRadius: BorderRadius.circular(22),
+      ),
+      child: Row(
+        children: [
+          const CircleAvatar(
+            radius: 32,
+            backgroundColor: Colors.black,
+            child: Icon(
+              Icons.account_balance_wallet_outlined,
+              color: yellow,
+              size: 34,
+            ),
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  partner.name.isEmpty
+                      ? 'Restaurant Earnings'
+                      : partner.name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: Colors.black,
+                    fontSize: 20,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(height: 5),
+                Text(
+                  'Net earnings: Rs. ${summary.net.toStringAsFixed(0)}',
+                  style: const TextStyle(
+                    color: Colors.black87,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  '${summary.delivered} delivered order(s)',
+                  style: const TextStyle(
+                    color: Colors.black87,
+                    fontSize: 11,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _periodSelector() {
+    const values = <MapEntry<_Period, String>>[
+      MapEntry(_Period.today, 'Today'),
+      MapEntry(_Period.week, 'Week'),
+      MapEntry(_Period.month, 'Month'),
+      MapEntry(_Period.lifetime, 'Lifetime'),
+    ];
+
+    return SizedBox(
+      height: 44,
+      child: ListView.separated(
+        scrollDirection: Axis.horizontal,
+        itemCount: values.length,
+        separatorBuilder: (_, _) => const SizedBox(width: 8),
+        itemBuilder: (context, index) {
+          final item = values[index];
+          final selected = _period == item.key;
+
+          return ChoiceChip(
+            label: Text(item.value),
+            selected: selected,
+            onSelected: (_) {
+              setState(() => _period = item.key);
+            },
+            selectedColor: yellow,
+            backgroundColor: card,
+            checkmarkColor: Colors.black,
+            labelStyle: TextStyle(
+              color: selected ? Colors.black : Colors.white,
+              fontWeight: FontWeight.bold,
+            ),
+            side: BorderSide.none,
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _summaryGrid(_Summary summary) {
+    final values = [
+      _Stat(
+        'Gross Sales',
+        'Rs. ${summary.gross.toStringAsFixed(0)}',
+        Icons.point_of_sale_outlined,
+      ),
+      _Stat(
+        'Net Earnings',
+        'Rs. ${summary.net.toStringAsFixed(0)}',
+        Icons.savings_outlined,
+      ),
+      _Stat(
+        'Delivered',
+        '${summary.delivered}',
+        Icons.task_alt,
+      ),
+      _Stat(
+        'Cancelled',
+        '${summary.cancelled}',
+        Icons.cancel_outlined,
+      ),
+    ];
+
+    return GridView.builder(
+      shrinkWrap: true,
+      physics: const NeverScrollableScrollPhysics(),
+      itemCount: values.length,
+      gridDelegate:
+          const SliverGridDelegateWithFixedCrossAxisCount(
+        crossAxisCount: 2,
+        crossAxisSpacing: 11,
+        mainAxisSpacing: 11,
+        childAspectRatio: 1.42,
+      ),
+      itemBuilder: (context, index) {
+        final item = values[index];
+
+        return Container(
+          padding: const EdgeInsets.all(15),
+          decoration: BoxDecoration(
+            color: card,
+            borderRadius: BorderRadius.circular(18),
+            border: Border.all(color: Colors.white10),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Icon(item.icon, color: yellow),
+              Text(
+                item.value,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              Text(
+                item.title,
+                style: const TextStyle(
+                  color: Colors.grey,
+                  fontSize: 11,
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _settlementFilters() {
+    const values = <MapEntry<_SettlementFilter, String>>[
+      MapEntry(_SettlementFilter.all, 'All'),
+      MapEntry(_SettlementFilter.pending, 'Pending'),
+      MapEntry(_SettlementFilter.paid, 'Paid'),
+    ];
+
+    return SizedBox(
+      height: 42,
+      child: ListView.separated(
+        scrollDirection: Axis.horizontal,
+        itemCount: values.length,
+        separatorBuilder: (_, _) => const SizedBox(width: 8),
+        itemBuilder: (context, index) {
+          final item = values[index];
+          final selected = _settlementFilter == item.key;
+
+          return ChoiceChip(
+            label: Text(item.value),
+            selected: selected,
+            onSelected: (_) {
+              setState(() => _settlementFilter = item.key);
+            },
+            selectedColor: yellow,
+            backgroundColor: card,
+            checkmarkColor: Colors.black,
+            labelStyle: TextStyle(
+              color: selected ? Colors.black : Colors.white,
+              fontWeight: FontWeight.bold,
+            ),
+            side: BorderSide.none,
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _section({
+    required String title,
+    required IconData icon,
+    required List<Widget> children,
+  }) {
+    return Container(
+      padding: const EdgeInsets.all(17),
+      decoration: BoxDecoration(
+        color: card,
+        borderRadius: BorderRadius.circular(19),
+        border: Border.all(color: Colors.white10),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(icon, color: yellow),
+              const SizedBox(width: 9),
+              Text(
+                title,
+                style: const TextStyle(
+                  fontSize: 17,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 14),
+          ...children,
+        ],
+      ),
+    );
+  }
+
+  Widget _emptySettlements() {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(28),
+      decoration: BoxDecoration(
+        color: card,
+        borderRadius: BorderRadius.circular(18),
+      ),
+      child: const Column(
+        children: [
+          Icon(
+            Icons.receipt_long_outlined,
+            color: yellow,
+            size: 58,
+          ),
+          SizedBox(height: 12),
+          Text(
+            'No settlement records',
+            style: TextStyle(
+              fontSize: 18,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          SizedBox(height: 7),
+          Text(
+            'Admin-processed restaurant settlements will appear here.',
+            textAlign: TextAlign.center,
+            style: TextStyle(color: Colors.grey),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showSettlementDetails(_Settlement settlement) {
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: card,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(
+          top: Radius.circular(24),
+        ),
+      ),
+      builder: (context) {
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.all(20),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                _InfoRow(
+                  label: 'Settlement ID',
+                  value: settlement.id,
+                ),
+                const Divider(color: Colors.white12),
+                _InfoRow(
+                  label: 'Status',
+                  value: settlement.status,
+                ),
+                const Divider(color: Colors.white12),
+                _InfoRow(
+                  label: 'Amount',
+                  value:
+                      'Rs. ${settlement.amount.toStringAsFixed(0)}',
+                ),
+                const Divider(color: Colors.white12),
+                _InfoRow(
+                  label: 'Method',
+                  value: settlement.method,
+                ),
+                const Divider(color: Colors.white12),
+                _InfoRow(
+                  label: 'Created',
+                  value: _dateText(settlement.createdAt),
+                ),
+                if (settlement.reference.isNotEmpty) ...[
+                  const Divider(color: Colors.white12),
+                  _InfoRow(
+                    label: 'Reference',
+                    value: settlement.reference,
+                  ),
+                ],
+                if (settlement.note.isNotEmpty) ...[
+                  const Divider(color: Colors.white12),
+                  _InfoRow(
+                    label: 'Note',
+                    value: settlement.note,
+                  ),
+                ],
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  static String _dateText(DateTime value) {
+    final day = value.day.toString().padLeft(2, '0');
+    final month = value.month.toString().padLeft(2, '0');
+    final hour = value.hour.toString().padLeft(2, '0');
+    final minute = value.minute.toString().padLeft(2, '0');
+    return '$day/$month/${value.year} â€¢ $hour:$minute';
+  }
+
+  static String _text(dynamic value) =>
+      value?.toString().trim() ?? '';
+
+  static double _number(dynamic value) {
+    if (value is num) return value.toDouble();
+    return double.tryParse(value?.toString() ?? '') ?? 0;
+  }
+}
+
+class _PartnerData {
+  const _PartnerData({
+    required this.partnerId,
+    required this.restaurantId,
+    required this.name,
+    required this.commission,
+  });
+
+  final String partnerId;
+  final String restaurantId;
+  final String name;
+  final double commission;
+}
+
+class _OrderEarning {
+  const _OrderEarning({
+    required this.status,
+    required this.itemsTotal,
+    required this.deliveryFee,
+    required this.serviceFee,
+    required this.discount,
+    required this.grandTotal,
+    required this.commissionRate,
+    required this.commissionAmount,
+    required this.netEarning,
+    required this.createdAt,
+  });
+
+  final String status;
+  final double itemsTotal;
+  final double deliveryFee;
+  final double serviceFee;
+  final double discount;
+  final double grandTotal;
+  final double commissionRate;
+  final double commissionAmount;
+  final double netEarning;
+  final DateTime createdAt;
+
+  bool get isDelivered => status.toLowerCase() == 'delivered';
+  bool get isCancelled => status.toLowerCase() == 'cancelled';
+
+  factory _OrderEarning.fromDocument(
+    QueryDocumentSnapshot<Map<String, dynamic>> document,
+  ) {
+    final data = document.data();
+    final items = _num(data['itemsTotal']);
+    final delivery = _num(data['deliveryFee']);
+    final service = _num(data['serviceFee']);
+    final discount = _num(data['discount']);
+    final savedGrand = _num(data['grandTotal']);
+
+    return _OrderEarning(
+      status: data['status']?.toString() ?? 'pending',
+      itemsTotal: items,
+      deliveryFee: delivery,
+      serviceFee: service,
+      discount: discount,
+      grandTotal: savedGrand > 0
+          ? savedGrand
+          : (items + delivery + service - discount)
+              .clamp(0, double.infinity),
+      commissionRate: _num(
+        data['restaurantCommissionPercentage'] ??
+            data['commissionPercentage'],
+      ),
+      commissionAmount: _num(
+        data['restaurantCommissionAmount'] ??
+            data['restaurantCommission'],
+      ),
+      netEarning: _num(
+        data['restaurantNetEarning'] ??
+            data['restaurantEarning'] ??
+            data['restaurantNetAmount'],
+      ),
+      createdAt: _date(data['createdAt']) ?? DateTime.now(),
+    );
+  }
+
+  static double _num(dynamic value) {
+    if (value is num) return value.toDouble();
+    return double.tryParse(value?.toString() ?? '') ?? 0;
+  }
+
+  static DateTime? _date(dynamic value) {
+    if (value is Timestamp) return value.toDate();
+    if (value is DateTime) return value;
+    return DateTime.tryParse(value?.toString() ?? '');
+  }
+}
+
+class _Settlement {
+  const _Settlement({
+    required this.id,
+    required this.status,
+    required this.amount,
+    required this.method,
+    required this.reference,
+    required this.note,
+    required this.createdAt,
+  });
+
+  final String id;
+  final String status;
+  final double amount;
+  final String method;
+  final String reference;
+  final String note;
+  final DateTime createdAt;
+
+  bool get isPending {
+    final value = status.toLowerCase();
+    return value == 'pending' ||
+        value == 'processing' ||
+        value == 'requested';
+  }
+
+  bool get isPaid {
+    final value = status.toLowerCase();
+    return value == 'paid' ||
+        value == 'completed' ||
+        value == 'settled';
+  }
+
+  factory _Settlement.fromDocument(
+    QueryDocumentSnapshot<Map<String, dynamic>> document,
+  ) {
+    final data = document.data();
+
+    return _Settlement(
+      id: document.id,
+      status: data['status']?.toString() ?? 'pending',
+      amount: _num(
+        data['amount'] ??
+            data['settlementAmount'] ??
+            data['netAmount'],
+      ),
+      method: data['paymentMethod']?.toString() ??
+          data['method']?.toString() ??
+          'Not specified',
+      reference: data['reference']?.toString() ??
+          data['transactionId']?.toString() ??
+          '',
+      note: data['note']?.toString() ??
+          data['adminNote']?.toString() ??
+          '',
+      createdAt: _date(data['createdAt']) ?? DateTime.now(),
+    );
+  }
+
+  static double _num(dynamic value) {
+    if (value is num) return value.toDouble();
+    return double.tryParse(value?.toString() ?? '') ?? 0;
+  }
+
+  static DateTime? _date(dynamic value) {
+    if (value is Timestamp) return value.toDate();
+    if (value is DateTime) return value;
+    return DateTime.tryParse(value?.toString() ?? '');
+  }
+}
+
+class _Summary {
+  const _Summary({
+    required this.totalOrders,
+    required this.delivered,
+    required this.cancelled,
+    required this.gross,
+    required this.itemSales,
+    required this.discounts,
+    required this.deliveryFees,
+    required this.serviceFees,
+    required this.commission,
+    required this.net,
+  });
+
+  final int totalOrders;
+  final int delivered;
+  final int cancelled;
+  final double gross;
+  final double itemSales;
+  final double discounts;
+  final double deliveryFees;
+  final double serviceFees;
+  final double commission;
+  final double net;
+}
+
+class _Stat {
+  const _Stat(this.title, this.value, this.icon);
+  final String title;
+  final String value;
+  final IconData icon;
+}
+
+class _AmountRow extends StatelessWidget {
+  const _AmountRow({
+    required this.label,
+    required this.value,
+    this.color = Colors.white,
+  });
+
+  final String label;
+  final double value;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    final sign = value < 0 ? '- ' : '';
+
+    return Row(
+      children: [
+        Expanded(
+          child: Text(
+            label,
+            style: const TextStyle(color: Colors.grey),
+          ),
+        ),
+        Text(
+          '${sign}Rs. ${value.abs().toStringAsFixed(0)}',
+          style: TextStyle(
+            color: color,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _InfoRow extends StatelessWidget {
+  const _InfoRow({
+    required this.label,
+    required this.value,
+  });
+
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Expanded(
+          child: Text(
+            label,
+            style: const TextStyle(color: Colors.grey),
+          ),
+        ),
+        const SizedBox(width: 12),
+        Flexible(
+          child: Text(
+            value.isEmpty ? 'â€”' : value,
+            textAlign: TextAlign.right,
+            style: const TextStyle(fontWeight: FontWeight.bold),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _SettlementCard extends StatelessWidget {
+  const _SettlementCard({
+    required this.settlement,
+    required this.onTap,
+  });
+
+  static const Color card = Color(0xFF1A1A1A);
+
+  final _Settlement settlement;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = settlement.isPaid
+        ? Colors.greenAccent
+        : settlement.isPending
+            ? Colors.orangeAccent
+            : Colors.grey;
+
+    return Material(
+      color: card,
+      borderRadius: BorderRadius.circular(17),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(17),
+        child: Padding(
+          padding: const EdgeInsets.all(15),
+          child: Row(
+            children: [
+              CircleAvatar(
+                backgroundColor: color.withValues(alpha: 0.14),
+                child: Icon(
+                  settlement.isPaid
+                      ? Icons.check_circle_outline
+                      : Icons.schedule,
+                  color: color,
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Rs. ${settlement.amount.toStringAsFixed(0)}',
+                      style: const TextStyle(
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      settlement.method,
+                      style: const TextStyle(
+                        color: Colors.grey,
+                        fontSize: 10,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              Text(
+                settlement.status,
+                style: TextStyle(
+                  color: color,
+                  fontWeight: FontWeight.bold,
+                  fontSize: 10,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _ErrorView extends StatelessWidget {
+  const _ErrorView({
+    required this.message,
+    required this.onRetry,
+  });
+
+  static const Color yellow = Color(0xFFFFD60A);
+
+  final String message;
+  final VoidCallback onRetry;
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(30),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            const Icon(
+              Icons.cloud_off,
+              color: Colors.redAccent,
+              size: 72,
+            ),
+            const SizedBox(height: 15),
+            const Text(
+              'Unable to load earnings',
+              style: TextStyle(
+                fontSize: 20,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              message,
+              textAlign: TextAlign.center,
+              style: const TextStyle(color: Colors.grey),
+            ),
+            const SizedBox(height: 17),
+            ElevatedButton(
+              onPressed: onRetry,
+              style: ElevatedButton.styleFrom(
+                backgroundColor: yellow,
+                foregroundColor: Colors.black,
+              ),
+              child: const Text('Try Again'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}

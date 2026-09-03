@@ -1,0 +1,706 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
+
+import '../models/tour_booking.dart';
+
+class TourBookingService {
+  TourBookingService({
+    FirebaseFirestore? firestore,
+  }) : _firestore =
+            firestore ?? FirebaseFirestore.instance;
+
+  final FirebaseFirestore _firestore;
+
+  CollectionReference<Map<String, dynamic>>
+      get _bookingsCollection =>
+          _firestore.collection('tour_bookings');
+
+  CollectionReference<Map<String, dynamic>>
+      get _notificationsCollection =>
+          _firestore.collection('notifications');
+
+  CollectionReference<Map<String, dynamic>>
+      get _assignmentLogsCollection =>
+          _firestore.collection('tour_assignment_logs');
+
+  Future<String> createBooking(
+    TourBooking booking,
+  ) async {
+    try {
+      final DocumentReference<Map<String, dynamic>>
+          reference = booking.id.trim().isEmpty
+              ? _bookingsCollection.doc()
+              : _bookingsCollection.doc(booking.id);
+
+      await reference.set(
+        <String, dynamic>{
+          ...booking.toMap(),
+          'bookingId': reference.id,
+          'createdAt': FieldValue.serverTimestamp(),
+          'updatedAt': FieldValue.serverTimestamp(),
+
+          // Testing bypass: real online payment remains disabled.
+          'isTestingMode': true,
+          'realPaymentProcessed': false,
+
+          // Firebase Storage is bypassed by project decision.
+          'storageUploadUsed': false,
+        },
+        SetOptions(merge: true),
+      );
+
+      await _createNotification(
+        userId: booking.userId,
+        title: 'Tour request received',
+        message:
+            'Your ${booking.tourType} tour request for ${booking.destination} has been received.',
+        bookingId: reference.id,
+        type: 'tour_booking_created',
+      );
+
+      return reference.id;
+    } catch (error) {
+      throw Exception(
+        'Unable to create tour booking: $error',
+      );
+    }
+  }
+
+  Future<TourBooking?> getBooking(
+    String bookingId,
+  ) async {
+    try {
+      final snapshot =
+          await _bookingsCollection.doc(bookingId).get();
+
+      if (!snapshot.exists || snapshot.data() == null) {
+        return null;
+      }
+
+      return TourBooking.fromMap(
+        snapshot.data()!,
+        snapshot.id,
+      );
+    } catch (error) {
+      throw Exception(
+        'Unable to load tour booking: $error',
+      );
+    }
+  }
+
+  Future<List<TourBooking>> getUserBookings(
+    String userId,
+  ) async {
+    try {
+      final snapshot = await _bookingsCollection
+          .where('userId', isEqualTo: userId)
+          .get();
+
+      final bookings = snapshot.docs
+          .map(
+            (doc) => TourBooking.fromMap(
+              doc.data(),
+              doc.id,
+            ),
+          )
+          .toList();
+
+      bookings.sort(
+        (a, b) => b.createdAt.compareTo(a.createdAt),
+      );
+
+      return bookings;
+    } catch (error) {
+      throw Exception(
+        'Unable to load user tour bookings: $error',
+      );
+    }
+  }
+
+  Stream<List<TourBooking>> userBookingsStream(
+    String userId,
+  ) {
+    return _bookingsCollection
+        .where('userId', isEqualTo: userId)
+        .snapshots()
+        .map((snapshot) {
+      final bookings = snapshot.docs
+          .map(
+            (doc) => TourBooking.fromMap(
+              doc.data(),
+              doc.id,
+            ),
+          )
+          .toList();
+
+      bookings.sort(
+        (a, b) => b.createdAt.compareTo(a.createdAt),
+      );
+
+      return bookings;
+    });
+  }
+
+  Stream<List<TourBooking>> hotelBookingsStream(
+    String hotelId,
+  ) {
+    return _bookingsCollection
+        .where('hotelId', isEqualTo: hotelId)
+        .snapshots()
+        .map(_mapAndSort);
+  }
+
+  Stream<List<TourBooking>> driverBookingsStream(
+    String driverId,
+  ) {
+    return _bookingsCollection
+        .where('driverId', isEqualTo: driverId)
+        .snapshots()
+        .map(_mapAndSort);
+  }
+
+  Stream<List<TourBooking>> guideBookingsStream(
+    String guideId,
+  ) {
+    return _bookingsCollection
+        .where('guideId', isEqualTo: guideId)
+        .snapshots()
+        .map(_mapAndSort);
+  }
+
+  Stream<List<TourBooking>> allBookingsStream() {
+    return _bookingsCollection
+        .snapshots()
+        .map(_mapAndSort);
+  }
+
+  Future<void> updateBookingStatus({
+    required String bookingId,
+    required String status,
+    String note = '',
+    String actorUserId = '',
+  }) async {
+    try {
+      final Map<String, dynamic> updates =
+          <String, dynamic>{
+        'bookingStatus': status,
+        'statusNote': note,
+        'lastUpdatedBy': actorUserId,
+        'updatedAt': FieldValue.serverTimestamp(),
+      };
+
+      switch (status) {
+        case 'confirmed':
+          updates['confirmedAt'] =
+              FieldValue.serverTimestamp();
+          break;
+        case 'started':
+        case 'in_progress':
+          updates['startedAt'] =
+              FieldValue.serverTimestamp();
+          break;
+        case 'arrived':
+          updates['arrivedAt'] =
+              FieldValue.serverTimestamp();
+          break;
+        case 'completed':
+          updates['completedAt'] =
+              FieldValue.serverTimestamp();
+          break;
+        case 'cancelled':
+        case 'rejected':
+          updates['cancelledAt'] =
+              FieldValue.serverTimestamp();
+          break;
+      }
+
+      await _bookingsCollection
+          .doc(bookingId)
+          .set(
+            updates,
+            SetOptions(merge: true),
+          );
+
+      final booking = await getBooking(bookingId);
+      if (booking != null) {
+        await _createNotification(
+          userId: booking.userId,
+          title: 'Tour booking updated',
+          message:
+              'Your tour booking is now ${_readableStatus(status)}.',
+          bookingId: bookingId,
+          type: 'tour_status_updated',
+        );
+      }
+    } catch (error) {
+      throw Exception(
+        'Unable to update booking status: $error',
+      );
+    }
+  }
+
+  Future<void> confirmBooking(
+    String bookingId, {
+    String actorUserId = '',
+  }) async {
+    await updateBookingStatus(
+      bookingId: bookingId,
+      status: 'confirmed',
+      actorUserId: actorUserId,
+    );
+  }
+
+  Future<void> acceptBooking({
+    required String bookingId,
+    String actorUserId = '',
+  }) async {
+    try {
+      await _bookingsCollection.doc(bookingId).set(
+        <String, dynamic>{
+          'bookingStatus': 'accepted',
+          'assignmentStatus': 'accepted',
+          'acceptedAt': FieldValue.serverTimestamp(),
+          'lastUpdatedBy': actorUserId,
+          'updatedAt': FieldValue.serverTimestamp(),
+        },
+        SetOptions(merge: true),
+      );
+
+      final booking = await getBooking(bookingId);
+      if (booking != null) {
+        await _createNotification(
+          userId: booking.userId,
+          title: 'Tour assignment accepted',
+          message:
+              'Your assigned tourism driver has accepted the tour.',
+          bookingId: bookingId,
+          type: 'tour_driver_accepted',
+        );
+      }
+    } catch (error) {
+      throw Exception(
+        'Unable to accept tour booking: $error',
+      );
+    }
+  }
+
+  Future<void> rejectBooking({
+    required String bookingId,
+    required String reason,
+    String actorUserId = '',
+  }) async {
+    try {
+      await _bookingsCollection.doc(bookingId).set(
+        <String, dynamic>{
+          'bookingStatus': 'rejected',
+          'rejectionReason': reason,
+          'cancelledAt': FieldValue.serverTimestamp(),
+          'lastUpdatedBy': actorUserId,
+          'updatedAt': FieldValue.serverTimestamp(),
+        },
+        SetOptions(merge: true),
+      );
+
+      final booking = await getBooking(bookingId);
+      if (booking != null) {
+        await _createNotification(
+          userId: booking.userId,
+          title: 'Tour request rejected',
+          message: reason.isEmpty
+              ? 'Your tour request was rejected.'
+              : 'Your tour request was rejected: $reason',
+          bookingId: bookingId,
+          type: 'tour_booking_rejected',
+        );
+      }
+    } catch (error) {
+      throw Exception(
+        'Unable to reject tour booking: $error',
+      );
+    }
+  }
+
+  Future<void> cancelBooking(
+    String bookingId, {
+    String reason = '',
+    String actorUserId = '',
+  }) async {
+    try {
+      await _bookingsCollection.doc(bookingId).set(
+        <String, dynamic>{
+          'bookingStatus': 'cancelled',
+          'cancellationReason': reason,
+          'cancelledAt': FieldValue.serverTimestamp(),
+          'lastUpdatedBy': actorUserId,
+          'updatedAt': FieldValue.serverTimestamp(),
+        },
+        SetOptions(merge: true),
+      );
+
+      final booking = await getBooking(bookingId);
+      if (booking != null) {
+        await _createNotification(
+          userId: booking.userId,
+          title: 'Tour booking cancelled',
+          message: reason.isEmpty
+              ? 'Your tour booking has been cancelled.'
+              : 'Your tour booking has been cancelled: $reason',
+          bookingId: bookingId,
+          type: 'tour_booking_cancelled',
+        );
+      }
+    } catch (error) {
+      throw Exception(
+        'Unable to cancel tour booking: $error',
+      );
+    }
+  }
+
+  Future<void> startTour(
+    String bookingId, {
+    String actorUserId = '',
+  }) async {
+    await updateBookingStatus(
+      bookingId: bookingId,
+      status: 'started',
+      actorUserId: actorUserId,
+    );
+  }
+
+  Future<void> markArrived(
+    String bookingId, {
+    String actorUserId = '',
+  }) async {
+    await updateBookingStatus(
+      bookingId: bookingId,
+      status: 'arrived',
+      actorUserId: actorUserId,
+    );
+  }
+
+  Future<void> completeBooking(
+    String bookingId, {
+    String actorUserId = '',
+  }) async {
+    await updateBookingStatus(
+      bookingId: bookingId,
+      status: 'completed',
+      actorUserId: actorUserId,
+    );
+  }
+
+  Future<void> assignDriver({
+    required String bookingId,
+    required String driverId,
+    required String adminId,
+  }) async {
+    await _assign(
+      bookingId: bookingId,
+      field: 'driverId',
+      value: driverId,
+      timestampField: 'driverAssignedAt',
+      assignmentType: 'driver',
+      adminId: adminId,
+    );
+  }
+
+  Future<void> assignGuide({
+    required String bookingId,
+    required String guideId,
+    required String adminId,
+  }) async {
+    await _assign(
+      bookingId: bookingId,
+      field: 'guideId',
+      value: guideId,
+      timestampField: 'guideAssignedAt',
+      assignmentType: 'guide',
+      adminId: adminId,
+    );
+  }
+
+  Future<void> assignVehicle({
+    required String bookingId,
+    required String vehicleId,
+    required String adminId,
+  }) async {
+    await _assign(
+      bookingId: bookingId,
+      field: 'vehicleId',
+      value: vehicleId,
+      timestampField: 'vehicleAssignedAt',
+      assignmentType: 'vehicle',
+      adminId: adminId,
+    );
+  }
+
+  Future<void> assignHotel({
+    required String bookingId,
+    required String hotelId,
+    String hotelRoomId = '',
+    required String adminId,
+  }) async {
+    try {
+      await _bookingsCollection.doc(bookingId).set(
+        <String, dynamic>{
+          'hotelId': hotelId,
+          'hotelRoomId': hotelRoomId,
+          'hotelAssignedAt': FieldValue.serverTimestamp(),
+          'assignmentStatus': 'partially_assigned',
+          'adminId': adminId,
+          'updatedAt': FieldValue.serverTimestamp(),
+        },
+        SetOptions(merge: true),
+      );
+
+      await _saveAssignmentLog(
+        bookingId: bookingId,
+        assignmentType: 'hotel',
+        assignedValue: hotelId,
+        adminId: adminId,
+      );
+
+      await _refreshAssignmentStatus(bookingId);
+    } catch (error) {
+      throw Exception(
+        'Unable to assign hotel: $error',
+      );
+    }
+  }
+
+  Future<void> clearAssignment({
+    required String bookingId,
+    required String field,
+    required String adminId,
+  }) async {
+    final Set<String> allowedFields = <String>{
+      'driverId',
+      'guideId',
+      'vehicleId',
+      'hotelId',
+      'hotelRoomId',
+    };
+
+    if (!allowedFields.contains(field)) {
+      throw ArgumentError('Unsupported assignment field: $field');
+    }
+
+    try {
+      await _bookingsCollection.doc(bookingId).set(
+        <String, dynamic>{
+          field: '',
+          'assignmentStatus': 'partially_assigned',
+          'adminId': adminId,
+          'updatedAt': FieldValue.serverTimestamp(),
+        },
+        SetOptions(merge: true),
+      );
+
+      await _refreshAssignmentStatus(bookingId);
+    } catch (error) {
+      throw Exception(
+        'Unable to clear tour assignment: $error',
+      );
+    }
+  }
+
+  Future<void> updatePaymentStatus({
+    required String bookingId,
+    required String paymentStatus,
+    double? advanceAmount,
+    double? remainingAmount,
+  }) async {
+    try {
+      await _bookingsCollection.doc(bookingId).set(
+        <String, dynamic>{
+          'paymentStatus': paymentStatus,
+          if (advanceAmount != null)
+            'advanceAmount': advanceAmount,
+          if (remainingAmount != null)
+            'remainingAmount': remainingAmount,
+
+          // Real JazzCash/Easypaisa/Wallet processing remains
+          // bypassed until billing/payment integration is enabled.
+          'realPaymentProcessed': false,
+          'isTestingMode': true,
+          'updatedAt': FieldValue.serverTimestamp(),
+        },
+        SetOptions(merge: true),
+      );
+    } catch (error) {
+      throw Exception(
+        'Unable to update payment status: $error',
+      );
+    }
+  }
+
+  Future<void> markPaymentPaid(
+    String bookingId,
+  ) async {
+    await updatePaymentStatus(
+      bookingId: bookingId,
+      paymentStatus: 'paid_testing',
+      remainingAmount: 0,
+    );
+  }
+
+  Future<void> markPaymentPending(
+    String bookingId,
+  ) async {
+    await updatePaymentStatus(
+      bookingId: bookingId,
+      paymentStatus: 'pending',
+    );
+  }
+
+  Future<void> deleteBooking(
+    String bookingId,
+  ) async {
+    try {
+      await _bookingsCollection.doc(bookingId).delete();
+    } catch (error) {
+      throw Exception(
+        'Unable to delete tour booking: $error',
+      );
+    }
+  }
+
+  Future<void> _assign({
+    required String bookingId,
+    required String field,
+    required String value,
+    required String timestampField,
+    required String assignmentType,
+    required String adminId,
+  }) async {
+    try {
+      await _bookingsCollection.doc(bookingId).set(
+        <String, dynamic>{
+          field: value,
+          timestampField: FieldValue.serverTimestamp(),
+          'assignmentStatus': 'partially_assigned',
+          'adminId': adminId,
+          'updatedAt': FieldValue.serverTimestamp(),
+        },
+        SetOptions(merge: true),
+      );
+
+      await _saveAssignmentLog(
+        bookingId: bookingId,
+        assignmentType: assignmentType,
+        assignedValue: value,
+        adminId: adminId,
+      );
+
+      await _refreshAssignmentStatus(bookingId);
+    } catch (error) {
+      throw Exception(
+        'Unable to assign $assignmentType: $error',
+      );
+    }
+  }
+
+  Future<void> _refreshAssignmentStatus(
+    String bookingId,
+  ) async {
+    final booking = await getBooking(bookingId);
+    if (booking == null) return;
+
+    final bool fullyAssigned =
+        booking.driverId.isNotEmpty &&
+        booking.vehicleId.isNotEmpty &&
+        booking.hotelId.isNotEmpty;
+
+    await _bookingsCollection.doc(bookingId).set(
+      <String, dynamic>{
+        'assignmentStatus':
+            fullyAssigned ? 'assigned' : 'partially_assigned',
+        'updatedAt': FieldValue.serverTimestamp(),
+      },
+      SetOptions(merge: true),
+    );
+
+    if (fullyAssigned) {
+      await _createNotification(
+        userId: booking.userId,
+        title: 'Tour partners assigned',
+        message:
+            'Driver, vehicle and hotel have been assigned to your tour.',
+        bookingId: bookingId,
+        type: 'tour_assignment_completed',
+      );
+    }
+  }
+
+  Future<void> _saveAssignmentLog({
+    required String bookingId,
+    required String assignmentType,
+    required String assignedValue,
+    required String adminId,
+  }) async {
+    final reference = _assignmentLogsCollection.doc();
+
+    await reference.set(
+      <String, dynamic>{
+        'logId': reference.id,
+        'bookingId': bookingId,
+        'assignmentType': assignmentType,
+        'assignedValue': assignedValue,
+        'adminId': adminId,
+        'createdAt': FieldValue.serverTimestamp(),
+      },
+    );
+  }
+
+  Future<void> _createNotification({
+    required String userId,
+    required String title,
+    required String message,
+    required String bookingId,
+    required String type,
+  }) async {
+    if (userId.trim().isEmpty) return;
+
+    final reference = _notificationsCollection.doc();
+
+    try {
+      await reference.set(
+        <String, dynamic>{
+          'notificationId': reference.id,
+          'userId': userId,
+          'title': title,
+          'message': message,
+          'type': type,
+          'bookingId': bookingId,
+          'serviceType': 'tourism',
+          'isRead': false,
+          'createdAt': FieldValue.serverTimestamp(),
+        },
+      );
+    } catch (_) {
+      // Booking work must continue even if a notification write fails.
+    }
+  }
+
+  List<TourBooking> _mapAndSort(
+    QuerySnapshot<Map<String, dynamic>> snapshot,
+  ) {
+    final bookings = snapshot.docs
+        .map(
+          (doc) => TourBooking.fromMap(
+            doc.data(),
+            doc.id,
+          ),
+        )
+        .toList();
+
+    bookings.sort(
+      (a, b) => b.createdAt.compareTo(a.createdAt),
+    );
+
+    return bookings;
+  }
+
+  String _readableStatus(String status) {
+    return status.replaceAll('_', ' ');
+  }
+}

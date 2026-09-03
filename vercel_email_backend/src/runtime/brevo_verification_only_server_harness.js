@@ -1,0 +1,170 @@
+import {
+  BrevoReadOnlySenderVerificationComposer,
+} from './brevo_read_only_sender_verification_composer.js';
+
+export const BREVO_VERIFICATION_ONLY_OPERATION =
+    'email.sender.verify.read_only';
+
+export const BREVO_VERIFICATION_ONLY_SERVER_POLICY =
+    Object.freeze({
+      defaultEnabled:
+          false,
+      requiresExplicitServerActivation:
+          true,
+      providerReadAllowedWhenEnabled:
+          true,
+      providerWriteAllowed:
+          false,
+      firestoreWriteAllowed:
+          false,
+      emailSendAllowed:
+          false,
+      liveSendAllowed:
+          false,
+      mayConsumeEmailApproval:
+          false,
+      mayClaimEmailDeliveryIdempotency:
+          false,
+
+      // SECURITY BOUNDARY:
+      // This harness is deliberately NOT the email-send route.
+      // It may only verify the configured sender by reading Brevo sender
+      // status through the read-only composition created in B6-F.
+      //
+      // A successful sender verification must never activate email sending,
+      // consume an email.send approval, claim a delivery idempotency record,
+      // or write trusted sender state by itself.
+      //
+      // BEFORE any live email provider activation, the Flutter draft-binding
+      // algorithm must be migrated away from CANONICAL_JSON_SHA256_BASE64URL_V2 to a
+      // cryptographic SHA-256 canonical digest with explicit versioning and
+      // compatibility tests. Sender verification does not waive that gate.
+      sha256DraftBindingRequiredBeforeLiveSend:
+          true,
+    });
+
+function fail(code) {
+  return Object.freeze({
+    ok:
+        false,
+    operation:
+        BREVO_VERIFICATION_ONLY_OPERATION,
+    verificationAttempted:
+        false,
+    trustedEvidenceEligible:
+        false,
+    evidence:
+        null,
+    providerReadPerformed:
+        false,
+    providerWriteAllowed:
+        false,
+    firestoreWriteAllowed:
+        false,
+    emailSendAllowed:
+        false,
+    liveSendAllowed:
+        false,
+    approvalConsumed:
+        false,
+    deliveryIdempotencyClaimed:
+        false,
+    code,
+  });
+}
+
+export class BrevoVerificationOnlyServerHarness {
+  constructor({
+    environment,
+    fetchImpl,
+    expectedSender,
+    serverActivationEnabled = false,
+  }) {
+    this.environment =
+        environment;
+
+    this.fetchImpl =
+        fetchImpl;
+
+    this.expectedSender =
+        expectedSender;
+
+    this.serverActivationEnabled =
+        serverActivationEnabled === true;
+  }
+
+  get providerWriteAllowed() {
+    return false;
+  }
+
+  get firestoreWriteAllowed() {
+    return false;
+  }
+
+  get emailSendAllowed() {
+    return false;
+  }
+
+  get liveSendAllowed() {
+    return false;
+  }
+
+  get mayConsumeEmailApproval() {
+    return false;
+  }
+
+  get mayClaimEmailDeliveryIdempotency() {
+    return false;
+  }
+
+  async runVerificationOnly() {
+    if (this.serverActivationEnabled !== true) {
+      return fail(
+          'BREVO_VERIFICATION_ONLY_SERVER_DISABLED');
+    }
+
+    const composer =
+        new BrevoReadOnlySenderVerificationComposer({
+          environment:
+              this.environment,
+          fetchImpl:
+              this.fetchImpl,
+          expectedSender:
+              this.expectedSender,
+          readOnlyVerificationEnabled:
+              true,
+        });
+
+    const result =
+        await composer.verifyExpectedSender();
+
+    return Object.freeze({
+      ok:
+          result.ok === true,
+      operation:
+          BREVO_VERIFICATION_ONLY_OPERATION,
+      verificationAttempted:
+          result.verificationAttempted === true,
+      trustedEvidenceEligible:
+          result.trustedEvidenceEligible === true,
+      evidence:
+          result.evidence ?? null,
+      providerReadPerformed:
+          result.verificationAttempted === true,
+      providerWriteAllowed:
+          false,
+      firestoreWriteAllowed:
+          false,
+      emailSendAllowed:
+          false,
+      liveSendAllowed:
+          false,
+      approvalConsumed:
+          false,
+      deliveryIdempotencyClaimed:
+          false,
+      code:
+          result.code,
+    });
+  }
+}

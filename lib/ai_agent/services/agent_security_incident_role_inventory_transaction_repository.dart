@@ -1,0 +1,658 @@
+import 'dart:convert';
+
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:crypto/crypto.dart';
+import '../constants/agent_audit_constants.dart';
+import '../constants/agent_production_rollout_repository_constants.dart';
+
+import '../models/agent_security_incident_role_inventory_transaction_request.dart';
+import '../models/agent_security_incident_role_inventory_transaction_result.dart';
+import '../models/agent_security_incident_role_inventory_revision_design.dart';
+import 'agent_audit_service.dart';
+import 'agent_security_incident_role_inventory_migration_policy.dart';
+
+/// Phase 66 Step1I-T-M.
+///
+/// Dedicated transaction owner for the future 22 -> 23 persisted role delta.
+///
+/// IMPORTANT:
+/// - default executionArmed = false;
+/// - default migrationRulesVerified = false;
+/// - it does not use the ordinary AgentRoleService role-creation API;
+/// - it never overwrites old guard/token/activation receipt;
+/// - it does not consume Owner approval;
+/// - it does not attach/arm the Security Incident repository;
+/// - it does not authorize the first incident write;
+/// - post-role-commit 23-role snapshot/guard/token/receipt rebinding remains a
+///   separate later phase under migration hold.
+///
+/// Production execution MUST remain blocked until Firestore rules couple every
+/// relevant agent_roles mutation to the authority-manifest revision.
+class AgentSecurityIncidentRoleInventoryTransactionRepository {
+  factory AgentSecurityIncidentRoleInventoryTransactionRepository({
+    FirebaseFirestore? firestore,
+    AgentAuditService? auditService,
+    bool executionArmed = false,
+    bool migrationRulesVerified = false,
+  }) {
+    return AgentSecurityIncidentRoleInventoryTransactionRepository._(
+      firestore,
+      auditService,
+      executionArmed,
+      migrationRulesVerified,
+    );
+  }
+
+  AgentSecurityIncidentRoleInventoryTransactionRepository._(
+    this._firestore,
+    this._auditService,
+    this._executionArmed,
+    this._migrationRulesVerified,
+  );
+
+  static const String _roleCollection = 'agent_roles';
+
+  static const String _authorityManifestDocument =
+      'security_incident_role_inventory_authority_manifest';
+
+  static const String _migrationHoldDocument =
+      'security_incident_role_inventory_migration_hold';
+
+  static const String _manifestStatusActive = 'ACTIVE';
+  static const String _holdStatusHeld = 'HELD';
+  static const String _holdStatusRoleDeltaCommitted = 'ROLE_DELTA_COMMITTED';
+
+  final FirebaseFirestore? _firestore;
+  final AgentAuditService? _auditService;
+  final bool _executionArmed;
+  final bool _migrationRulesVerified;
+
+  Future<AgentSecurityIncidentRoleInventoryTransactionResult> execute({
+    required AgentSecurityIncidentRoleInventoryTransactionRequest request,
+  }) async {
+    try {
+      request.validate();
+    } on FormatException {
+      return _blocked(
+        AgentSecurityIncidentRoleInventoryTransactionStatus.blockedInvalid,
+        'role_inventory_transaction_request_validation_failed',
+      );
+    }
+
+    const AgentSecurityIncidentRoleInventoryMigrationPolicy migrationPolicy =
+        AgentSecurityIncidentRoleInventoryMigrationPolicy();
+
+    final migrationDecision = migrationPolicy.evaluate(request.plan);
+
+    if (!migrationDecision.readyForSeparateAtomicExecutorDesign) {
+      return _blocked(
+        AgentSecurityIncidentRoleInventoryTransactionStatus.blockedPlan,
+        migrationDecision.reasonCode,
+      );
+    }
+
+    if (!_executionArmed) {
+      return _blocked(
+        AgentSecurityIncidentRoleInventoryTransactionStatus.blockedNotArmed,
+        'role_inventory_transaction_repository_is_not_armed',
+      );
+    }
+
+    if (!_migrationRulesVerified) {
+      return _blocked(
+        AgentSecurityIncidentRoleInventoryTransactionStatus
+            .blockedRulesNotVerified,
+        'role_inventory_manifest_coupled_firestore_rules_not_verified',
+      );
+    }
+
+    final FirebaseFirestore firestore =
+        _firestore ?? FirebaseFirestore.instance;
+
+    final AgentAuditService auditService =
+        _auditService ?? AgentAuditService(firestore: firestore);
+
+    final CollectionReference<Map<String, dynamic>> settings = firestore
+        .collection(AgentProductionRolloutRepositoryPath.settingsCollection);
+
+    final DocumentReference<Map<String, dynamic>> masterRef = settings.doc(
+      AgentProductionRolloutRepositoryPath.masterDocument,
+    );
+
+    final DocumentReference<Map<String, dynamic>> rolloutRef = settings.doc(
+      AgentProductionRolloutRepositoryPath.rolloutStateDocument,
+    );
+
+    final DocumentReference<Map<String, dynamic>> guardRef = settings.doc(
+      AgentProductionRolloutRepositoryPath.rolloutGuardDocument,
+    );
+
+    final DocumentReference<Map<String, dynamic>> authorityManifestRef =
+        settings.doc(_authorityManifestDocument);
+
+    final DocumentReference<Map<String, dynamic>> migrationHoldRef = settings
+        .doc(_migrationHoldDocument);
+
+    final DocumentReference<Map<String, dynamic>> proposedRoleRef = firestore
+        .collection(_roleCollection)
+        .doc(AgentSecurityIncidentRoleInventoryRevisionDesign.dedicatedRoleId);
+
+    return firestore.runTransaction<
+      AgentSecurityIncidentRoleInventoryTransactionResult
+    >((Transaction transaction) async {
+      // Firestore transactions require all reads to happen before writes.
+      final DocumentSnapshot<Map<String, dynamic>> masterSnapshot =
+          await transaction.get(masterRef);
+
+      final DocumentSnapshot<Map<String, dynamic>> rolloutSnapshot =
+          await transaction.get(rolloutRef);
+
+      final DocumentSnapshot<Map<String, dynamic>> guardSnapshot =
+          await transaction.get(guardRef);
+
+      final DocumentSnapshot<Map<String, dynamic>> authorityManifestSnapshot =
+          await transaction.get(authorityManifestRef);
+
+      final DocumentSnapshot<Map<String, dynamic>> migrationHoldSnapshot =
+          await transaction.get(migrationHoldRef);
+
+      final DocumentSnapshot<Map<String, dynamic>> proposedRoleSnapshot =
+          await transaction.get(proposedRoleRef);
+
+      if (!masterSnapshot.exists ||
+          !rolloutSnapshot.exists ||
+          !guardSnapshot.exists) {
+        return _blocked(
+          AgentSecurityIncidentRoleInventoryTransactionStatus
+              .blockedCurrentState,
+          'required_monitor_only_control_documents_missing',
+        );
+      }
+
+      if (!authorityManifestSnapshot.exists) {
+        return _blocked(
+          AgentSecurityIncidentRoleInventoryTransactionStatus
+              .blockedMissingAuthorityManifest,
+          'role_inventory_authority_manifest_missing',
+        );
+      }
+
+      if (!migrationHoldSnapshot.exists) {
+        return _blocked(
+          AgentSecurityIncidentRoleInventoryTransactionStatus
+              .blockedMigrationHold,
+          'role_inventory_migration_hold_missing',
+        );
+      }
+
+      if (proposedRoleSnapshot.exists) {
+        return _blocked(
+          AgentSecurityIncidentRoleInventoryTransactionStatus.blockedRoleExists,
+          'security_incident_agent_already_exists',
+        );
+      }
+
+      final Map<String, dynamic> rollout =
+          rolloutSnapshot.data() ?? <String, dynamic>{};
+
+      final Map<String, dynamic> guard =
+          guardSnapshot.data() ?? <String, dynamic>{};
+
+      final Map<String, dynamic> authorityManifest =
+          authorityManifestSnapshot.data() ?? <String, dynamic>{};
+
+      final Map<String, dynamic> migrationHold =
+          migrationHoldSnapshot.data() ?? <String, dynamic>{};
+
+      if (!_monitorOnlyRolloutIsSafe(rollout) ||
+          !_monitorOnlyGuardIsSafe(guard, request: request)) {
+        return _blocked(
+          AgentSecurityIncidentRoleInventoryTransactionStatus
+              .blockedCurrentState,
+          'monitor_only_rollout_or_guard_precondition_changed',
+        );
+      }
+
+      if (!_authorityManifestMatches(authorityManifest, request: request)) {
+        return _blocked(
+          AgentSecurityIncidentRoleInventoryTransactionStatus
+              .blockedAuthorityManifestMismatch,
+          'role_inventory_authority_manifest_precondition_changed',
+        );
+      }
+
+      final List<String>? expectedRoleIds = _stringList(
+        migrationHold['expectedRoleIds'],
+      );
+
+      if (!_migrationHoldMatches(
+        migrationHold,
+        request: request,
+        expectedRoleIds: expectedRoleIds,
+      )) {
+        return _blocked(
+          AgentSecurityIncidentRoleInventoryTransactionStatus
+              .blockedMigrationHold,
+          'owner_bound_migration_hold_precondition_changed',
+        );
+      }
+
+      // The exact 22 ids come from the Owner-bound migration-hold document.
+      // They are read individually inside THIS transaction.
+      final List<Map<String, dynamic>> currentRoleDocuments =
+          <Map<String, dynamic>>[];
+
+      for (final String roleId in expectedRoleIds!) {
+        final DocumentReference<Map<String, dynamic>> roleRef = firestore
+            .collection(_roleCollection)
+            .doc(roleId);
+
+        final DocumentSnapshot<Map<String, dynamic>> roleSnapshot =
+            await transaction.get(roleRef);
+
+        if (!roleSnapshot.exists) {
+          return _blocked(
+            AgentSecurityIncidentRoleInventoryTransactionStatus
+                .blockedRoleInventory,
+            'expected_current_role_missing_inside_transaction',
+          );
+        }
+
+        final Map<String, dynamic> data =
+            roleSnapshot.data() ?? <String, dynamic>{};
+
+        if ((data['roleId'] ?? '').toString().trim() != roleId) {
+          return _blocked(
+            AgentSecurityIncidentRoleInventoryTransactionStatus
+                .blockedRoleInventory,
+            'stored_role_id_does_not_match_document_id',
+          );
+        }
+
+        currentRoleDocuments.add(data);
+      }
+
+      final String currentFingerprint = computeRoleInventoryFingerprint(
+        currentRoleDocuments,
+      );
+
+      if (currentFingerprint !=
+              request.plan.currentInventoryFingerprintSha256.toLowerCase() ||
+          currentFingerprint !=
+              (authorityManifest['roleProjectionFingerprintSha256'] ?? '')
+                  .toString()
+                  .trim()
+                  .toLowerCase() ||
+          currentFingerprint !=
+              (migrationHold['currentInventoryFingerprintSha256'] ?? '')
+                  .toString()
+                  .trim()
+                  .toLowerCase()) {
+        return _blocked(
+          AgentSecurityIncidentRoleInventoryTransactionStatus
+              .blockedFingerprint,
+          'current_role_inventory_fingerprint_changed_before_commit',
+        );
+      }
+
+      if (!_proposedRolePayloadIsExact(request.proposedRolePayload)) {
+        return _blocked(
+          AgentSecurityIncidentRoleInventoryTransactionStatus
+              .blockedProposedRole,
+          'proposed_security_incident_role_payload_invalid',
+        );
+      }
+
+      final List<Map<String, dynamic>> proposedInventory =
+          <Map<String, dynamic>>[
+            ...currentRoleDocuments,
+            request.proposedRolePayload,
+          ];
+
+      final String proposedFingerprint = computeRoleInventoryFingerprint(
+        proposedInventory,
+      );
+
+      if (proposedFingerprint !=
+              request.plan.proposedInventoryFingerprintSha256.toLowerCase() ||
+          proposedFingerprint !=
+              (migrationHold['proposedInventoryFingerprintSha256'] ?? '')
+                  .toString()
+                  .trim()
+                  .toLowerCase()) {
+        return _blocked(
+          AgentSecurityIncidentRoleInventoryTransactionStatus
+              .blockedFingerprint,
+          'proposed_role_inventory_fingerprint_binding_mismatch',
+        );
+      }
+
+      final Map<String, dynamic> rolePayload = Map<String, dynamic>.from(
+        request.proposedRolePayload,
+      );
+
+      rolePayload['createdAt'] = FieldValue.serverTimestamp();
+      rolePayload['updatedAt'] = FieldValue.serverTimestamp();
+
+      // WRITE 1: create the one dedicated role.
+      transaction.set(proposedRoleRef, rolePayload);
+
+      // WRITE 2: advance the authority manifest in the SAME transaction.
+      transaction.set(authorityManifestRef, <String, dynamic>{
+        'status': _manifestStatusActive,
+        'inventoryVersion': request.plan.proposedInventoryVersion,
+        'roleCount': request.plan.proposedRoleCount,
+        'roleProjectionFingerprintSha256': proposedFingerprint,
+        'revision': request.expectedAuthorityManifestRevision + 1,
+        'lastMutation': 'SECURITY_INCIDENT_ROLE_DELTA_22_TO_23',
+        'lastMigrationIdSha256': request.migrationIdSha256.toLowerCase(),
+        'postMigrationRebindRequired': true,
+        'updatedAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+
+      // WRITE 3: migration hold stays fail-closed after role commit until
+      // fresh 23-role snapshot + new guard + new token + new receipt exist.
+      transaction.set(migrationHoldRef, <String, dynamic>{
+        'status': _holdStatusRoleDeltaCommitted,
+        'committedRoleId':
+            AgentSecurityIncidentRoleInventoryRevisionDesign.dedicatedRoleId,
+        'committedRoleCount': request.plan.proposedRoleCount,
+        'committedInventoryFingerprintSha256': proposedFingerprint,
+        'authorityManifestRevision':
+            request.expectedAuthorityManifestRevision + 1,
+        'postMigrationRebindRequired': true,
+        'repositoryAttachAuthorized': false,
+        'repositoryArmAuthorized': false,
+        'firstIncidentWriteAuthorized': false,
+        'authorizesSuggestOnly': false,
+        'authorizesAuto': false,
+        'roleDeltaCommittedAt': FieldValue.serverTimestamp(),
+        'updatedAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+
+      auditService.appendInTransaction(
+        transaction: transaction,
+        eventType: AgentAuditEventType.systemEvent,
+        severity: AgentAuditSeverity.warning,
+        actorType: AgentAuditActorType.admin,
+        actorId: request.actorReferenceSha256.toLowerCase(),
+        module: 'ai_core',
+        actionId: 'ai.production_rollout.role_inventory.migrate_22_to_23',
+        result: 'ROLE_DELTA_COMMITTED',
+        reason:
+            'Owner-bound 22-to-23 role delta committed atomically under migration hold.',
+        relatedApprovalId: request.ownerApprovalId,
+        scope: <String, dynamic>{
+          'fromRoleCount': request.plan.currentRoleCount,
+          'toRoleCount': request.plan.proposedRoleCount,
+          'targetRoleId':
+              AgentSecurityIncidentRoleInventoryRevisionDesign.dedicatedRoleId,
+          'targetActionId': AgentSecurityIncidentRoleInventoryRevisionDesign
+              .attachRuntimeActionId,
+          'rolloutStage': 'MONITOR_ONLY',
+          'postMigrationRebindRequired': true,
+        },
+        metadata: <String, dynamic>{
+          'migrationIdSha256': request.migrationIdSha256.toLowerCase(),
+          'currentInventoryFingerprintSha256': currentFingerprint,
+          'proposedInventoryFingerprintSha256': proposedFingerprint,
+          'authorityManifestRevision':
+              request.expectedAuthorityManifestRevision + 1,
+          'guardRevision': request.plan.currentGuardRevision,
+        },
+      );
+
+      return const AgentSecurityIncidentRoleInventoryTransactionResult(
+        status: AgentSecurityIncidentRoleInventoryTransactionStatus
+            .committedRoleDelta,
+        reasonCode: 'role_manifest_hold_and_audit_committed_in_one_transaction',
+        roleCreated: true,
+        authorityManifestUpdated: true,
+        migrationHoldUpdated: true,
+      );
+    });
+  }
+
+  String computeRoleInventoryFingerprint(List<Map<String, dynamic>> roles) {
+    final List<Map<String, dynamic>> projections =
+        roles.map(_roleAuthorityProjection).toList(growable: false)..sort(
+          (Map<String, dynamic> left, Map<String, dynamic> right) =>
+              (left['roleId'] as String).compareTo(right['roleId'] as String),
+        );
+
+    return sha256.convert(utf8.encode(jsonEncode(projections))).toString();
+  }
+
+  Map<String, dynamic> _roleAuthorityProjection(Map<String, dynamic> role) {
+    return <String, dynamic>{
+      'roleId': (role['roleId'] ?? '').toString().trim(),
+      'module': (role['module'] ?? '').toString().trim(),
+      'enabled': role['enabled'] == true,
+      'mode': (role['mode'] ?? '').toString().trim(),
+      'allowedActions': _normalizedActionList(role['allowedActions']),
+      'approvalRequiredActions': _normalizedActionList(
+        role['approvalRequiredActions'],
+      ),
+      'forbiddenActions': _normalizedActionList(role['forbiddenActions']),
+      'aiClass': (role['aiClass'] ?? '').toString().trim(),
+      'privacyLevel': (role['privacyLevel'] ?? '').toString().trim(),
+    };
+  }
+
+  List<String> _normalizedActionList(Object? value) {
+    final List<String> actions = _stringList(value) ?? <String>[];
+    actions.sort();
+    return actions;
+  }
+
+  List<String>? _stringList(Object? value) {
+    if (value is! List) {
+      return null;
+    }
+
+    final List<String> result = <String>[];
+
+    for (final Object? item in value) {
+      final String normalized = (item ?? '').toString().trim();
+      if (normalized.isEmpty || result.contains(normalized)) {
+        return null;
+      }
+      result.add(normalized);
+    }
+
+    return result;
+  }
+
+  bool _monitorOnlyRolloutIsSafe(Map<String, dynamic> rollout) {
+    return (rollout['stage'] ?? '').toString().trim() == 'MONITOR_ONLY' &&
+        (rollout['autoTrafficPercent'] as num?)?.toInt() == 0 &&
+        (rollout['businessWriteTrafficPercent'] as num?)?.toInt() == 0 &&
+        rollout['externalChannelsEnabled'] == false;
+  }
+
+  bool _monitorOnlyGuardIsSafe(
+    Map<String, dynamic> guard, {
+    required AgentSecurityIncidentRoleInventoryTransactionRequest request,
+  }) {
+    return guard['enabled'] == true &&
+        (guard['revision'] as num?)?.toInt() ==
+            request.plan.currentGuardRevision &&
+        (guard['targetStage'] ?? '').toString().trim() == 'MONITOR_ONLY' &&
+        guard['runtimeMonitorOnlyOverlayEnforced'] == true &&
+        guard['noAutoBusinessWriteBoundaryEnforced'] == true &&
+        (guard['autoTrafficPercent'] as num?)?.toInt() == 0 &&
+        (guard['businessWriteTrafficPercent'] as num?)?.toInt() == 0 &&
+        guard['externalChannelsEnabled'] == false &&
+        (guard['roleCount'] as num?)?.toInt() ==
+            request.plan.currentRoleCount &&
+        (guard['controlStateFingerprintSha256'] ?? '')
+                .toString()
+                .trim()
+                .toLowerCase() ==
+            request.plan.currentControlFingerprintSha256.toLowerCase();
+  }
+
+  bool _authorityManifestMatches(
+    Map<String, dynamic> manifest, {
+    required AgentSecurityIncidentRoleInventoryTransactionRequest request,
+  }) {
+    return (manifest['status'] ?? '').toString().trim() ==
+            _manifestStatusActive &&
+        (manifest['revision'] as num?)?.toInt() ==
+            request.expectedAuthorityManifestRevision &&
+        (manifest['inventoryVersion'] ?? '').toString().trim() ==
+            request.plan.currentInventoryVersion &&
+        (manifest['roleCount'] as num?)?.toInt() ==
+            request.plan.currentRoleCount &&
+        (manifest['roleProjectionFingerprintSha256'] ?? '')
+                .toString()
+                .trim()
+                .toLowerCase() ==
+            request.plan.currentInventoryFingerprintSha256.toLowerCase();
+  }
+
+  bool _migrationHoldMatches(
+    Map<String, dynamic> hold, {
+    required AgentSecurityIncidentRoleInventoryTransactionRequest request,
+    required List<String>? expectedRoleIds,
+  }) {
+    if (expectedRoleIds == null ||
+        expectedRoleIds.length != request.plan.currentRoleCount ||
+        expectedRoleIds.toSet().length != request.plan.currentRoleCount ||
+        expectedRoleIds.contains(
+          AgentSecurityIncidentRoleInventoryRevisionDesign.dedicatedRoleId,
+        )) {
+      return false;
+    }
+
+    return (hold['status'] ?? '').toString().trim() == _holdStatusHeld &&
+        (hold['migrationIdSha256'] ?? '').toString().trim().toLowerCase() ==
+            request.migrationIdSha256.toLowerCase() &&
+        (hold['ownerApprovalId'] ?? '').toString().trim() ==
+            request.ownerApprovalId &&
+        (hold['ownerApprovalBindingSha256'] ?? '')
+                .toString()
+                .trim()
+                .toLowerCase() ==
+            request.plan.ownerApprovalBindingSha256.toLowerCase() &&
+        (hold['currentInventoryFingerprintSha256'] ?? '')
+                .toString()
+                .trim()
+                .toLowerCase() ==
+            request.plan.currentInventoryFingerprintSha256.toLowerCase() &&
+        (hold['proposedInventoryFingerprintSha256'] ?? '')
+                .toString()
+                .trim()
+                .toLowerCase() ==
+            request.plan.proposedInventoryFingerprintSha256.toLowerCase() &&
+        (hold['currentControlFingerprintSha256'] ?? '')
+                .toString()
+                .trim()
+                .toLowerCase() ==
+            request.plan.currentControlFingerprintSha256.toLowerCase() &&
+        (hold['expectedRoleCount'] as num?)?.toInt() ==
+            request.plan.currentRoleCount &&
+        (hold['proposedRoleCount'] as num?)?.toInt() ==
+            request.plan.proposedRoleCount &&
+        (hold['expectedGuardRevision'] as num?)?.toInt() ==
+            request.plan.currentGuardRevision &&
+        (hold['targetRoleId'] ?? '').toString().trim() ==
+            AgentSecurityIncidentRoleInventoryRevisionDesign.dedicatedRoleId &&
+        (hold['targetActionId'] ?? '').toString().trim() ==
+            AgentSecurityIncidentRoleInventoryRevisionDesign
+                .attachRuntimeActionId &&
+        hold['migrationHoldActive'] == true &&
+        hold['repositoryAttachAuthorized'] != true &&
+        hold['repositoryArmAuthorized'] != true &&
+        hold['firstIncidentWriteAuthorized'] != true &&
+        hold['authorizesSuggestOnly'] != true &&
+        hold['authorizesAuto'] != true;
+  }
+
+  bool _proposedRolePayloadIsExact(Map<String, dynamic> role) {
+    final List<String>? allowed = _stringList(role['allowedActions']);
+    final List<String>? approvalRequired = _stringList(
+      role['approvalRequiredActions'],
+    );
+    final List<String>? forbidden = _stringList(role['forbiddenActions']);
+
+    if (allowed == null || approvalRequired == null || forbidden == null) {
+      return false;
+    }
+
+    return (role['roleId'] ?? '').toString().trim() ==
+            AgentSecurityIncidentRoleInventoryRevisionDesign.dedicatedRoleId &&
+        (role['name'] ?? '').toString().trim() ==
+            AgentSecurityIncidentRoleInventoryRevisionDesign
+                .dedicatedRoleName &&
+        (role['description'] ?? '').toString().trim() ==
+            AgentSecurityIncidentRoleInventoryRevisionDesign
+                .dedicatedRoleDescription &&
+        (role['module'] ?? '').toString().trim() ==
+            AgentSecurityIncidentRoleInventoryRevisionDesign.dedicatedModule &&
+        role['enabled'] ==
+            AgentSecurityIncidentRoleInventoryRevisionDesign.proposedEnabled &&
+        (role['mode'] ?? '').toString().trim() ==
+            AgentSecurityIncidentRoleInventoryRevisionDesign
+                .proposedStoredRoleMode &&
+        (role['aiClass'] ?? '').toString().trim() ==
+            AgentSecurityIncidentRoleInventoryRevisionDesign.proposedAiClass &&
+        (role['privacyLevel'] ?? '').toString().trim() ==
+            AgentSecurityIncidentRoleInventoryRevisionDesign
+                .proposedPrivacyLevel &&
+        allowed.length == 1 &&
+        allowed.single ==
+            AgentSecurityIncidentRoleInventoryRevisionDesign
+                .attachRuntimeActionId &&
+        approvalRequired.length == 1 &&
+        approvalRequired.single ==
+            AgentSecurityIncidentRoleInventoryRevisionDesign
+                .attachRuntimeActionId &&
+        forbidden.isEmpty;
+  }
+
+  AgentSecurityIncidentRoleInventoryTransactionResult _blocked(
+    String status,
+    String reasonCode,
+  ) {
+    return AgentSecurityIncidentRoleInventoryTransactionResult(
+      status: status,
+      reasonCode: reasonCode,
+      roleCreated: false,
+      authorityManifestUpdated: false,
+      migrationHoldUpdated: false,
+    );
+  }
+
+  bool get defaultsNotArmed => true;
+  bool get executionArmed => _executionArmed;
+  bool get migrationRulesVerified => _migrationRulesVerified;
+
+  bool get usesDedicatedFirestoreTransaction => true;
+  bool get usesOrdinaryRoleServiceCreate => false;
+
+  bool get requiresAuthorityManifest => true;
+  bool get requiresManifestCoupledFirestoreRules => true;
+  bool get requiresOwnerBoundMigrationHold => true;
+  bool get requiresExact22RoleReadsInsideTransaction => true;
+  bool get requiresCurrentRoleFingerprintInsideTransaction => true;
+  bool get requiresProposedRoleFingerprintInsideTransaction => true;
+
+  bool get writesOldGuard => false;
+  bool get writesOldArmingToken => false;
+  bool get writesOldActivationReceipt => false;
+  bool get consumesApproval => false;
+
+  bool get postMigrationSnapshotStillRequired => true;
+  bool get newGuardStillRequired => true;
+  bool get newOneTimeTokenStillRequired => true;
+  bool get newMigrationReceiptStillRequired => true;
+
+  bool get attachesRuntime => false;
+  bool get armsRepository => false;
+  bool get writesIncident => false;
+
+  bool get changesRolloutStage => false;
+  bool get authorizesSuggestOnly => false;
+  bool get authorizesAuto => false;
+}

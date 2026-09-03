@@ -1,0 +1,151 @@
+import 'dart:convert';
+
+import 'package:cloud_firestore/cloud_firestore.dart';
+
+import '../models/agent_approval_request.dart';
+import '../models/agent_security_incident_role_inventory_migration_central_approval_request.dart';
+
+class AgentSecurityIncidentRoleInventoryMigrationExactPendingApprovalReader {
+  AgentSecurityIncidentRoleInventoryMigrationExactPendingApprovalReader({
+    FirebaseFirestore? firestore,
+  }) : _firestore = firestore ?? FirebaseFirestore.instance;
+
+  final FirebaseFirestore _firestore;
+
+  static const String collectionPath = 'agent_approvals';
+
+  static String deterministicApprovalIdForBinding(
+    String bindingFingerprintSha256,
+  ) {
+    final String normalized = bindingFingerprintSha256.trim().toLowerCase();
+
+    final RegExp sha256 = RegExp(r'^[a-f0-9]{64}$');
+
+    if (!sha256.hasMatch(normalized)) {
+      throw const FormatException(
+        'Exact migration approval binding must be SHA-256.',
+      );
+    }
+
+    return 'phase66-migration-${normalized.substring(0, 32)}';
+  }
+
+  Stream<AgentApprovalRequest?> watchExactPending({
+    required AgentSecurityIncidentRoleInventoryMigrationCentralApprovalRequest
+    expected,
+  }) {
+    expected.validate();
+
+    final String approvalId = deterministicApprovalIdForBinding(
+      expected.bindingFingerprintSha256,
+    );
+
+    return _firestore
+        .collection(collectionPath)
+        .doc(approvalId)
+        .snapshots()
+        .map((DocumentSnapshot<Map<String, dynamic>> snapshot) {
+          if (!snapshot.exists) {
+            return null;
+          }
+
+          final AgentApprovalRequest observed =
+              AgentApprovalRequest.fromSnapshot(snapshot);
+
+          if (!matchesExpected(observed: observed, expected: expected)) {
+            throw const FormatException(
+              'Deterministic migration approval document exists but does not '
+              'match the exact expected request.',
+            );
+          }
+
+          if (!isUsableFreshPending(
+            observed: observed,
+            nowUtc: DateTime.now().toUtc(),
+          )) {
+            return null;
+          }
+
+          return observed;
+        });
+  }
+
+  static bool matchesExpected({
+    required AgentApprovalRequest observed,
+    required AgentSecurityIncidentRoleInventoryMigrationCentralApprovalRequest
+    expected,
+  }) {
+    try {
+      expected.validate();
+      observed.validate();
+    } on Object {
+      return false;
+    }
+
+    if (observed.roleId != expected.roleId ||
+        observed.actionId != expected.actionId ||
+        observed.module != expected.module ||
+        observed.reason != expected.reason ||
+        observed.risk != expected.risk ||
+        observed.requestedBy != expected.requestedBy) {
+      return false;
+    }
+
+    return _canonicalJson(observed.actionScope) ==
+        _canonicalJson(expected.actionScope);
+  }
+
+  static bool isUsableFreshPending({
+    required AgentApprovalRequest observed,
+    required DateTime nowUtc,
+  }) {
+    final DateTime now = nowUtc.toUtc();
+
+    return observed.status == AgentApprovalStatus.pending &&
+        observed.consumedAt == null &&
+        observed.decidedAt == null &&
+        observed.decidedBy == null &&
+        observed.decisionNote == null &&
+        observed.expiresAt.toUtc().isAfter(now);
+  }
+
+  static String _canonicalJson(Map<String, dynamic> source) {
+    return jsonEncode(_canonicalize(source));
+  }
+
+  static Object? _canonicalize(Object? value) {
+    if (value is Map) {
+      final List<String> keys =
+          value.keys.map((Object? key) => key.toString()).toList()..sort();
+
+      return <String, Object?>{
+        for (final String key in keys) key: _canonicalize(value[key]),
+      };
+    }
+
+    if (value is List) {
+      return value.map<Object?>(_canonicalize).toList(growable: false);
+    }
+
+    return value;
+  }
+
+  bool get exactDocumentReadOnly => true;
+  bool get usesCollectionQuery => false;
+  bool get requiresCompositeIndex => false;
+
+  bool get createsApproval => false;
+  bool get decidesApproval => false;
+  bool get consumesApproval => false;
+  bool get writesFirestore => false;
+  bool get executesMigration => false;
+  bool get createsRole => false;
+  bool get enablesRole => false;
+  bool get mutatesGuard => false;
+  bool get createsArmingToken => false;
+  bool get attachesRuntime => false;
+  bool get armsRepository => false;
+  bool get writesIncident => false;
+  bool get authorizesSuggestOnly => false;
+  bool get authorizesAuto => false;
+}

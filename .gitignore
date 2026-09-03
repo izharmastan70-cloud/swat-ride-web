@@ -1,0 +1,27 @@
+# Local credentials and deployment state
+.env
+.env.*
+!.env.example
+!.env.social.example
+.vercel/
+
+# Flutter and platform-generated output
+.dart_tool/
+.packages
+.flutter-plugins
+.flutter-plugins-dependencies
+build/*
+!build/web/
+!build/web/**
+android/.gradle/
+ios/Pods/
+macos/Pods/
+linux/flutter/ephemeral/
+windows/flutter/ephemeral/
+
+# Tooling and editor files
+.idea/
+.vscode/
+*.iml
+*.log
+node_modules/

@@ -1,0 +1,1380 @@
+﻿// lib/food/screens/order_tracking_screen.dart
+// =============================================================
+// SWAT RIDE - FOOD DELIVERY
+// Customer Order Tracking Screen
+//
+// Real features:
+// - Live Firestore order status
+// - 5-minute customer cancellation countdown
+// - Cancellation reason dialog
+// - Rider latitude/longitude live updates
+// - Delivery OTP display
+// - SOS event creation
+//
+// Temporarily bypassed:
+// - Paid map SDK rendering
+// - Direct phone calling integration
+// =============================================================
+
+import 'dart:async';
+
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/material.dart';
+
+import '../models/food_cancellation_model.dart';
+import '../models/food_order_model.dart';
+import '../services/food_order_service.dart';
+import '../../safety/models/safety_models.dart';
+import '../../safety/screens/safety_center_screen.dart';
+
+class OrderTrackingScreen extends StatefulWidget {
+  const OrderTrackingScreen({
+    required this.orderId,
+    super.key,
+  });
+
+  final String orderId;
+
+  @override
+  State<OrderTrackingScreen> createState() =>
+      _OrderTrackingScreenState();
+}
+
+class _OrderTrackingScreenState
+    extends State<OrderTrackingScreen> {
+  static const Color yellow = Color(0xFFFFD60A);
+  static const Color background = Color(0xFF0D0D0D);
+  static const Color cardColor = Color(0xFF1A1A1A);
+
+  final FoodOrderService _orderService =
+      FoodOrderService();
+
+  final FirebaseFirestore _firestore =
+      FirebaseFirestore.instance;
+
+  Timer? _timer;
+  DateTime _now = DateTime.now();
+  bool _isCancelling = false;
+
+  @override
+  void initState() {
+    super.initState();
+
+    _timer = Timer.periodic(
+      const Duration(seconds: 1),
+      (_) {
+        if (!mounted) {
+          return;
+        }
+
+        setState(() {
+          _now = DateTime.now();
+        });
+      },
+    );
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  String _statusTitle(FoodOrderStatus status) {
+    switch (status) {
+      case FoodOrderStatus.pending:
+        return 'Waiting for restaurant';
+      case FoodOrderStatus.accepted:
+        return 'Restaurant accepted';
+      case FoodOrderStatus.preparing:
+        return 'Food is being prepared';
+      case FoodOrderStatus.readyForPickup:
+        return 'Ready for pickup';
+      case FoodOrderStatus.pickedUp:
+        return 'Rider picked up your order';
+      case FoodOrderStatus.onTheWay:
+        return 'Your order is on the way';
+      case FoodOrderStatus.delivered:
+        return 'Order delivered';
+      case FoodOrderStatus.cancelled:
+        return 'Order cancelled';
+    }
+  }
+
+  IconData _statusIcon(FoodOrderStatus status) {
+    switch (status) {
+      case FoodOrderStatus.pending:
+        return Icons.hourglass_top;
+      case FoodOrderStatus.accepted:
+        return Icons.check_circle_outline;
+      case FoodOrderStatus.preparing:
+        return Icons.soup_kitchen_outlined;
+      case FoodOrderStatus.readyForPickup:
+        return Icons.shopping_bag_outlined;
+      case FoodOrderStatus.pickedUp:
+        return Icons.delivery_dining;
+      case FoodOrderStatus.onTheWay:
+        return Icons.route;
+      case FoodOrderStatus.delivered:
+        return Icons.task_alt;
+      case FoodOrderStatus.cancelled:
+        return Icons.cancel_outlined;
+    }
+  }
+
+  FoodOrderStatus _statusFromRaw(dynamic value) {
+    final String normalized =
+        value?.toString().trim().toLowerCase() ?? '';
+
+    for (final FoodOrderStatus status
+        in FoodOrderStatus.values) {
+      if (status.name.toLowerCase() == normalized) {
+        return status;
+      }
+    }
+
+    return FoodOrderStatus.pending;
+  }
+
+  DateTime _dateTimeFromRaw(dynamic value) {
+    if (value is DateTime) {
+      return value;
+    }
+
+    try {
+      final dynamic converted = value.toDate();
+
+      if (converted is DateTime) {
+        return converted;
+      }
+    } catch (_) {}
+
+    return DateTime.tryParse(
+          value?.toString() ?? '',
+        ) ??
+        DateTime.now();
+  }
+
+  double _doubleFromRaw(dynamic value) {
+    if (value is num) {
+      return value.toDouble();
+    }
+
+    return double.tryParse(
+          value?.toString() ?? '',
+        ) ??
+        0;
+  }
+
+  String _stringFromRaw(dynamic value) {
+    return value?.toString().trim() ?? '';
+  }
+
+  bool _canCustomerCancel(
+    Map<String, dynamic> data,
+  ) {
+    final FoodOrderStatus status =
+        _statusFromRaw(data['status']);
+
+    if (status == FoodOrderStatus.preparing ||
+        status == FoodOrderStatus.readyForPickup ||
+        status == FoodOrderStatus.pickedUp ||
+        status == FoodOrderStatus.onTheWay ||
+        status == FoodOrderStatus.delivered ||
+        status == FoodOrderStatus.cancelled) {
+      return false;
+    }
+
+    if (data['customerCancellationAllowed'] == false) {
+      return false;
+    }
+
+    final DateTime createdAt =
+        _dateTimeFromRaw(data['createdAt']);
+
+    return FoodCancellationModel.canCustomerCancel(
+      orderCreatedAt: createdAt,
+      now: _now,
+    );
+  }
+
+  Duration _remainingCancellationTime(
+    Map<String, dynamic> data,
+  ) {
+    final DateTime createdAt =
+        _dateTimeFromRaw(data['createdAt']);
+
+    return FoodCancellationModel.remainingCustomerTime(
+      orderCreatedAt: createdAt,
+      now: _now,
+    );
+  }
+
+  String _formatDuration(Duration duration) {
+    final int minutes = duration.inMinutes;
+    final int seconds = duration.inSeconds % 60;
+
+    return '${minutes.toString().padLeft(2, '0')}:'
+        '${seconds.toString().padLeft(2, '0')}';
+  }
+
+  Future<void> _showCancellationDialog() async {
+    FoodCancellationReason selectedReason =
+        FoodCancellationReason.orderedByMistake;
+
+    final TextEditingController customController =
+        TextEditingController();
+
+    final bool? confirmed = await showDialog<bool>(
+      context: context,
+      builder: (BuildContext dialogContext) {
+        return StatefulBuilder(
+          builder: (
+            BuildContext context,
+            void Function(void Function()) setDialogState,
+          ) {
+            return AlertDialog(
+              backgroundColor: cardColor,
+              title: const Text('Cancel food order?'),
+              content: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: <Widget>[
+                    const Text(
+                      'You can cancel only within 5 minutes of placing the order.',
+                      style: TextStyle(
+                        color: Colors.grey,
+                        height: 1.4,
+                      ),
+                    ),
+                    const SizedBox(height: 14),
+                    DropdownButtonFormField<
+                        FoodCancellationReason>(
+                      value: selectedReason,
+                      dropdownColor: cardColor,
+                      decoration: const InputDecoration(
+                        labelText: 'Cancellation reason',
+                        border: OutlineInputBorder(),
+                      ),
+                      items: FoodCancellationReason.values
+                          .where(
+                            (FoodCancellationReason reason) =>
+                                reason !=
+                                    FoodCancellationReason
+                                        .restaurantRejected &&
+                                reason !=
+                                    FoodCancellationReason
+                                        .itemUnavailable &&
+                                reason !=
+                                    FoodCancellationReason
+                                        .riderUnavailable,
+                          )
+                          .map(
+                            (FoodCancellationReason reason) =>
+                                DropdownMenuItem<
+                                    FoodCancellationReason>(
+                              value: reason,
+                              child: Text(
+                                reason.displayName,
+                              ),
+                            ),
+                          )
+                          .toList(),
+                      onChanged:
+                          (FoodCancellationReason? value) {
+                        if (value == null) {
+                          return;
+                        }
+
+                        setDialogState(() {
+                          selectedReason = value;
+                        });
+                      },
+                    ),
+                    if (selectedReason ==
+                        FoodCancellationReason.other) ...<Widget>[
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller: customController,
+                        minLines: 2,
+                        maxLines: 4,
+                        decoration: const InputDecoration(
+                          labelText: 'Enter reason',
+                          border: OutlineInputBorder(),
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+              actions: <Widget>[
+                TextButton(
+                  onPressed: () =>
+                      Navigator.pop(dialogContext, false),
+                  child: const Text('Keep Order'),
+                ),
+                ElevatedButton(
+                  onPressed: () {
+                    if (selectedReason ==
+                            FoodCancellationReason.other &&
+                        customController.text.trim().isEmpty) {
+                      ScaffoldMessenger.of(context)
+                        ..hideCurrentSnackBar()
+                        ..showSnackBar(
+                          const SnackBar(
+                            content: Text(
+                              'Please enter a cancellation reason.',
+                            ),
+                          ),
+                        );
+
+                      return;
+                    }
+
+                    Navigator.pop(dialogContext, true);
+                  },
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.redAccent,
+                    foregroundColor: Colors.white,
+                  ),
+                  child: const Text('Cancel Order'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+
+    if (confirmed != true || !mounted) {
+      customController.dispose();
+      return;
+    }
+
+    setState(() {
+      _isCancelling = true;
+    });
+
+    try {
+      final String customerId =
+          FirebaseAuth.instance.currentUser?.uid ??
+              'guest_customer';
+
+      if (customerId == 'guest_customer') {
+        throw const FoodOrderServiceException(
+          message:
+              'Please log in before cancelling a food order.',
+        );
+      }
+
+      final String cancellationReason =
+          selectedReason ==
+                      FoodCancellationReason.other &&
+                  customController.text.trim().isNotEmpty
+              ? customController.text.trim()
+              : selectedReason.displayName;
+
+      await _orderService.cancelOrder(
+        orderId: widget.orderId,
+        cancelledBy: 'customer',
+        reason: cancellationReason,
+      );
+
+      if (!mounted) {
+        return;
+      }
+
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Your food order was cancelled.',
+            ),
+          ),
+        );
+    } on FoodOrderServiceException catch (error) {
+      if (!mounted) {
+        return;
+      }
+
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          SnackBar(
+            content: Text(error.message),
+          ),
+        );
+    } finally {
+      customController.dispose();
+
+      if (mounted) {
+        setState(() {
+          _isCancelling = false;
+        });
+      }
+    }
+  }
+
+  void _openUniversalSafetyCenter(
+    Map<String, dynamic> data,
+  ) {
+    final String userId =
+        FirebaseAuth.instance.currentUser?.uid ??
+            'guest_customer';
+
+    final Map<dynamic, dynamic> deliveryAddress =
+        data['deliveryAddress'] is Map
+            ? data['deliveryAddress'] as Map
+            : <dynamic, dynamic>{};
+
+    final double deliveryLatitude =
+        _doubleFromRaw(
+      deliveryAddress['latitude'],
+    );
+
+    final double deliveryLongitude =
+        _doubleFromRaw(
+      deliveryAddress['longitude'],
+    );
+
+    final SafetyLocation destination =
+        SafetyLocation(
+      latitude: deliveryLatitude,
+      longitude: deliveryLongitude,
+      address: '',
+      placeName: 'Delivery location',
+    );
+
+    final double riderLatitude =
+        _doubleFromRaw(data['riderLatitude']);
+
+    final double riderLongitude =
+        _doubleFromRaw(data['riderLongitude']);
+
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (BuildContext context) {
+          return SafetyCenterScreen(
+            contextData: SafetyContext(
+              serviceType:
+                  SafetyServiceType.foodDelivery,
+              referenceId: widget.orderId,
+              initiatedByUserId: userId,
+              initiatedByRole:
+                  SafetyUserRole.foodCustomer,
+              sourcePage:
+                  SafetySourcePage.orderTracking,
+              referenceStatus:
+                  data['status']?.toString() ?? '',
+              destinationLocation: destination,
+              serviceTitle: 'Food Delivery Safety',
+              serviceSubtitle:
+                  data['restaurantName']
+                          ?.toString()
+                          .trim()
+                          .isNotEmpty ==
+                      true
+                  ? data['restaurantName'].toString()
+                  : 'Active food order',
+              paymentMethod:
+                  data['paymentMethod']
+                          ?.toString() ??
+                      '',
+              metadata: <String, dynamic>{
+                'orderId': widget.orderId,
+                'restaurantName':
+                    data['restaurantName']
+                            ?.toString() ??
+                        '',
+                'riderId':
+                    data['riderId']
+                            ?.toString() ??
+                        '',
+                'grandTotal':
+                    _doubleFromRaw(
+                  data['grandTotal'],
+                ),
+
+                // Rider coordinates are related service data,
+                // not the customer's emergency GPS.
+                'riderLatitude': riderLatitude,
+                'riderLongitude': riderLongitude,
+
+                // customerOtp is intentionally excluded.
+              },
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Stream<Map<String, dynamic>?> _watchOrderRaw(
+    String orderId,
+  ) {
+    if (orderId.trim().isEmpty) {
+      return Stream<Map<String, dynamic>?>.value(
+        null,
+      );
+    }
+
+    return _firestore
+        .collection('food_orders')
+        .doc(orderId)
+        .snapshots()
+        .map(
+      (
+        DocumentSnapshot<Map<String, dynamic>>
+            snapshot,
+      ) {
+        if (!snapshot.exists ||
+            snapshot.data() == null) {
+          return null;
+        }
+
+        return Map<String, dynamic>.from(
+          snapshot.data()!,
+        );
+      },
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: background,
+      appBar: AppBar(
+        backgroundColor: background,
+        title: const Text(
+          'Track Food Order',
+          style: TextStyle(
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+      ),
+      body: StreamBuilder<Map<String, dynamic>?>(
+        stream: _watchOrderRaw(widget.orderId),
+        builder: (
+          BuildContext context,
+          AsyncSnapshot<Map<String, dynamic>?> snapshot,
+        ) {
+          if (snapshot.connectionState ==
+                  ConnectionState.waiting &&
+              !snapshot.hasData) {
+            return const Center(
+              child: CircularProgressIndicator(
+                color: yellow,
+              ),
+            );
+          }
+
+          if (snapshot.hasError) {
+            return _buildMessageState(
+              icon: Icons.cloud_off,
+              title: 'Unable to load order',
+              message: snapshot.error.toString(),
+            );
+          }
+
+          final Map<String, dynamic>? data =
+              snapshot.data;
+
+          if (data == null) {
+            return _buildMessageState(
+              icon: Icons.receipt_long_outlined,
+              title: 'Order not found',
+              message:
+                  'This food order is no longer available.',
+            );
+          }
+
+          return _buildOrderContent(data);
+        },
+      ),
+    );
+  }
+
+  Widget _buildOrderContent(
+    Map<String, dynamic> data,
+  ) {
+    final FoodOrderStatus status =
+        _statusFromRaw(data['status']);
+
+    final Duration remaining =
+        _remainingCancellationTime(data);
+
+    final bool canCancel =
+        _canCustomerCancel(data);
+
+    final double riderLatitude =
+        _doubleFromRaw(data['riderLatitude']);
+
+    final double riderLongitude =
+        _doubleFromRaw(data['riderLongitude']);
+
+    final String riderId =
+        _stringFromRaw(data['riderId']);
+
+    final String restaurantName =
+        _stringFromRaw(data['restaurantName']);
+
+    final String customerOtp =
+        _stringFromRaw(data['customerOtp']);
+
+    final double grandTotal =
+        _doubleFromRaw(data['grandTotal']);
+
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(
+        16,
+        16,
+        16,
+        30,
+      ),
+      children: <Widget>[
+        _buildStatusCard(status),
+        const SizedBox(height: 16),
+        _buildCancellationCard(
+          data: data,
+          canCancel: canCancel,
+          remaining: remaining,
+          status: status,
+        ),
+        const SizedBox(height: 16),
+        _buildTrackingCard(
+          status: status,
+          riderId: riderId,
+          riderLatitude: riderLatitude,
+          riderLongitude: riderLongitude,
+        ),
+        const SizedBox(height: 16),
+        _buildTimeline(status),
+        const SizedBox(height: 16),
+        _buildOrderInfoCard(
+          restaurantName: restaurantName,
+          grandTotal: grandTotal,
+          paymentMethod:
+              _stringFromRaw(data['paymentMethod']),
+        ),
+        const SizedBox(height: 16),
+        _buildOtpCard(
+          customerOtp,
+          status,
+        ),
+        const SizedBox(height: 16),
+        _buildActionButtons(data),
+      ],
+    );
+  }
+
+  Widget _buildStatusCard(
+    FoodOrderStatus status,
+  ) {
+    final bool isCancelled =
+        status == FoodOrderStatus.cancelled;
+
+    return Container(
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        color: isCancelled
+            ? Colors.red.withValues(alpha: 0.15)
+            : cardColor,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(
+          color: isCancelled
+              ? Colors.redAccent
+              : Colors.white10,
+        ),
+      ),
+      child: Row(
+        children: <Widget>[
+          CircleAvatar(
+            radius: 28,
+            backgroundColor: isCancelled
+                ? Colors.redAccent
+                : yellow,
+            child: Icon(
+              _statusIcon(status),
+              color: isCancelled
+                  ? Colors.white
+                  : Colors.black,
+              size: 30,
+            ),
+          ),
+          const SizedBox(width: 15),
+          Expanded(
+            child: Column(
+              crossAxisAlignment:
+                  CrossAxisAlignment.start,
+              children: <Widget>[
+                const Text(
+                  'Current status',
+                  style: TextStyle(
+                    color: Colors.grey,
+                    fontSize: 12,
+                  ),
+                ),
+                const SizedBox(height: 5),
+                Text(
+                  _statusTitle(status),
+                  style: const TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildCancellationCard({
+    required Map<String, dynamic> data,
+    required bool canCancel,
+    required Duration remaining,
+    required FoodOrderStatus status,
+  }) {
+    if (status == FoodOrderStatus.cancelled) {
+      return Container(
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: Colors.red.withValues(alpha: 0.12),
+          borderRadius: BorderRadius.circular(18),
+        ),
+        child: Text(
+          'Cancellation reason: '
+          '${_stringFromRaw(data['cancellationReason']).isEmpty ? 'Not provided' : _stringFromRaw(data['cancellationReason'])}',
+          style: const TextStyle(
+            color: Colors.redAccent,
+            height: 1.4,
+          ),
+        ),
+      );
+    }
+
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: cardColor,
+        borderRadius: BorderRadius.circular(18),
+      ),
+      child: Column(
+        crossAxisAlignment:
+            CrossAxisAlignment.start,
+        children: <Widget>[
+          Row(
+            children: <Widget>[
+              const Icon(
+                Icons.timer_outlined,
+                color: yellow,
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  canCancel
+                      ? 'Cancel available for ${_formatDuration(remaining)}'
+                      : 'Cancellation period has ended',
+                  style: const TextStyle(
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Text(
+            canCancel
+                ? 'You may cancel this order before the timer reaches 00:00.'
+                : 'Customer cancellation is allowed only during the first 5 minutes and before preparation starts.',
+            style: const TextStyle(
+              color: Colors.grey,
+              height: 1.4,
+              fontSize: 12,
+            ),
+          ),
+          if (canCancel) ...<Widget>[
+            const SizedBox(height: 14),
+            SizedBox(
+              width: double.infinity,
+              child: OutlinedButton.icon(
+                onPressed: _isCancelling
+                    ? null
+                    : _showCancellationDialog,
+                icon: _isCancelling
+                    ? const SizedBox(
+                        width: 18,
+                        height: 18,
+                        child:
+                            CircularProgressIndicator(
+                          strokeWidth: 2,
+                        ),
+                      )
+                    : const Icon(
+                        Icons.cancel_outlined,
+                      ),
+                label: const Text('Cancel Order'),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: Colors.redAccent,
+                  side: const BorderSide(
+                    color: Colors.redAccent,
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildTrackingCard({
+    required FoodOrderStatus status,
+    required String riderId,
+    required double riderLatitude,
+    required double riderLongitude,
+  }) {
+    final bool trackingAvailable =
+        status == FoodOrderStatus.pickedUp ||
+        status == FoodOrderStatus.onTheWay;
+
+    return Container(
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: cardColor,
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Column(
+        crossAxisAlignment:
+            CrossAxisAlignment.start,
+        children: <Widget>[
+          const Row(
+            children: <Widget>[
+              Icon(
+                Icons.map_outlined,
+                color: yellow,
+              ),
+              SizedBox(width: 10),
+              Text(
+                'Live delivery tracking',
+                style: TextStyle(
+                  fontSize: 17,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 14),
+          Container(
+            width: double.infinity,
+            height: 150,
+            decoration: BoxDecoration(
+              color: const Color(0xFF262626),
+              borderRadius: BorderRadius.circular(16),
+            ),
+            alignment: Alignment.center,
+            child: Column(
+              mainAxisAlignment:
+                  MainAxisAlignment.center,
+              children: <Widget>[
+                Icon(
+                  trackingAvailable
+                      ? Icons.delivery_dining
+                      : Icons.map_outlined,
+                  color: yellow,
+                  size: 45,
+                ),
+                const SizedBox(height: 10),
+                Text(
+                  trackingAvailable
+                      ? 'Rider is moving toward you'
+                      : riderId.isEmpty
+                          ? 'Waiting for rider assignment'
+                          : 'Rider assigned',
+                  style: const TextStyle(
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(height: 7),
+                Text(
+                  riderLatitude == 0 &&
+                          riderLongitude == 0
+                      ? 'Live coordinates are not available yet.'
+                      : 'Lat: ${riderLatitude.toStringAsFixed(6)}\n'
+                          'Lng: ${riderLongitude.toStringAsFixed(6)}',
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                    color: Colors.grey,
+                    fontSize: 12,
+                    height: 1.4,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 10),
+          const Text(
+            'Paid map rendering is temporarily bypassed. '
+            'Rider coordinates continue updating through Firestore.',
+            style: TextStyle(
+              color: Colors.grey,
+              fontSize: 11,
+              height: 1.4,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildTimeline(
+    FoodOrderStatus currentStatus,
+  ) {
+    final List<FoodOrderStatus> timeline =
+        <FoodOrderStatus>[
+      FoodOrderStatus.pending,
+      FoodOrderStatus.accepted,
+      FoodOrderStatus.preparing,
+      FoodOrderStatus.readyForPickup,
+      FoodOrderStatus.pickedUp,
+      FoodOrderStatus.onTheWay,
+      FoodOrderStatus.delivered,
+    ];
+
+    final int currentIndex =
+        timeline.indexOf(currentStatus);
+
+    return Container(
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: cardColor,
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Column(
+        crossAxisAlignment:
+            CrossAxisAlignment.start,
+        children: <Widget>[
+          const Text(
+            'Order progress',
+            style: TextStyle(
+              fontSize: 17,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          const SizedBox(height: 16),
+          ...List<Widget>.generate(
+            timeline.length,
+            (int index) {
+              final FoodOrderStatus status =
+                  timeline[index];
+
+              final bool completed =
+                  currentStatus !=
+                          FoodOrderStatus.cancelled &&
+                      index <= currentIndex;
+
+              return _TimelineItem(
+                title: _statusTitle(status),
+                completed: completed,
+                isLast: index == timeline.length - 1,
+              );
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildOrderInfoCard({
+    required String restaurantName,
+    required double grandTotal,
+    required String paymentMethod,
+  }) {
+    return Container(
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: cardColor,
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Column(
+        children: <Widget>[
+          _InfoRow(
+            label: 'Order ID',
+            value: widget.orderId,
+          ),
+          const Divider(color: Colors.white12),
+          _InfoRow(
+            label: 'Restaurant',
+            value: restaurantName,
+          ),
+          const Divider(color: Colors.white12),
+          _InfoRow(
+            label: 'Payment',
+            value: paymentMethod.isEmpty
+                ? 'cash'
+                : paymentMethod,
+          ),
+          const Divider(color: Colors.white12),
+          _InfoRow(
+            label: 'Total',
+            value:
+                'Rs. ${grandTotal.toStringAsFixed(0)}',
+            highlight: true,
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildOtpCard(
+    String otp,
+    FoodOrderStatus status,
+  ) {
+    final bool shouldShow =
+        status != FoodOrderStatus.delivered &&
+        status != FoodOrderStatus.cancelled;
+
+    if (!shouldShow) {
+      return const SizedBox.shrink();
+    }
+
+    return Container(
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        color: yellow,
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Column(
+        children: <Widget>[
+          const Text(
+            'Delivery OTP',
+            style: TextStyle(
+              color: Colors.black87,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            otp.isEmpty ? '----' : otp,
+            style: const TextStyle(
+              color: Colors.black,
+              fontSize: 32,
+              letterSpacing: 8,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          const SizedBox(height: 7),
+          const Text(
+            'Share this OTP with the rider only when you receive your food.',
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              color: Colors.black87,
+              fontSize: 12,
+              height: 1.4,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildActionButtons(
+    Map<String, dynamic> data,
+  ) {
+    return Column(
+      children: <Widget>[
+        Row(
+          children: <Widget>[
+            Expanded(
+              child: OutlinedButton.icon(
+                onPressed: () {
+                  ScaffoldMessenger.of(context)
+                    ..hideCurrentSnackBar()
+                    ..showSnackBar(
+                      const SnackBar(
+                        content: Text(
+                          'Restaurant calling will be connected after contact details are added.',
+                        ),
+                      ),
+                    );
+                },
+                icon: const Icon(Icons.call_outlined),
+                label: const Text('Restaurant'),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: yellow,
+                  side: const BorderSide(
+                    color: yellow,
+                  ),
+                  padding:
+                      const EdgeInsets.symmetric(
+                    vertical: 14,
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: OutlinedButton.icon(
+                onPressed: _stringFromRaw(
+                          data['riderId'],
+                        ).isEmpty
+                    ? null
+                    : () {
+                        ScaffoldMessenger.of(context)
+                          ..hideCurrentSnackBar()
+                          ..showSnackBar(
+                            const SnackBar(
+                              content: Text(
+                                'Rider calling will be connected after rider contact details are added.',
+                              ),
+                            ),
+                          );
+                      },
+                icon: const Icon(
+                  Icons.delivery_dining,
+                ),
+                label: const Text('Rider'),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: yellow,
+                  side: const BorderSide(
+                    color: yellow,
+                  ),
+                  padding:
+                      const EdgeInsets.symmetric(
+                    vertical: 14,
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 12),
+        Row(
+          children: <Widget>[
+            Expanded(
+              child: OutlinedButton.icon(
+                onPressed: () {
+                  Navigator.pushNamed(
+                    context,
+                    '/food_invoice',
+                    arguments: widget.orderId,
+                  );
+                },
+                icon: const Icon(Icons.receipt_long_outlined),
+                label: const Text('Invoice'),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: yellow,
+                  side: const BorderSide(color: yellow),
+                ),
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: OutlinedButton.icon(
+                onPressed: () {
+                  Navigator.pushNamedAndRemoveUntil(
+                    context,
+                    '/food_home',
+                    (route) => false,
+                  );
+                },
+                icon: const Icon(Icons.replay),
+                label: const Text('Re-order'),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: yellow,
+                  side: const BorderSide(color: yellow),
+                ),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 12),
+        SizedBox(
+          width: double.infinity,
+          height: 52,
+          child: ElevatedButton.icon(
+            onPressed: () => _openUniversalSafetyCenter(data),
+            icon: const Icon(
+              Icons.shield_outlined,
+            ),
+            label: const Text(
+              'Safety & SOS',
+              style: TextStyle(
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.red,
+              foregroundColor: Colors.white,
+              shape: RoundedRectangleBorder(
+                borderRadius:
+                    BorderRadius.circular(15),
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildMessageState({
+    required IconData icon,
+    required String title,
+    required String message,
+  }) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(30),
+        child: Column(
+          mainAxisAlignment:
+              MainAxisAlignment.center,
+          children: <Widget>[
+            Icon(
+              icon,
+              color: yellow,
+              size: 68,
+            ),
+            const SizedBox(height: 15),
+            Text(
+              title,
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                fontSize: 20,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              message,
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                color: Colors.grey,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _TimelineItem extends StatelessWidget {
+  const _TimelineItem({
+    required this.title,
+    required this.completed,
+    required this.isLast,
+  });
+
+  static const Color yellow = Color(0xFFFFD60A);
+
+  final String title;
+  final bool completed;
+  final bool isLast;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      crossAxisAlignment:
+          CrossAxisAlignment.start,
+      children: <Widget>[
+        Column(
+          children: <Widget>[
+            Container(
+              width: 24,
+              height: 24,
+              decoration: BoxDecoration(
+                color: completed
+                    ? yellow
+                    : Colors.grey.shade800,
+                shape: BoxShape.circle,
+              ),
+              alignment: Alignment.center,
+              child: Icon(
+                completed
+                    ? Icons.check
+                    : Icons.circle,
+                color: completed
+                    ? Colors.black
+                    : Colors.grey,
+                size: completed ? 16 : 8,
+              ),
+            ),
+            if (!isLast)
+              Container(
+                width: 2,
+                height: 32,
+                color: completed
+                    ? yellow
+                    : Colors.grey.shade800,
+              ),
+          ],
+        ),
+        const SizedBox(width: 12),
+        Expanded(
+          child: Padding(
+            padding:
+                const EdgeInsets.only(top: 2),
+            child: Text(
+              title,
+              style: TextStyle(
+                color: completed
+                    ? Colors.white
+                    : Colors.grey,
+                fontWeight: completed
+                    ? FontWeight.bold
+                    : FontWeight.normal,
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _InfoRow extends StatelessWidget {
+  const _InfoRow({
+    required this.label,
+    required this.value,
+    this.highlight = false,
+  });
+
+  static const Color yellow = Color(0xFFFFD60A);
+
+  final String label;
+  final String value;
+  final bool highlight;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: <Widget>[
+        Expanded(
+          child: Text(
+            label,
+            style: const TextStyle(
+              color: Colors.grey,
+            ),
+          ),
+        ),
+        Flexible(
+          child: Text(
+            value,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            textAlign: TextAlign.right,
+            style: TextStyle(
+              color: highlight
+                  ? yellow
+                  : Colors.white,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}

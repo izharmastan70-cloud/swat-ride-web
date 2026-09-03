@@ -1,0 +1,1641 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:flutter/material.dart';
+
+import '../../models/ride_model.dart';
+import '../../feedback/models/feedback_model.dart';
+import '../../feedback/models/feedback_reply_model.dart';
+import '../../feedback/partner/partner_reviews_screen.dart';
+import '../../feedback/partner/review_reply_screen.dart';
+import '../services/driver_availability_service.dart';
+import '../services/driver_location_service.dart';
+import '../services/driver_ride_service.dart';
+import 'driver_ride_history_screen.dart';
+import 'driver_ride_requests_screen.dart';
+import 'driver_withdrawal_screen.dart';
+
+class DriverHomeScreen extends StatefulWidget {
+  final String driverId;
+  final String driverName;
+  final String vehicleType;
+  final String vehicleNumber;
+
+  const DriverHomeScreen({
+    super.key,
+    required this.driverId,
+    required this.driverName,
+    required this.vehicleType,
+    required this.vehicleNumber,
+  });
+
+  @override
+  State<DriverHomeScreen> createState() => _DriverHomeScreenState();
+}
+
+class _DriverHomeScreenState extends State<DriverHomeScreen> {
+  static const Color yellow = Color(0xFFFFD60A);
+  static const Color background = Color(0xFF0D0D0D);
+  static const Color darkCard = Color(0xFF1A1A1A);
+  static const Color softCard = Color(0xFF252525);
+
+  // =========================================================
+  // TEMPORARY APPROVAL BYPASS
+  // =========================================================
+  //
+  // true:
+  // Driver Home can be tested before Admin approval module
+  // is connected.
+  //
+  // false:
+  // Only a real approved Driver can go online.
+  //
+  // Production/Admin phase mein isko false karna hai.
+  // =========================================================
+
+  static const bool allowApprovalBypassForTesting = true;
+
+  final DriverAvailabilityService _availabilityService =
+      DriverAvailabilityService();
+
+  final DriverRideService _rideService = DriverRideService();
+
+  final DriverLocationService _locationService = DriverLocationService();
+
+  final FirebaseFirestore _firestore = FirebaseFirestore.instance;
+
+  bool _isUpdatingStatus = false;
+  bool _gpsSyncInProgress = false;
+  bool? _lastGpsOnlineTarget;
+  String? _lastGpsRideTarget;
+  String _gpsStatus = 'GPS is stopped';
+
+  @override
+  void dispose() {
+    _locationService.dispose();
+    super.dispose();
+  }
+
+  // =========================================================
+  // GPS TRACKING LIFECYCLE
+  // =========================================================
+
+  void _scheduleGpsSync({
+    required bool isOnline,
+    required String? activeRideId,
+  }) {
+    final String normalizedRideId = activeRideId?.trim() ?? '';
+
+    if (_lastGpsOnlineTarget == isOnline &&
+        _lastGpsRideTarget == normalizedRideId) {
+      return;
+    }
+
+    _lastGpsOnlineTarget = isOnline;
+    _lastGpsRideTarget = normalizedRideId;
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+
+      _syncGpsTracking(
+        isOnline: isOnline,
+        activeRideId: normalizedRideId.isEmpty ? null : normalizedRideId,
+      );
+    });
+  }
+
+  Future<void> _syncGpsTracking({
+    required bool isOnline,
+    required String? activeRideId,
+  }) async {
+    if (_gpsSyncInProgress) return;
+    _gpsSyncInProgress = true;
+
+    try {
+      if (!isOnline) {
+        await _locationService.stopLocationTracking();
+
+        if (mounted && _gpsStatus != 'GPS is stopped') {
+          setState(() {
+            _gpsStatus = 'GPS is stopped';
+          });
+        }
+        return;
+      }
+
+      if (mounted) {
+        setState(() {
+          _gpsStatus = 'Starting GPS...';
+        });
+      }
+
+      await _locationService.startLocationTracking(
+        driverId: widget.driverId,
+        activeRideId: activeRideId,
+        onPosition: (_) {
+          if (!mounted || _gpsStatus == 'Live GPS active') return;
+
+          setState(() {
+            _gpsStatus = 'Live GPS active';
+          });
+        },
+        onError: (Object error) {
+          if (!mounted) return;
+
+          setState(() {
+            _gpsStatus = 'GPS update failed';
+          });
+        },
+      );
+    } on DriverLocationException catch (error) {
+      if (!mounted) return;
+
+      setState(() {
+        _gpsStatus = error.message;
+      });
+    } catch (_) {
+      if (!mounted) return;
+
+      setState(() {
+        _gpsStatus = 'Unable to start GPS';
+      });
+    } finally {
+      _gpsSyncInProgress = false;
+    }
+  }
+
+  // =========================================================
+  // ONLINE / OFFLINE
+  // =========================================================
+
+  Future<void> _toggleOnlineStatus({required bool currentOnlineStatus}) async {
+    if (_isUpdatingStatus) return;
+
+    setState(() {
+      _isUpdatingStatus = true;
+    });
+
+    try {
+      final bool goingOnline = !currentOnlineStatus;
+
+      if (goingOnline) {
+        await _locationService.ensureLocationReady();
+
+        await _locationService.startLocationTracking(
+          driverId: widget.driverId,
+          onPosition: (_) {
+            if (!mounted || _gpsStatus == 'Live GPS active') return;
+
+            setState(() {
+              _gpsStatus = 'Live GPS active';
+            });
+          },
+          onError: (Object error) {
+            if (!mounted) return;
+
+            setState(() {
+              _gpsStatus = 'GPS update failed';
+            });
+          },
+        );
+      }
+
+      await _availabilityService.setOnlineStatus(
+        driverId: widget.driverId,
+        isOnline: goingOnline,
+        driverName: widget.driverName,
+        vehicleType: widget.vehicleType,
+        vehicleNumber: widget.vehicleNumber,
+        allowUnapprovedForTesting: allowApprovalBypassForTesting,
+      );
+
+      if (!goingOnline) {
+        await _locationService.stopLocationTracking();
+      }
+
+      if (!mounted) return;
+
+      _showMessage(
+        currentOnlineStatus
+            ? 'You are now Offline.'
+            : 'You are Online and ready for rides.',
+        currentOnlineStatus ? Colors.grey.shade800 : Colors.green,
+      );
+    } catch (error) {
+      if (!currentOnlineStatus) {
+        await _locationService.stopLocationTracking();
+      }
+
+      if (!mounted) return;
+
+      _showMessage(_cleanError(error), Colors.red);
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isUpdatingStatus = false;
+        });
+      }
+    }
+  }
+
+  // =========================================================
+  // AVAILABILITY
+  // =========================================================
+
+  Future<void> _toggleAvailability({
+    required bool isOnline,
+    required bool currentAvailability,
+    required bool hasActiveRide,
+  }) async {
+    if (_isUpdatingStatus) return;
+
+    if (!isOnline) {
+      _showMessage('Please go Online first.', Colors.orange);
+      return;
+    }
+
+    if (hasActiveRide) {
+      _showMessage(
+        'You cannot change availability during an active ride.',
+        Colors.orange,
+      );
+      return;
+    }
+
+    setState(() {
+      _isUpdatingStatus = true;
+    });
+
+    try {
+      await _availabilityService.updateAvailability(
+        driverId: widget.driverId,
+        isAvailable: !currentAvailability,
+        allowUnapprovedForTesting: allowApprovalBypassForTesting,
+      );
+
+      if (!mounted) return;
+
+      _showMessage(
+        currentAvailability
+            ? 'New ride requests paused.'
+            : 'You are available for new rides.',
+        currentAvailability ? Colors.orange : Colors.green,
+      );
+    } catch (error) {
+      if (!mounted) return;
+
+      _showMessage(_cleanError(error), Colors.red);
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isUpdatingStatus = false;
+        });
+      }
+    }
+  }
+
+  // =========================================================
+  // OPEN RIDE REQUESTS
+  // =========================================================
+
+  Future<void> _openRideRequests({
+    required bool isOnline,
+    required bool hasActiveRide,
+  }) async {
+    if (!isOnline && !hasActiveRide) {
+      _showMessage('Please go Online to receive ride requests.', Colors.orange);
+      return;
+    }
+
+    await Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => DriverRideRequestsScreen(
+          driverId: widget.driverId,
+          driverName: widget.driverName,
+          vehicleType: widget.vehicleType,
+          vehicleNumber: widget.vehicleNumber,
+        ),
+      ),
+    );
+  }
+
+  // =========================================================
+  // OPEN RIDE HISTORY & EARNINGS
+  // =========================================================
+
+  Future<void> _openRideHistory() async {
+    await Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => DriverRideHistoryScreen(
+          driverId: widget.driverId,
+          driverName: widget.driverName,
+        ),
+      ),
+    );
+  }
+
+  Future<void> _openDriverReviews() async {
+    final String driverId = widget.driverId.trim();
+
+    if (driverId.isEmpty) {
+      _showMessage('Driver information is unavailable.', Colors.orange);
+      return;
+    }
+
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute<void>(
+        builder: (context) => PartnerReviewsScreen(
+          serviceType: FeedbackServiceType.ride,
+          targetType: FeedbackTargetType.driver,
+          targetId: driverId,
+          partnerName: widget.driverName,
+          onReplyRequested: (review) {
+            Navigator.of(context).push<void>(
+              MaterialPageRoute<void>(
+                builder: (context) => ReviewReplyScreen(
+                  review: review,
+                  authorId: driverId,
+                  authorName: widget.driverName,
+                  authorType: FeedbackReplyAuthorType.driver,
+                ),
+              ),
+            );
+          },
+        ),
+      ),
+    );
+  }
+  // =========================================================
+  // OPEN WALLET & WITHDRAWALS
+  // =========================================================
+
+  Future<void> _openWalletAndWithdrawals() async {
+    await Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => DriverWithdrawalScreen(
+          driverId: widget.driverId,
+          driverName: widget.driverName,
+        ),
+      ),
+    );
+  }
+
+  // =========================================================
+  // TODAY STATS STREAM
+  // =========================================================
+
+  Stream<_DriverTodayStats> _watchTodayStats() {
+    return _firestore
+        .collection('rides')
+        .where('driverId', isEqualTo: widget.driverId)
+        .snapshots()
+        .map((snapshot) {
+          final DateTime now = DateTime.now();
+
+          final DateTime startOfToday = DateTime(now.year, now.month, now.day);
+
+          int completedRides = 0;
+          double grossEarnings = 0;
+          double commission = 0;
+
+          for (final document in snapshot.docs) {
+            final Map<String, dynamic> data = document.data();
+
+            if (data['status'] != RideModel.completed) {
+              continue;
+            }
+
+            final DateTime? completedAt =
+                _parseDate(data['completedAt']) ??
+                _parseDate(data['updatedAt']);
+
+            if (completedAt == null || completedAt.isBefore(startOfToday)) {
+              continue;
+            }
+
+            completedRides++;
+
+            grossEarnings += (data['estimatedFare'] as num?)?.toDouble() ?? 0;
+
+            commission += (data['commissionAmount'] as num?)?.toDouble() ?? 0;
+          }
+
+          final double netEarnings = grossEarnings - commission;
+
+          return _DriverTodayStats(
+            completedRides: completedRides,
+            grossEarnings: grossEarnings,
+            commission: commission,
+            netEarnings: netEarnings < 0 ? 0 : netEarnings,
+          );
+        });
+  }
+
+  DateTime? _parseDate(dynamic value) {
+    if (value is Timestamp) {
+      return value.toDate();
+    }
+
+    if (value is DateTime) {
+      return value;
+    }
+
+    if (value is String) {
+      return DateTime.tryParse(value);
+    }
+
+    return null;
+  }
+
+  // =========================================================
+  // MESSAGE
+  // =========================================================
+
+  void _showMessage(String message, Color color) {
+    ScaffoldMessenger.of(context).hideCurrentSnackBar();
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        backgroundColor: color,
+        behavior: SnackBarBehavior.floating,
+        content: Text(
+          message,
+          style: const TextStyle(
+            color: Colors.white,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+      ),
+    );
+  }
+
+  String _cleanError(Object error) {
+    return error.toString().replaceFirst('Exception: ', '');
+  }
+
+  // =========================================================
+  // BUILD
+  // =========================================================
+
+  @override
+  Widget build(BuildContext context) {
+    return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+      stream: _availabilityService.watchDriverStatus(widget.driverId),
+      builder: (context, driverSnapshot) {
+        final Map<String, dynamic> driverData =
+            driverSnapshot.data?.data() ?? <String, dynamic>{};
+
+        final bool isOnline = driverData['isOnline'] as bool? ?? false;
+
+        final bool isAvailable = driverData['isAvailable'] as bool? ?? false;
+
+        final String approvalStatus =
+            driverData['status'] as String? ?? 'pending';
+
+        final bool approvalBypassActive =
+            driverData['approvalBypassActive'] as bool? ?? false;
+
+        final String displayName =
+            (driverData['fullName'] as String?)?.trim().isNotEmpty == true
+            ? driverData['fullName'] as String
+            : widget.driverName;
+
+        final String displayVehicleType =
+            (driverData['vehicleType'] as String?)?.trim().isNotEmpty == true
+            ? driverData['vehicleType'] as String
+            : widget.vehicleType;
+
+        final String displayVehicleNumber =
+            (driverData['vehicleNumber'] as String?)?.trim().isNotEmpty == true
+            ? driverData['vehicleNumber'] as String
+            : widget.vehicleNumber;
+
+        return StreamBuilder<RideModel?>(
+          stream: _rideService.watchActiveDriverRide(widget.driverId),
+          builder: (context, activeRideSnapshot) {
+            final RideModel? activeRide = activeRideSnapshot.data;
+
+            final bool hasActiveRide = activeRide != null;
+
+            _scheduleGpsSync(
+              isOnline: isOnline,
+              activeRideId: activeRide?.rideId,
+            );
+
+            return Scaffold(
+              backgroundColor: background,
+              appBar: AppBar(
+                backgroundColor: background,
+                elevation: 0,
+                title: const Text(
+                  'Driver',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                actions: [
+                  Padding(
+                    padding: const EdgeInsets.only(right: 14),
+                    child: Center(
+                      child: _statusBadge(
+                        isOnline: isOnline,
+                        isAvailable: isAvailable,
+                        hasActiveRide: hasActiveRide,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              body: SafeArea(
+                child: RefreshIndicator(
+                  color: yellow,
+                  backgroundColor: darkCard,
+                  onRefresh: () async {
+                    await Future<void>.delayed(
+                      const Duration(milliseconds: 400),
+                    );
+
+                    if (mounted) {
+                      setState(() {});
+                    }
+                  },
+                  child: ListView(
+                    physics: const AlwaysScrollableScrollPhysics(),
+                    padding: const EdgeInsets.fromLTRB(16, 10, 16, 30),
+                    children: [
+                      _buildWelcomeSection(displayName),
+                      const SizedBox(height: 18),
+                      _buildVehicleCard(
+                        vehicleType: displayVehicleType,
+                        vehicleNumber: displayVehicleNumber,
+                        approvalStatus: approvalStatus,
+                      ),
+                      const SizedBox(height: 16),
+
+                      if (driverSnapshot.hasError)
+                        _buildErrorNotice(driverSnapshot.error),
+
+                      if (approvalStatus != 'approved')
+                        _buildApprovalNotice(
+                          approvalBypassActive: approvalBypassActive,
+                        ),
+
+                      if (approvalStatus != 'approved')
+                        const SizedBox(height: 16),
+
+                      if (activeRideSnapshot.hasError)
+                        _buildErrorNotice(activeRideSnapshot.error),
+
+                      if (activeRideSnapshot.hasError)
+                        const SizedBox(height: 16),
+
+                      _buildOnlineControl(
+                        isOnline: isOnline,
+                        hasActiveRide: hasActiveRide,
+                      ),
+                      const SizedBox(height: 16),
+
+                      _buildAvailabilityCard(
+                        isOnline: isOnline,
+                        isAvailable: isAvailable,
+                        hasActiveRide: hasActiveRide,
+                      ),
+                      const SizedBox(height: 16),
+
+                      _buildGpsStatusCard(isOnline: isOnline),
+                      const SizedBox(height: 16),
+
+                      if (activeRide != null) ...[
+                        _buildActiveRideCard(activeRide),
+                        const SizedBox(height: 16),
+                      ],
+
+                      _buildRideRequestsCard(
+                        isOnline: isOnline,
+                        isAvailable: isAvailable,
+                        hasActiveRide: hasActiveRide,
+                      ),
+                      const SizedBox(height: 22),
+
+                      _buildTodayStats(),
+                      const SizedBox(height: 18),
+
+                      _buildRideHistoryCard(),
+                      const SizedBox(height: 18),
+
+                      _buildWalletCard(),
+                      const SizedBox(height: 18),
+
+                      _buildRealConnectionNotice(),
+                    ],
+                  ),
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  // =========================================================
+  // STATUS BADGE
+  // =========================================================
+
+  Widget _statusBadge({
+    required bool isOnline,
+    required bool isAvailable,
+    required bool hasActiveRide,
+  }) {
+    Color color;
+    String label;
+
+    if (hasActiveRide) {
+      color = Colors.orange;
+      label = 'BUSY';
+    } else if (isOnline && isAvailable) {
+      color = Colors.green;
+      label = 'ONLINE';
+    } else if (isOnline) {
+      color = yellow;
+      label = 'PAUSED';
+    } else {
+      color = Colors.grey;
+      label = 'OFFLINE';
+    }
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.15),
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Row(
+        children: [
+          CircleAvatar(radius: 4, backgroundColor: color),
+          const SizedBox(width: 6),
+          Text(
+            label,
+            style: TextStyle(
+              color: color,
+              fontSize: 10,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // =========================================================
+  // WELCOME
+  // =========================================================
+
+  Widget _buildWelcomeSection(String name) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          'Hello, $name',
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: const TextStyle(
+            color: Colors.white,
+            fontSize: 26,
+            fontWeight: FontWeight.w900,
+          ),
+        ),
+        const SizedBox(height: 5),
+        Text(
+          'Ready to drive with SWAT RIDE?',
+          style: TextStyle(color: Colors.grey.shade400, fontSize: 13),
+        ),
+      ],
+    );
+  }
+
+  // =========================================================
+  // VEHICLE
+  // =========================================================
+
+  Widget _buildVehicleCard({
+    required String vehicleType,
+    required String vehicleNumber,
+    required String approvalStatus,
+  }) {
+    return Container(
+      padding: const EdgeInsets.all(17),
+      decoration: BoxDecoration(
+        color: darkCard,
+        borderRadius: BorderRadius.circular(19),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 53,
+            height: 53,
+            decoration: BoxDecoration(
+              color: yellow.withValues(alpha: 0.14),
+              shape: BoxShape.circle,
+            ),
+            child: const Icon(
+              Icons.local_taxi_rounded,
+              color: yellow,
+              size: 29,
+            ),
+          ),
+          const SizedBox(width: 13),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  vehicleType,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 17,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  vehicleNumber,
+                  style: TextStyle(color: Colors.grey.shade400, fontSize: 12),
+                ),
+              ],
+            ),
+          ),
+          _approvalBadge(approvalStatus),
+        ],
+      ),
+    );
+  }
+
+  Widget _approvalBadge(String status) {
+    Color color;
+    String label;
+
+    switch (status) {
+      case 'approved':
+        color = Colors.green;
+        label = 'APPROVED';
+        break;
+      case 'rejected':
+        color = Colors.red;
+        label = 'REJECTED';
+        break;
+      default:
+        color = Colors.orange;
+        label = 'PENDING';
+    }
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.13),
+        borderRadius: BorderRadius.circular(15),
+      ),
+      child: Text(
+        label,
+        style: TextStyle(
+          color: color,
+          fontSize: 8,
+          fontWeight: FontWeight.bold,
+        ),
+      ),
+    );
+  }
+
+  // =========================================================
+  // APPROVAL NOTICE
+  // =========================================================
+
+  Widget _buildApprovalNotice({required bool approvalBypassActive}) {
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: Colors.orange.withValues(alpha: 0.10),
+        borderRadius: BorderRadius.circular(15),
+        border: Border.all(color: Colors.orange.withValues(alpha: 0.28)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Icon(Icons.admin_panel_settings_outlined, color: Colors.orange),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              approvalBypassActive
+                  ? 'Testing approval bypass is active. Production mode will require real Admin approval.'
+                  : 'Driver approval is pending. Testing bypass is available until Admin approval is connected.',
+              style: const TextStyle(
+                color: Colors.white70,
+                fontSize: 11,
+                height: 1.45,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // =========================================================
+  // ONLINE CONTROL
+  // =========================================================
+
+  Widget _buildOnlineControl({
+    required bool isOnline,
+    required bool hasActiveRide,
+  }) {
+    return Container(
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        color: darkCard,
+        borderRadius: BorderRadius.circular(22),
+      ),
+      child: Column(
+        children: [
+          Container(
+            width: 82,
+            height: 82,
+            decoration: BoxDecoration(
+              color: (isOnline ? Colors.green : Colors.grey).withValues(
+                alpha: 0.13,
+              ),
+              shape: BoxShape.circle,
+            ),
+            child: Icon(
+              isOnline
+                  ? Icons.power_settings_new_rounded
+                  : Icons.power_off_rounded,
+              color: isOnline ? Colors.green : Colors.grey,
+              size: 44,
+            ),
+          ),
+          const SizedBox(height: 14),
+          Text(
+            isOnline
+                ? hasActiveRide
+                      ? 'Ride in progress'
+                      : 'You are Online'
+                : 'You are Offline',
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 21,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          const SizedBox(height: 7),
+          Text(
+            isOnline
+                ? hasActiveRide
+                      ? 'Complete your current ride before going offline.'
+                      : 'You can receive matching ride requests.'
+                : 'Go online when you are ready to drive.',
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              color: Colors.grey.shade400,
+              fontSize: 12,
+              height: 1.4,
+            ),
+          ),
+          const SizedBox(height: 18),
+          SizedBox(
+            width: double.infinity,
+            height: 55,
+            child: ElevatedButton(
+              onPressed: _isUpdatingStatus
+                  ? null
+                  : () {
+                      _toggleOnlineStatus(currentOnlineStatus: isOnline);
+                    },
+              style: ElevatedButton.styleFrom(
+                backgroundColor: isOnline ? Colors.red : yellow,
+                foregroundColor: isOnline ? Colors.white : Colors.black,
+                disabledBackgroundColor: Colors.grey.shade700,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(15),
+                ),
+              ),
+              child: _isUpdatingStatus
+                  ? const SizedBox(
+                      width: 22,
+                      height: 22,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2.5,
+                        color: Colors.white,
+                      ),
+                    )
+                  : Text(
+                      isOnline ? 'GO OFFLINE' : 'GO ONLINE',
+                      style: const TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // =========================================================
+  // AVAILABILITY
+  // =========================================================
+
+  Widget _buildAvailabilityCard({
+    required bool isOnline,
+    required bool isAvailable,
+    required bool hasActiveRide,
+  }) {
+    final bool canChange = isOnline && !hasActiveRide;
+
+    return Container(
+      padding: const EdgeInsets.all(17),
+      decoration: BoxDecoration(
+        color: darkCard,
+        borderRadius: BorderRadius.circular(18),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 47,
+            height: 47,
+            decoration: BoxDecoration(
+              color: (isAvailable ? Colors.green : Colors.orange).withValues(
+                alpha: 0.13,
+              ),
+              shape: BoxShape.circle,
+            ),
+            child: Icon(
+              isAvailable ? Icons.check_rounded : Icons.pause_rounded,
+              color: isAvailable ? Colors.green : Colors.orange,
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Ride availability',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 16,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  hasActiveRide
+                      ? 'Busy with active ride'
+                      : isAvailable
+                      ? 'Accepting new rides'
+                      : 'New requests paused',
+                  style: TextStyle(color: Colors.grey.shade400, fontSize: 11),
+                ),
+              ],
+            ),
+          ),
+          Switch(
+            value: isOnline && isAvailable && !hasActiveRide,
+            activeThumbColor: yellow,
+            onChanged: canChange && !_isUpdatingStatus
+                ? (_) {
+                    _toggleAvailability(
+                      isOnline: isOnline,
+                      currentAvailability: isAvailable,
+                      hasActiveRide: hasActiveRide,
+                    );
+                  }
+                : null,
+          ),
+        ],
+      ),
+    );
+  }
+
+  // =========================================================
+  // LIVE GPS STATUS
+  // =========================================================
+
+  Widget _buildGpsStatusCard({required bool isOnline}) {
+    final bool gpsActive = isOnline && _gpsStatus == 'Live GPS active';
+
+    final Color statusColor = !isOnline
+        ? Colors.grey
+        : gpsActive
+        ? Colors.green
+        : Colors.orange;
+
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: darkCard,
+        borderRadius: BorderRadius.circular(18),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 47,
+            height: 47,
+            decoration: BoxDecoration(
+              color: statusColor.withValues(alpha: 0.13),
+              shape: BoxShape.circle,
+            ),
+            child: Icon(
+              gpsActive ? Icons.gps_fixed_rounded : Icons.gps_not_fixed_rounded,
+              color: statusColor,
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Driver location',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 16,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  _gpsStatus,
+                  style: TextStyle(
+                    color: statusColor,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          if (isOnline && !gpsActive)
+            IconButton(
+              tooltip: 'Retry GPS',
+              onPressed: () {
+                _lastGpsOnlineTarget = null;
+                _scheduleGpsSync(
+                  isOnline: true,
+                  activeRideId: _lastGpsRideTarget,
+                );
+              },
+              icon: const Icon(Icons.refresh_rounded, color: yellow),
+            ),
+        ],
+      ),
+    );
+  }
+
+  // =========================================================
+  // ACTIVE RIDE
+  // =========================================================
+
+  Widget _buildActiveRideCard(RideModel ride) {
+    return InkWell(
+      borderRadius: BorderRadius.circular(19),
+      onTap: () {
+        _openRideRequests(isOnline: true, hasActiveRide: true);
+      },
+      child: Container(
+        padding: const EdgeInsets.all(17),
+        decoration: BoxDecoration(
+          color: Colors.orange.withValues(alpha: 0.10),
+          borderRadius: BorderRadius.circular(19),
+          border: Border.all(color: Colors.orange.withValues(alpha: 0.35)),
+        ),
+        child: Row(
+          children: [
+            Container(
+              width: 49,
+              height: 49,
+              decoration: BoxDecoration(
+                color: Colors.orange.withValues(alpha: 0.15),
+                shape: BoxShape.circle,
+              ),
+              child: const Icon(Icons.navigation_rounded, color: Colors.orange),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'Active Ride',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    _rideStatusName(ride.status),
+                    style: const TextStyle(
+                      color: Colors.orange,
+                      fontSize: 11,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const Icon(Icons.chevron_right_rounded, color: Colors.orange),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // =========================================================
+  // RIDE REQUESTS
+  // =========================================================
+
+  Widget _buildRideRequestsCard({
+    required bool isOnline,
+    required bool isAvailable,
+    required bool hasActiveRide,
+  }) {
+    final bool enabled = isOnline || hasActiveRide;
+
+    return InkWell(
+      borderRadius: BorderRadius.circular(19),
+      onTap: enabled
+          ? () {
+              _openRideRequests(
+                isOnline: isOnline,
+                hasActiveRide: hasActiveRide,
+              );
+            }
+          : () {
+              _showMessage('Please go Online first.', Colors.orange);
+            },
+      child: Container(
+        padding: const EdgeInsets.all(17),
+        decoration: BoxDecoration(
+          color: darkCard,
+          borderRadius: BorderRadius.circular(19),
+          border: Border.all(
+            color: enabled
+                ? yellow.withValues(alpha: 0.25)
+                : Colors.transparent,
+          ),
+        ),
+        child: Row(
+          children: [
+            Container(
+              width: 51,
+              height: 51,
+              decoration: BoxDecoration(
+                color: yellow.withValues(alpha: enabled ? 0.14 : 0.06),
+                shape: BoxShape.circle,
+              ),
+              child: Icon(
+                Icons.notifications_active_rounded,
+                color: enabled ? yellow : Colors.grey,
+                size: 27,
+              ),
+            ),
+            const SizedBox(width: 13),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'Ride Requests',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    hasActiveRide
+                        ? 'Open your active ride'
+                        : isOnline && isAvailable
+                        ? 'View matching Rider requests'
+                        : isOnline
+                        ? 'Requests are paused'
+                        : 'Go online to receive rides',
+                    style: TextStyle(color: Colors.grey.shade400, fontSize: 11),
+                  ),
+                ],
+              ),
+            ),
+            Icon(
+              Icons.chevron_right_rounded,
+              color: enabled ? yellow : Colors.grey,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // =========================================================
+  // RIDE HISTORY & EARNINGS
+  // =========================================================
+
+  Widget _buildDriverReviewsCard() {
+    return InkWell(
+      borderRadius: BorderRadius.circular(19),
+      onTap: _openDriverReviews,
+      child: Container(
+        padding: const EdgeInsets.all(17),
+        decoration: BoxDecoration(
+          color: darkCard,
+          borderRadius: BorderRadius.circular(19),
+          border: Border.all(
+            color: const Color(0xFFFFB000).withValues(alpha: 0.28),
+          ),
+        ),
+        child: Row(
+          children: <Widget>[
+            Container(
+              width: 51,
+              height: 51,
+              decoration: BoxDecoration(
+                color: const Color(0xFFFFB000).withValues(alpha: 0.14),
+                shape: BoxShape.circle,
+              ),
+              child: const Icon(
+                Icons.rate_review_outlined,
+                color: Color(0xFFFFD60A),
+                size: 27,
+              ),
+            ),
+            const SizedBox(width: 13),
+            const Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  Text(
+                    'My Reviews',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  SizedBox(height: 4),
+                  Text(
+                    'View customer ratings and reply publicly',
+                    style: TextStyle(color: Colors.white54, fontSize: 11),
+                  ),
+                ],
+              ),
+            ),
+            const Icon(Icons.chevron_right_rounded, color: Color(0xFFFFD60A)),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildRideHistoryCard() {
+    return InkWell(
+      borderRadius: BorderRadius.circular(19),
+      onTap: _openRideHistory,
+      child: Container(
+        padding: const EdgeInsets.all(17),
+        decoration: BoxDecoration(
+          color: darkCard,
+          borderRadius: BorderRadius.circular(19),
+          border: Border.all(color: Colors.green.withValues(alpha: 0.24)),
+        ),
+        child: Row(
+          children: [
+            Container(
+              width: 51,
+              height: 51,
+              decoration: BoxDecoration(
+                color: Colors.green.withValues(alpha: 0.13),
+                shape: BoxShape.circle,
+              ),
+              child: const Icon(
+                Icons.account_balance_wallet_outlined,
+                color: Colors.greenAccent,
+                size: 27,
+              ),
+            ),
+            const SizedBox(width: 13),
+            const Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Ride History & Earnings',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  SizedBox(height: 4),
+                  Text(
+                    'View rides, fare, commission and net earnings',
+                    style: TextStyle(color: Colors.white54, fontSize: 11),
+                  ),
+                ],
+              ),
+            ),
+            const Icon(Icons.chevron_right_rounded, color: Colors.greenAccent),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // =========================================================
+  // WALLET & WITHDRAWALS
+  // =========================================================
+
+  Widget _buildWalletCard() {
+    return InkWell(
+      borderRadius: BorderRadius.circular(19),
+      onTap: _openWalletAndWithdrawals,
+      child: Container(
+        padding: const EdgeInsets.all(17),
+        decoration: BoxDecoration(
+          color: darkCard,
+          borderRadius: BorderRadius.circular(19),
+          border: Border.all(color: Colors.lightBlue.withValues(alpha: 0.24)),
+        ),
+        child: Row(
+          children: [
+            Container(
+              width: 51,
+              height: 51,
+              decoration: BoxDecoration(
+                color: Colors.lightBlue.withValues(alpha: 0.13),
+                shape: BoxShape.circle,
+              ),
+              child: const Icon(
+                Icons.payments_outlined,
+                color: Colors.lightBlueAccent,
+                size: 27,
+              ),
+            ),
+            const SizedBox(width: 13),
+            const Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Wallet & Withdrawals',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  SizedBox(height: 4),
+                  Text(
+                    'Balance, commission due and payout requests',
+                    style: TextStyle(color: Colors.white54, fontSize: 11),
+                  ),
+                ],
+              ),
+            ),
+            const Icon(
+              Icons.chevron_right_rounded,
+              color: Colors.lightBlueAccent,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // =========================================================
+  // REAL TODAY STATS
+  // =========================================================
+
+  Widget _buildTodayStats() {
+    return StreamBuilder<_DriverTodayStats>(
+      stream: _watchTodayStats(),
+      builder: (context, snapshot) {
+        final _DriverTodayStats stats =
+            snapshot.data ??
+            const _DriverTodayStats(
+              completedRides: 0,
+              grossEarnings: 0,
+              commission: 0,
+              netEarnings: 0,
+            );
+
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Today',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 19,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 11),
+            Row(
+              children: [
+                Expanded(
+                  child: _statCard(
+                    icon: Icons.account_balance_wallet_rounded,
+                    label: 'Net earnings',
+                    value: 'Rs. ${stats.netEarnings.toStringAsFixed(0)}',
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: _statCard(
+                    icon: Icons.local_taxi_rounded,
+                    label: 'Completed',
+                    value: '${stats.completedRides}',
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            Row(
+              children: [
+                Expanded(
+                  child: _smallStat(
+                    label: 'Gross fare',
+                    value: 'Rs. ${stats.grossEarnings.toStringAsFixed(0)}',
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: _smallStat(
+                    label: 'Commission',
+                    value: 'Rs. ${stats.commission.toStringAsFixed(0)}',
+                  ),
+                ),
+              ],
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  Widget _statCard({
+    required IconData icon,
+    required String label,
+    required String value,
+  }) {
+    return Container(
+      padding: const EdgeInsets.all(15),
+      decoration: BoxDecoration(
+        color: darkCard,
+        borderRadius: BorderRadius.circular(16),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(icon, color: yellow, size: 26),
+          const SizedBox(height: 11),
+          Text(
+            label,
+            style: TextStyle(color: Colors.grey.shade400, fontSize: 10),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            value,
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 17,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _smallStat({required String label, required String value}) {
+    return Container(
+      padding: const EdgeInsets.all(13),
+      decoration: BoxDecoration(
+        color: softCard,
+        borderRadius: BorderRadius.circular(14),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            label,
+            style: TextStyle(color: Colors.grey.shade500, fontSize: 9),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            value,
+            style: const TextStyle(
+              color: Colors.white,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // =========================================================
+  // ERROR NOTICE
+  // =========================================================
+
+  Widget _buildErrorNotice(Object? error) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 16),
+      padding: const EdgeInsets.all(13),
+      decoration: BoxDecoration(
+        color: Colors.red.withValues(alpha: 0.10),
+        borderRadius: BorderRadius.circular(14),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.cloud_off_rounded, color: Colors.red),
+          const SizedBox(width: 9),
+          Expanded(
+            child: Text(
+              _cleanError(error ?? 'Connection error'),
+              style: const TextStyle(color: Colors.white70, fontSize: 11),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // =========================================================
+  // REAL CONNECTION NOTICE
+  // =========================================================
+
+  Widget _buildRealConnectionNotice() {
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: Colors.green.withValues(alpha: 0.07),
+        borderRadius: BorderRadius.circular(15),
+      ),
+      child: const Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(Icons.cloud_done_rounded, color: Colors.green, size: 20),
+          SizedBox(width: 9),
+          Expanded(
+            child: Text(
+              'Online status, availability, active ride and today statistics are connected to real Firestore. Testing approval bypass will be removed after Admin approval connection.',
+              style: TextStyle(
+                color: Colors.white70,
+                fontSize: 11,
+                height: 1.45,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  String _rideStatusName(String status) {
+    switch (status) {
+      case RideModel.driverAssigned:
+        return 'Ride accepted';
+      case RideModel.driverArriving:
+        return 'Going to pickup';
+      case RideModel.driverArrived:
+        return 'Driver arrived';
+      case RideModel.rideStarted:
+        return 'Ride in progress';
+      default:
+        return 'Active ride';
+    }
+  }
+}
+
+// ===========================================================
+// TODAY STATS
+// ===========================================================
+
+class _DriverTodayStats {
+  final int completedRides;
+  final double grossEarnings;
+  final double commission;
+  final double netEarnings;
+
+  const _DriverTodayStats({
+    required this.completedRides,
+    required this.grossEarnings,
+    required this.commission,
+    required this.netEarnings,
+  });
+}

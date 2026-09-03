@@ -1,0 +1,1200 @@
+// lib/food/restaurant_partner/services/food_item_service.dart
+// =============================================================
+// SWAT RIDE - FOOD DELIVERY
+// Restaurant Partner Food Item Firestore Service
+//
+// Connected with:
+// - RestaurantFoodItemModel
+// - FoodCategoryService
+//
+// Firestore structure:
+// food_restaurants/{restaurantId}/menu_items/{foodItemId}
+//
+// Real Firestore CRUD is enabled.
+// Firebase Storage image uploads remain temporarily bypassed.
+// =============================================================
+
+import 'package:cloud_firestore/cloud_firestore.dart';
+
+import '../models/food_item_model.dart';
+
+class FoodItemService {
+  FoodItemService({
+    FirebaseFirestore? firestore,
+  }) : _firestore = firestore ?? FirebaseFirestore.instance;
+
+  final FirebaseFirestore _firestore;
+
+  static const String restaurantsCollection =
+      'food_restaurants';
+
+  static const String foodItemsSubcollection =
+      'menu_items';
+
+  CollectionReference<Map<String, dynamic>> _itemsRef(
+    String restaurantId,
+  ) {
+    return _firestore
+        .collection(restaurantsCollection)
+        .doc(restaurantId)
+        .collection(foodItemsSubcollection);
+  }
+
+  // ===========================================================
+  // CREATE FOOD ITEM
+  // ===========================================================
+
+  Future<String> createFoodItem(
+    RestaurantFoodItemModel item,
+  ) async {
+    _validateRestaurantId(item.restaurantId);
+    _validateRequiredFields(item);
+
+    try {
+      final CollectionReference<Map<String, dynamic>> reference =
+          _itemsRef(item.restaurantId);
+
+      final DocumentReference<Map<String, dynamic>> document =
+          item.id.trim().isEmpty
+              ? reference.doc()
+              : reference.doc(item.id);
+
+      final DateTime now = DateTime.now();
+
+      final RestaurantFoodItemModel data =
+          item.copyWith(
+        id: document.id,
+        name: item.name.trim(),
+        description: item.description.trim(),
+        shortDescription:
+            item.shortDescription.trim(),
+        updatedAt: now,
+      );
+
+      await _firestore.runTransaction(
+        (Transaction transaction) async {
+          transaction.set(
+            document,
+            data.toMap(),
+            SetOptions(merge: false),
+          );
+
+          if (data.categoryId.trim().isNotEmpty) {
+            final DocumentReference<Map<String, dynamic>>
+                categoryDocument = _firestore
+                    .collection(restaurantsCollection)
+                    .doc(data.restaurantId)
+                    .collection('menu_categories')
+                    .doc(data.categoryId);
+
+            final DocumentSnapshot<Map<String, dynamic>>
+                categorySnapshot =
+                await transaction.get(categoryDocument);
+
+            if (categorySnapshot.exists) {
+              final int currentCount = _intValue(
+                categorySnapshot.data()?['totalItems'],
+              );
+
+              transaction.update(
+                categoryDocument,
+                <String, dynamic>{
+                  'totalItems': currentCount + 1,
+                  'updatedAt':
+                      now.toIso8601String(),
+                },
+              );
+            }
+          }
+        },
+      );
+
+      return document.id;
+    } on FirebaseException catch (error) {
+      throw FoodItemServiceException(
+        message: _firebaseMessage(error),
+        code: error.code,
+      );
+    } on FoodItemServiceException {
+      rethrow;
+    } catch (error) {
+      throw FoodItemServiceException(
+        message: 'Unable to create food item: $error',
+      );
+    }
+  }
+
+  // ===========================================================
+  // GET SINGLE FOOD ITEM
+  // ===========================================================
+
+  Future<RestaurantFoodItemModel?> getFoodItemById({
+    required String restaurantId,
+    required String foodItemId,
+  }) async {
+    if (restaurantId.trim().isEmpty ||
+        foodItemId.trim().isEmpty) {
+      return null;
+    }
+
+    try {
+      final DocumentSnapshot<Map<String, dynamic>> snapshot =
+          await _itemsRef(restaurantId)
+              .doc(foodItemId)
+              .get();
+
+      if (!snapshot.exists || snapshot.data() == null) {
+        return null;
+      }
+
+      return _itemFromSnapshot(
+        snapshot,
+        restaurantId: restaurantId,
+      );
+    } on FirebaseException catch (error) {
+      throw FoodItemServiceException(
+        message: _firebaseMessage(error),
+        code: error.code,
+      );
+    }
+  }
+
+  Stream<RestaurantFoodItemModel?> watchFoodItemById({
+    required String restaurantId,
+    required String foodItemId,
+  }) {
+    if (restaurantId.trim().isEmpty ||
+        foodItemId.trim().isEmpty) {
+      return Stream<RestaurantFoodItemModel?>.value(null);
+    }
+
+    return _itemsRef(restaurantId)
+        .doc(foodItemId)
+        .snapshots()
+        .map(
+      (DocumentSnapshot<Map<String, dynamic>> snapshot) {
+        if (!snapshot.exists || snapshot.data() == null) {
+          return null;
+        }
+
+        return _itemFromSnapshot(
+          snapshot,
+          restaurantId: restaurantId,
+        );
+      },
+    );
+  }
+
+  // ===========================================================
+  // OWNER FOOD ITEM LISTS
+  // ===========================================================
+
+  Stream<List<RestaurantFoodItemModel>>
+      watchOwnerFoodItems(
+    String restaurantId,
+  ) {
+    if (restaurantId.trim().isEmpty) {
+      return Stream<
+          List<RestaurantFoodItemModel>>.value(
+        const <RestaurantFoodItemModel>[],
+      );
+    }
+
+    return _itemsRef(restaurantId)
+        .snapshots()
+        .map(
+          (QuerySnapshot<Map<String, dynamic>> snapshot) =>
+              _itemListFromQuery(
+            snapshot,
+            restaurantId: restaurantId,
+            customerOnly: false,
+          ),
+        );
+  }
+
+  Stream<List<RestaurantFoodItemModel>>
+      watchOwnerFoodItemsByCategory({
+    required String restaurantId,
+    required String categoryId,
+  }) {
+    if (restaurantId.trim().isEmpty) {
+      return Stream<
+          List<RestaurantFoodItemModel>>.value(
+        const <RestaurantFoodItemModel>[],
+      );
+    }
+
+    Query<Map<String, dynamic>> query =
+        _itemsRef(restaurantId);
+
+    if (categoryId.trim().isNotEmpty) {
+      query = query.where(
+        'categoryId',
+        isEqualTo: categoryId,
+      );
+    }
+
+    return query.snapshots().map(
+          (QuerySnapshot<Map<String, dynamic>> snapshot) =>
+              _itemListFromQuery(
+            snapshot,
+            restaurantId: restaurantId,
+            customerOnly: false,
+          ),
+        );
+  }
+
+  Future<List<RestaurantFoodItemModel>>
+      getOwnerFoodItems(
+    String restaurantId,
+  ) async {
+    _validateRestaurantId(restaurantId);
+
+    try {
+      final QuerySnapshot<Map<String, dynamic>> snapshot =
+          await _itemsRef(restaurantId).get();
+
+      return _itemListFromQuery(
+        snapshot,
+        restaurantId: restaurantId,
+        customerOnly: false,
+      );
+    } on FirebaseException catch (error) {
+      throw FoodItemServiceException(
+        message: _firebaseMessage(error),
+        code: error.code,
+      );
+    }
+  }
+
+  // ===========================================================
+  // CUSTOMER FOOD ITEM LISTS
+  // ===========================================================
+
+  Stream<List<RestaurantFoodItemModel>>
+      watchCustomerFoodItems(
+    String restaurantId,
+  ) {
+    if (restaurantId.trim().isEmpty) {
+      return Stream<
+          List<RestaurantFoodItemModel>>.value(
+        const <RestaurantFoodItemModel>[],
+      );
+    }
+
+    return _itemsRef(restaurantId)
+        .where('status', isEqualTo: 'active')
+        .where('isAvailable', isEqualTo: true)
+        .where('isVisible', isEqualTo: true)
+        .where('approvedByAdmin', isEqualTo: true)
+        .snapshots()
+        .map(
+          (QuerySnapshot<Map<String, dynamic>> snapshot) =>
+              _itemListFromQuery(
+            snapshot,
+            restaurantId: restaurantId,
+            customerOnly: true,
+          ),
+        );
+  }
+
+  Stream<List<RestaurantFoodItemModel>>
+      watchCustomerFoodItemsByCategory({
+    required String restaurantId,
+    required String categoryId,
+  }) {
+    if (restaurantId.trim().isEmpty) {
+      return Stream<
+          List<RestaurantFoodItemModel>>.value(
+        const <RestaurantFoodItemModel>[],
+      );
+    }
+
+    Query<Map<String, dynamic>> query =
+        _itemsRef(restaurantId)
+            .where('status', isEqualTo: 'active')
+            .where('isAvailable', isEqualTo: true)
+            .where('isVisible', isEqualTo: true)
+            .where('approvedByAdmin', isEqualTo: true);
+
+    if (categoryId.trim().isNotEmpty) {
+      query = query.where(
+        'categoryId',
+        isEqualTo: categoryId,
+      );
+    }
+
+    return query.snapshots().map(
+          (QuerySnapshot<Map<String, dynamic>> snapshot) =>
+              _itemListFromQuery(
+            snapshot,
+            restaurantId: restaurantId,
+            customerOnly: true,
+          ),
+        );
+  }
+
+  Stream<List<RestaurantFoodItemModel>>
+      watchFeaturedFoodItems(
+    String restaurantId, {
+    int limit = 20,
+  }) {
+    if (restaurantId.trim().isEmpty) {
+      return Stream<
+          List<RestaurantFoodItemModel>>.value(
+        const <RestaurantFoodItemModel>[],
+      );
+    }
+
+    return _itemsRef(restaurantId)
+        .where('status', isEqualTo: 'active')
+        .where('isAvailable', isEqualTo: true)
+        .where('isVisible', isEqualTo: true)
+        .where('approvedByAdmin', isEqualTo: true)
+        .where('isFeatured', isEqualTo: true)
+        .limit(limit)
+        .snapshots()
+        .map(
+          (QuerySnapshot<Map<String, dynamic>> snapshot) =>
+              _itemListFromQuery(
+            snapshot,
+            restaurantId: restaurantId,
+            customerOnly: true,
+          ),
+        );
+  }
+
+  Stream<List<RestaurantFoodItemModel>>
+      watchPopularFoodItems(
+    String restaurantId, {
+    int limit = 20,
+  }) {
+    if (restaurantId.trim().isEmpty) {
+      return Stream<
+          List<RestaurantFoodItemModel>>.value(
+        const <RestaurantFoodItemModel>[],
+      );
+    }
+
+    return _itemsRef(restaurantId)
+        .where('status', isEqualTo: 'active')
+        .where('isAvailable', isEqualTo: true)
+        .where('isVisible', isEqualTo: true)
+        .where('approvedByAdmin', isEqualTo: true)
+        .where('isPopular', isEqualTo: true)
+        .limit(limit)
+        .snapshots()
+        .map(
+          (QuerySnapshot<Map<String, dynamic>> snapshot) =>
+              _itemListFromQuery(
+            snapshot,
+            restaurantId: restaurantId,
+            customerOnly: true,
+          ),
+        );
+  }
+
+  // ===========================================================
+  // SEARCH
+  // ===========================================================
+
+  Future<List<RestaurantFoodItemModel>> searchFoodItems({
+    required String restaurantId,
+    required String query,
+    bool customerOnly = false,
+  }) async {
+    final List<RestaurantFoodItemModel> items =
+        await getOwnerFoodItems(restaurantId);
+
+    final String normalized =
+        query.trim().toLowerCase();
+
+    return items.where(
+      (RestaurantFoodItemModel item) {
+        if (customerOnly &&
+            !item.canShowToCustomer) {
+          return false;
+        }
+
+        if (normalized.isEmpty) {
+          return true;
+        }
+
+        final String searchable = <String>[
+          item.name,
+          item.description,
+          item.shortDescription,
+          item.spiceLevel,
+          ...item.ingredients,
+          ...item.allergens,
+          ...item.tags,
+        ].join(' ').toLowerCase();
+
+        return searchable.contains(normalized);
+      },
+    ).toList();
+  }
+
+  // ===========================================================
+  // UPDATE COMPLETE FOOD ITEM
+  // ===========================================================
+
+  Future<void> updateFoodItem(
+    RestaurantFoodItemModel item,
+  ) async {
+    _validateRestaurantId(item.restaurantId);
+    _validateRequiredFields(item);
+
+    if (item.id.trim().isEmpty) {
+      throw const FoodItemServiceException(
+        message: 'Food item ID is required.',
+      );
+    }
+
+    try {
+      final DocumentReference<Map<String, dynamic>> document =
+          _itemsRef(item.restaurantId).doc(item.id);
+
+      final DocumentSnapshot<Map<String, dynamic>> snapshot =
+          await document.get();
+
+      if (!snapshot.exists || snapshot.data() == null) {
+        throw const FoodItemServiceException(
+          message: 'Food item was not found.',
+        );
+      }
+
+      final String previousCategoryId =
+          snapshot.data()!['categoryId']
+                  ?.toString()
+                  .trim() ??
+              '';
+
+      final String nextCategoryId =
+          item.categoryId.trim();
+
+      final DateTime now = DateTime.now();
+
+      await _firestore.runTransaction(
+        (Transaction transaction) async {
+          transaction.set(
+            document,
+            item
+                .copyWith(
+                  name: item.name.trim(),
+                  description:
+                      item.description.trim(),
+                  shortDescription:
+                      item.shortDescription.trim(),
+                  updatedAt: now,
+                )
+                .toMap(),
+            SetOptions(merge: true),
+          );
+
+          if (previousCategoryId != nextCategoryId) {
+            if (previousCategoryId.isNotEmpty) {
+              await _updateCategoryCountInTransaction(
+                transaction: transaction,
+                restaurantId: item.restaurantId,
+                categoryId: previousCategoryId,
+                delta: -1,
+                now: now,
+              );
+            }
+
+            if (nextCategoryId.isNotEmpty) {
+              await _updateCategoryCountInTransaction(
+                transaction: transaction,
+                restaurantId: item.restaurantId,
+                categoryId: nextCategoryId,
+                delta: 1,
+                now: now,
+              );
+            }
+          }
+        },
+      );
+    } on FoodItemServiceException {
+      rethrow;
+    } on FirebaseException catch (error) {
+      throw FoodItemServiceException(
+        message: _firebaseMessage(error),
+        code: error.code,
+      );
+    } catch (error) {
+      throw FoodItemServiceException(
+        message: 'Unable to update food item: $error',
+      );
+    }
+  }
+
+  Future<void> updateFoodItemFields({
+    required String restaurantId,
+    required String foodItemId,
+    required Map<String, dynamic> fields,
+  }) async {
+    _validateRestaurantId(restaurantId);
+
+    if (foodItemId.trim().isEmpty) {
+      throw const FoodItemServiceException(
+        message: 'Food item ID is required.',
+      );
+    }
+
+    try {
+      await _itemsRef(restaurantId)
+          .doc(foodItemId)
+          .update(
+        <String, dynamic>{
+          ...fields,
+          'updatedAt':
+              DateTime.now().toIso8601String(),
+        },
+      );
+    } on FirebaseException catch (error) {
+      throw FoodItemServiceException(
+        message: _firebaseMessage(error),
+        code: error.code,
+      );
+    } catch (error) {
+      throw FoodItemServiceException(
+        message:
+            'Unable to update food item fields: $error',
+      );
+    }
+  }
+
+  // ===========================================================
+  // OWNER CONTROLS
+  // ===========================================================
+
+  Future<void> setAvailability({
+    required String restaurantId,
+    required String foodItemId,
+    required bool isAvailable,
+  }) {
+    return updateFoodItemFields(
+      restaurantId: restaurantId,
+      foodItemId: foodItemId,
+      fields: <String, dynamic>{
+        'isAvailable': isAvailable,
+        'status': isAvailable
+            ? RestaurantFoodItemStatus.active.value
+            : RestaurantFoodItemStatus.outOfStock.value,
+      },
+    );
+  }
+
+  Future<void> setVisibility({
+    required String restaurantId,
+    required String foodItemId,
+    required bool isVisible,
+  }) {
+    return updateFoodItemFields(
+      restaurantId: restaurantId,
+      foodItemId: foodItemId,
+      fields: <String, dynamic>{
+        'isVisible': isVisible,
+        'status': isVisible
+            ? RestaurantFoodItemStatus.active.value
+            : RestaurantFoodItemStatus.hidden.value,
+      },
+    );
+  }
+
+  Future<void> setFeaturedStatus({
+    required String restaurantId,
+    required String foodItemId,
+    required bool isFeatured,
+  }) {
+    return updateFoodItemFields(
+      restaurantId: restaurantId,
+      foodItemId: foodItemId,
+      fields: <String, dynamic>{
+        'isFeatured': isFeatured,
+      },
+    );
+  }
+
+  Future<void> setPopularStatus({
+    required String restaurantId,
+    required String foodItemId,
+    required bool isPopular,
+  }) {
+    return updateFoodItemFields(
+      restaurantId: restaurantId,
+      foodItemId: foodItemId,
+      fields: <String, dynamic>{
+        'isPopular': isPopular,
+      },
+    );
+  }
+
+  Future<void> updatePrice({
+    required String restaurantId,
+    required String foodItemId,
+    required double originalPrice,
+    double discountedPrice = 0,
+    bool hasDiscount = false,
+  }) {
+    final double safeOriginalPrice =
+        originalPrice < 0 ? 0 : originalPrice;
+
+    final double safeDiscountedPrice =
+        discountedPrice < 0 ? 0 : discountedPrice;
+
+    final bool validDiscount =
+        hasDiscount &&
+        safeDiscountedPrice > 0 &&
+        safeDiscountedPrice < safeOriginalPrice;
+
+    final double discountPercentage =
+        validDiscount && safeOriginalPrice > 0
+            ? ((safeOriginalPrice -
+                        safeDiscountedPrice) /
+                    safeOriginalPrice) *
+                100
+            : 0;
+
+    return updateFoodItemFields(
+      restaurantId: restaurantId,
+      foodItemId: foodItemId,
+      fields: <String, dynamic>{
+        'originalPrice': safeOriginalPrice,
+        'discountedPrice':
+            validDiscount ? safeDiscountedPrice : 0,
+        'hasDiscount': validDiscount,
+        'discountPercentage':
+            discountPercentage.clamp(0, 100),
+      },
+    );
+  }
+
+  Future<void> updateStock({
+    required String restaurantId,
+    required String foodItemId,
+    required bool trackStock,
+    required int dailyStockQuantity,
+    required int remainingStockQuantity,
+  }) {
+    final int safeDailyStock =
+        trackStock
+            ? (dailyStockQuantity < 0
+                ? 0
+                : dailyStockQuantity)
+            : -1;
+
+    final int safeRemainingStock =
+        trackStock
+            ? (remainingStockQuantity < 0
+                ? 0
+                : remainingStockQuantity)
+            : -1;
+
+    final bool outOfStock =
+        trackStock && safeRemainingStock <= 0;
+
+    return updateFoodItemFields(
+      restaurantId: restaurantId,
+      foodItemId: foodItemId,
+      fields: <String, dynamic>{
+        'trackStock': trackStock,
+        'dailyStockQuantity': safeDailyStock,
+        'remainingStockQuantity':
+            safeRemainingStock,
+        'isAvailable': !outOfStock,
+        'status': outOfStock
+            ? RestaurantFoodItemStatus.outOfStock.value
+            : RestaurantFoodItemStatus.active.value,
+      },
+    );
+  }
+
+  Future<void> updateVariants({
+    required String restaurantId,
+    required String foodItemId,
+    required List<RestaurantFoodVariantModel> variants,
+  }) {
+    return updateFoodItemFields(
+      restaurantId: restaurantId,
+      foodItemId: foodItemId,
+      fields: <String, dynamic>{
+        'variants': variants
+            .map(
+              (RestaurantFoodVariantModel variant) =>
+                  variant.toMap(),
+            )
+            .toList(),
+      },
+    );
+  }
+
+  Future<void> updateAddOns({
+    required String restaurantId,
+    required String foodItemId,
+    required List<RestaurantFoodAddOnModel> addOns,
+  }) {
+    return updateFoodItemFields(
+      restaurantId: restaurantId,
+      foodItemId: foodItemId,
+      fields: <String, dynamic>{
+        'addOns': addOns
+            .map(
+              (RestaurantFoodAddOnModel addOn) =>
+                  addOn.toMap(),
+            )
+            .toList(),
+      },
+    );
+  }
+
+  Future<void> updateLocalImages({
+    required String restaurantId,
+    required String foodItemId,
+    required String mainLocalImagePath,
+    required List<String> localImagePaths,
+  }) {
+    // Firebase Storage remains bypassed.
+    return updateFoodItemFields(
+      restaurantId: restaurantId,
+      foodItemId: foodItemId,
+      fields: <String, dynamic>{
+        'mainLocalImagePath':
+            mainLocalImagePath.trim(),
+        'localImagePaths': localImagePaths,
+      },
+    );
+  }
+
+  Future<void> updateSortOrder({
+    required String restaurantId,
+    required String foodItemId,
+    required int sortOrder,
+  }) {
+    return updateFoodItemFields(
+      restaurantId: restaurantId,
+      foodItemId: foodItemId,
+      fields: <String, dynamic>{
+        'sortOrder': sortOrder,
+      },
+    );
+  }
+
+  // ===========================================================
+  // ADMIN CONTROLS
+  // ===========================================================
+
+  Future<void> approveFoodItem({
+    required String restaurantId,
+    required String foodItemId,
+  }) {
+    return updateFoodItemFields(
+      restaurantId: restaurantId,
+      foodItemId: foodItemId,
+      fields: <String, dynamic>{
+        'approvedByAdmin': true,
+        'rejectionReason': '',
+        'status':
+            RestaurantFoodItemStatus.active.value,
+        'isVisible': true,
+      },
+    );
+  }
+
+  Future<void> rejectFoodItem({
+    required String restaurantId,
+    required String foodItemId,
+    required String reason,
+  }) {
+    return updateFoodItemFields(
+      restaurantId: restaurantId,
+      foodItemId: foodItemId,
+      fields: <String, dynamic>{
+        'approvedByAdmin': false,
+        'rejectionReason': reason.trim(),
+        'status':
+            RestaurantFoodItemStatus.rejected.value,
+        'isVisible': false,
+      },
+    );
+  }
+
+  // ===========================================================
+  // REORDER ITEMS
+  // ===========================================================
+
+  Future<void> reorderFoodItems({
+    required String restaurantId,
+    required List<RestaurantFoodItemModel> items,
+  }) async {
+    _validateRestaurantId(restaurantId);
+
+    if (items.isEmpty) {
+      return;
+    }
+
+    try {
+      final WriteBatch batch = _firestore.batch();
+      final DateTime now = DateTime.now();
+
+      for (int index = 0;
+          index < items.length;
+          index++) {
+        final RestaurantFoodItemModel item =
+            items[index];
+
+        if (item.id.trim().isEmpty) {
+          continue;
+        }
+
+        batch.update(
+          _itemsRef(restaurantId).doc(item.id),
+          <String, dynamic>{
+            'sortOrder': index,
+            'updatedAt': now.toIso8601String(),
+          },
+        );
+      }
+
+      await batch.commit();
+    } on FirebaseException catch (error) {
+      throw FoodItemServiceException(
+        message: _firebaseMessage(error),
+        code: error.code,
+      );
+    } catch (error) {
+      throw FoodItemServiceException(
+        message: 'Unable to reorder food items: $error',
+      );
+    }
+  }
+
+  // ===========================================================
+  // DELETE FOOD ITEM
+  // ===========================================================
+
+  Future<void> deleteFoodItem({
+    required String restaurantId,
+    required String foodItemId,
+  }) async {
+    _validateRestaurantId(restaurantId);
+
+    if (foodItemId.trim().isEmpty) {
+      throw const FoodItemServiceException(
+        message: 'Food item ID is required.',
+      );
+    }
+
+    try {
+      final DocumentReference<Map<String, dynamic>> document =
+          _itemsRef(restaurantId).doc(foodItemId);
+
+      final DocumentSnapshot<Map<String, dynamic>> snapshot =
+          await document.get();
+
+      if (!snapshot.exists || snapshot.data() == null) {
+        return;
+      }
+
+      final String categoryId =
+          snapshot.data()!['categoryId']
+                  ?.toString()
+                  .trim() ??
+              '';
+
+      final DateTime now = DateTime.now();
+
+      await _firestore.runTransaction(
+        (Transaction transaction) async {
+          transaction.delete(document);
+
+          if (categoryId.isNotEmpty) {
+            await _updateCategoryCountInTransaction(
+              transaction: transaction,
+              restaurantId: restaurantId,
+              categoryId: categoryId,
+              delta: -1,
+              now: now,
+            );
+          }
+        },
+      );
+    } on FirebaseException catch (error) {
+      throw FoodItemServiceException(
+        message: _firebaseMessage(error),
+        code: error.code,
+      );
+    } catch (error) {
+      throw FoodItemServiceException(
+        message: 'Unable to delete food item: $error',
+      );
+    }
+  }
+
+  // ===========================================================
+  // BATCH SAVE
+  // ===========================================================
+
+  Future<void> saveFoodItemsBatch({
+    required String restaurantId,
+    required List<RestaurantFoodItemModel> items,
+  }) async {
+    _validateRestaurantId(restaurantId);
+
+    if (items.isEmpty) {
+      return;
+    }
+
+    try {
+      final WriteBatch batch = _firestore.batch();
+      final DateTime now = DateTime.now();
+
+      for (final RestaurantFoodItemModel item in items) {
+        final DocumentReference<Map<String, dynamic>> document =
+            item.id.trim().isEmpty
+                ? _itemsRef(restaurantId).doc()
+                : _itemsRef(restaurantId).doc(item.id);
+
+        batch.set(
+          document,
+          item
+              .copyWith(
+                id: document.id,
+                restaurantId: restaurantId,
+                updatedAt: now,
+              )
+              .toMap(),
+          SetOptions(merge: true),
+        );
+      }
+
+      await batch.commit();
+    } on FirebaseException catch (error) {
+      throw FoodItemServiceException(
+        message: _firebaseMessage(error),
+        code: error.code,
+      );
+    } catch (error) {
+      throw FoodItemServiceException(
+        message: 'Unable to save food items: $error',
+      );
+    }
+  }
+
+  // ===========================================================
+  // CATEGORY COUNT HELPER
+  // ===========================================================
+
+  Future<void> _updateCategoryCountInTransaction({
+    required Transaction transaction,
+    required String restaurantId,
+    required String categoryId,
+    required int delta,
+    required DateTime now,
+  }) async {
+    final DocumentReference<Map<String, dynamic>>
+        categoryDocument = _firestore
+            .collection(restaurantsCollection)
+            .doc(restaurantId)
+            .collection('menu_categories')
+            .doc(categoryId);
+
+    final DocumentSnapshot<Map<String, dynamic>>
+        categorySnapshot =
+        await transaction.get(categoryDocument);
+
+    if (!categorySnapshot.exists) {
+      return;
+    }
+
+    final int currentCount =
+        _intValue(
+      categorySnapshot.data()?['totalItems'],
+    );
+
+    final int nextCount =
+        (currentCount + delta).clamp(0, 1 << 31);
+
+    transaction.update(
+      categoryDocument,
+      <String, dynamic>{
+        'totalItems': nextCount,
+        'updatedAt': now.toIso8601String(),
+      },
+    );
+  }
+
+  // ===========================================================
+  // INTERNAL MAPPERS
+  // ===========================================================
+
+  RestaurantFoodItemModel _itemFromSnapshot(
+    DocumentSnapshot<Map<String, dynamic>> snapshot, {
+    required String restaurantId,
+  }) {
+    final Map<String, dynamic> data =
+        Map<String, dynamic>.from(
+      snapshot.data() ?? const <String, dynamic>{},
+    );
+
+    data['id'] = snapshot.id;
+    data['restaurantId'] = restaurantId;
+
+    return RestaurantFoodItemModel.fromMap(data);
+  }
+
+  List<RestaurantFoodItemModel> _itemListFromQuery(
+    QuerySnapshot<Map<String, dynamic>> snapshot, {
+    required String restaurantId,
+    required bool customerOnly,
+  }) {
+    final List<RestaurantFoodItemModel> items =
+        snapshot.docs
+            .map(
+              (
+                DocumentSnapshot<Map<String, dynamic>>
+                    document,
+              ) =>
+                  _itemFromSnapshot(
+                document,
+                restaurantId: restaurantId,
+              ),
+            )
+            .where(
+              (RestaurantFoodItemModel item) =>
+                  !customerOnly ||
+                  item.canShowToCustomer,
+            )
+            .toList();
+
+    items.sort(
+      (
+        RestaurantFoodItemModel first,
+        RestaurantFoodItemModel second,
+      ) {
+        if (first.isFeatured != second.isFeatured) {
+          return first.isFeatured ? -1 : 1;
+        }
+
+        if (first.isPopular != second.isPopular) {
+          return first.isPopular ? -1 : 1;
+        }
+
+        final int sortComparison =
+            first.sortOrder.compareTo(
+          second.sortOrder,
+        );
+
+        if (sortComparison != 0) {
+          return sortComparison;
+        }
+
+        return first.name.toLowerCase().compareTo(
+              second.name.toLowerCase(),
+            );
+      },
+    );
+
+    return items;
+  }
+
+  // ===========================================================
+  // VALIDATION
+  // ===========================================================
+
+  void _validateRestaurantId(
+    String restaurantId,
+  ) {
+    if (restaurantId.trim().isEmpty) {
+      throw const FoodItemServiceException(
+        message: 'Restaurant ID is required.',
+      );
+    }
+  }
+
+  void _validateRequiredFields(
+    RestaurantFoodItemModel item,
+  ) {
+    if (item.name.trim().isEmpty) {
+      throw const FoodItemServiceException(
+        message: 'Food item name is required.',
+      );
+    }
+
+    if (item.categoryId.trim().isEmpty) {
+      throw const FoodItemServiceException(
+        message: 'Food category is required.',
+      );
+    }
+
+    if (item.originalPrice < 0) {
+      throw const FoodItemServiceException(
+        message: 'Food item price cannot be negative.',
+      );
+    }
+
+    if (item.preparationTimeMinutes < 0) {
+      throw const FoodItemServiceException(
+        message:
+            'Preparation time cannot be negative.',
+      );
+    }
+  }
+
+  static int _intValue(dynamic value) {
+    if (value is int) {
+      return value;
+    }
+
+    if (value is num) {
+      return value.toInt();
+    }
+
+    return int.tryParse(
+          value?.toString() ?? '',
+        ) ??
+        0;
+  }
+
+  String _firebaseMessage(
+    FirebaseException error,
+  ) {
+    switch (error.code) {
+      case 'permission-denied':
+        return 'You do not have permission to manage these food items.';
+      case 'unavailable':
+        return 'Firebase is temporarily unavailable. Please try again.';
+      case 'not-found':
+        return 'The requested food item was not found.';
+      case 'already-exists':
+        return 'This food item already exists.';
+      case 'failed-precondition':
+        return 'Firebase requires an index or another condition before this action can run.';
+      case 'aborted':
+        return 'The food item update was interrupted. Please try again.';
+      default:
+        return error.message ??
+            'A Firebase error occurred (${error.code}).';
+    }
+  }
+}
+
+class FoodItemServiceException implements Exception {
+  const FoodItemServiceException({
+    required this.message,
+    this.code = '',
+  });
+
+  final String message;
+  final String code;
+
+  @override
+  String toString() {
+    if (code.trim().isEmpty) {
+      return message;
+    }
+
+    return 'FoodItemServiceException($code): $message';
+  }
+}

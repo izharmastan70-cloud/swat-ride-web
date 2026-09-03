@@ -1,0 +1,15 @@
+{
+  "name": "swat-ride-customer-whatsapp-backend",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Provider-neutral Phase 45 Customer WhatsApp security boundary. Live provider transport intentionally disabled.",
+  "scripts": {
+    "test": "node --test"
+  },
+  "dependencies": {
+    "firebase-admin": "^13.0.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

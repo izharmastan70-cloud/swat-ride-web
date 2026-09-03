@@ -1,0 +1,363 @@
+import '../constants/agent_action_ids.dart';
+import 'agent_call_ride_booking_execution_contract.dart';
+
+class AgentCallRideBookingCustomerConfirmationStatus {
+  AgentCallRideBookingCustomerConfirmationStatus._();
+
+  static const String verified = 'VERIFIED';
+  static const String blocked = 'BLOCKED';
+}
+
+/// Exact, privacy-minimized booking scope that the customer confirms.
+///
+/// This is NOT authentication and NOT a bearer credential.
+/// Raw phone secrets and transcript text are deliberately excluded.
+class AgentCallRideBookingCustomerConfirmationScope {
+  const AgentCallRideBookingCustomerConfirmationScope({
+    required this.actionId,
+    required this.callSessionId,
+    required this.executionId,
+    required this.requestedBy,
+    required this.trustedCallerReferenceId,
+    required this.trustedContactReferenceId,
+    required this.idempotencyKey,
+    required this.pickupReferenceId,
+    required this.destinationReferenceId,
+    required this.vehicleId,
+    required this.vehicleType,
+    required this.distanceKm,
+    required this.estimatedMinutes,
+    required this.baseFare,
+    required this.estimatedFare,
+    required this.adminCommissionAmount,
+    required this.driverAvailable,
+    required this.rideServiceAvailable,
+    required this.usedTestingRouteBypass,
+    required this.fareVerifiedAt,
+    required this.fareExpiresAt,
+  });
+
+  final String actionId;
+  final String callSessionId;
+  final String executionId;
+  final String requestedBy;
+  final String trustedCallerReferenceId;
+  final String trustedContactReferenceId;
+  final String idempotencyKey;
+
+  final String pickupReferenceId;
+  final String destinationReferenceId;
+  final String vehicleId;
+  final String vehicleType;
+
+  final double distanceKm;
+  final int estimatedMinutes;
+  final double baseFare;
+  final double estimatedFare;
+  final double adminCommissionAmount;
+
+  final bool driverAvailable;
+  final bool rideServiceAvailable;
+  final bool usedTestingRouteBypass;
+
+  final DateTime fareVerifiedAt;
+  final DateTime fareExpiresAt;
+
+  factory AgentCallRideBookingCustomerConfirmationScope.fromExecutionRequest({
+    required AgentCallRideBookingExecutionRequest request,
+    required String callSessionId,
+    required String requestedBy,
+  }) {
+    final fare = request.fareVerification;
+
+    return AgentCallRideBookingCustomerConfirmationScope(
+      actionId: AgentActionId.createCallRideBooking,
+      callSessionId: callSessionId.trim(),
+      executionId: request.executionId.trim(),
+      requestedBy: requestedBy.trim(),
+      trustedCallerReferenceId: request.trustedCallerReferenceId.trim(),
+      trustedContactReferenceId: request.trustedContactReferenceId.trim(),
+      idempotencyKey: request.idempotencyKey.trim(),
+      pickupReferenceId: fare.pickupReferenceId.trim(),
+      destinationReferenceId: fare.destinationReferenceId.trim(),
+      vehicleId: fare.vehicleId.trim(),
+      vehicleType: fare.vehicleType.trim(),
+      distanceKm: fare.distanceKm,
+      estimatedMinutes: fare.estimatedMinutes,
+      baseFare: fare.baseFare,
+      estimatedFare: fare.estimatedFare,
+      adminCommissionAmount: fare.adminCommissionAmount,
+      driverAvailable: fare.driverAvailable,
+      rideServiceAvailable: fare.rideServiceAvailable,
+      usedTestingRouteBypass: fare.usedTestingRouteBypass,
+      fareVerifiedAt: fare.verifiedAt.toUtc(),
+      fareExpiresAt: fare.expiresAt.toUtc(),
+    );
+  }
+
+  void validate() {
+    if (actionId != AgentActionId.createCallRideBooking) {
+      throw const AgentCallRideBookingCustomerConfirmationException(
+        'Customer confirmation scope must be for call.create_ride_booking.',
+      );
+    }
+
+    if (callSessionId.trim().isEmpty ||
+        executionId.trim().isEmpty ||
+        requestedBy.trim().isEmpty ||
+        trustedCallerReferenceId.trim().isEmpty ||
+        trustedContactReferenceId.trim().isEmpty ||
+        idempotencyKey.trim().isEmpty ||
+        pickupReferenceId.trim().isEmpty ||
+        destinationReferenceId.trim().isEmpty ||
+        vehicleId.trim().isEmpty ||
+        vehicleType.trim().isEmpty) {
+      throw const AgentCallRideBookingCustomerConfirmationException(
+        'Complete trusted customer confirmation binding is required.',
+      );
+    }
+
+    if (pickupReferenceId.trim() == destinationReferenceId.trim()) {
+      throw const AgentCallRideBookingCustomerConfirmationException(
+        'Pickup and destination confirmation references must differ.',
+      );
+    }
+
+    if (distanceKm < 0 ||
+        estimatedMinutes < 0 ||
+        baseFare < 0 ||
+        estimatedFare < 0 ||
+        adminCommissionAmount < 0) {
+      throw const AgentCallRideBookingCustomerConfirmationException(
+        'Confirmed fare scope cannot contain negative values.',
+      );
+    }
+
+    if (!fareExpiresAt.toUtc().isAfter(fareVerifiedAt.toUtc())) {
+      throw const AgentCallRideBookingCustomerConfirmationException(
+        'Confirmed fare expiry must be after verification time.',
+      );
+    }
+  }
+
+  bool exactlyMatches(AgentCallRideBookingCustomerConfirmationScope other) {
+    return actionId == other.actionId &&
+        callSessionId == other.callSessionId &&
+        executionId == other.executionId &&
+        requestedBy == other.requestedBy &&
+        trustedCallerReferenceId == other.trustedCallerReferenceId &&
+        trustedContactReferenceId == other.trustedContactReferenceId &&
+        idempotencyKey == other.idempotencyKey &&
+        pickupReferenceId == other.pickupReferenceId &&
+        destinationReferenceId == other.destinationReferenceId &&
+        vehicleId == other.vehicleId &&
+        vehicleType == other.vehicleType &&
+        distanceKm == other.distanceKm &&
+        estimatedMinutes == other.estimatedMinutes &&
+        baseFare == other.baseFare &&
+        estimatedFare == other.estimatedFare &&
+        adminCommissionAmount == other.adminCommissionAmount &&
+        driverAvailable == other.driverAvailable &&
+        rideServiceAvailable == other.rideServiceAvailable &&
+        usedTestingRouteBypass == other.usedTestingRouteBypass &&
+        fareVerifiedAt.toUtc() == other.fareVerifiedAt.toUtc() &&
+        fareExpiresAt.toUtc() == other.fareExpiresAt.toUtc();
+  }
+
+  AgentCallRideBookingCustomerConfirmationScope copyWith({
+    String? actionId,
+    String? callSessionId,
+    String? executionId,
+    String? requestedBy,
+    String? trustedCallerReferenceId,
+    String? trustedContactReferenceId,
+    String? idempotencyKey,
+    String? pickupReferenceId,
+    String? destinationReferenceId,
+    String? vehicleId,
+    String? vehicleType,
+    double? distanceKm,
+    int? estimatedMinutes,
+    double? baseFare,
+    double? estimatedFare,
+    double? adminCommissionAmount,
+    bool? driverAvailable,
+    bool? rideServiceAvailable,
+    bool? usedTestingRouteBypass,
+    DateTime? fareVerifiedAt,
+    DateTime? fareExpiresAt,
+  }) {
+    return AgentCallRideBookingCustomerConfirmationScope(
+      actionId: actionId ?? this.actionId,
+      callSessionId: callSessionId ?? this.callSessionId,
+      executionId: executionId ?? this.executionId,
+      requestedBy: requestedBy ?? this.requestedBy,
+      trustedCallerReferenceId:
+          trustedCallerReferenceId ?? this.trustedCallerReferenceId,
+      trustedContactReferenceId:
+          trustedContactReferenceId ?? this.trustedContactReferenceId,
+      idempotencyKey: idempotencyKey ?? this.idempotencyKey,
+      pickupReferenceId: pickupReferenceId ?? this.pickupReferenceId,
+      destinationReferenceId:
+          destinationReferenceId ?? this.destinationReferenceId,
+      vehicleId: vehicleId ?? this.vehicleId,
+      vehicleType: vehicleType ?? this.vehicleType,
+      distanceKm: distanceKm ?? this.distanceKm,
+      estimatedMinutes: estimatedMinutes ?? this.estimatedMinutes,
+      baseFare: baseFare ?? this.baseFare,
+      estimatedFare: estimatedFare ?? this.estimatedFare,
+      adminCommissionAmount:
+          adminCommissionAmount ?? this.adminCommissionAmount,
+      driverAvailable: driverAvailable ?? this.driverAvailable,
+      rideServiceAvailable: rideServiceAvailable ?? this.rideServiceAvailable,
+      usedTestingRouteBypass:
+          usedTestingRouteBypass ?? this.usedTestingRouteBypass,
+      fareVerifiedAt: fareVerifiedAt ?? this.fareVerifiedAt,
+      fareExpiresAt: fareExpiresAt ?? this.fareExpiresAt,
+    );
+  }
+}
+
+/// Result returned only by a trusted confirmation verification gateway.
+///
+/// The opaque token reference is not the secret itself. Production must verify
+/// and atomically consume the server-side confirmation record.
+class AgentCallRideBookingCustomerConfirmationVerification {
+  const AgentCallRideBookingCustomerConfirmationVerification({
+    required this.status,
+    required this.code,
+    required this.tokenReferenceId,
+    required this.verificationSource,
+    required this.oneTimeConsumed,
+    required this.scope,
+    required this.verifiedAt,
+    required this.expiresAt,
+    required this.reason,
+  });
+
+  static const String trustedBackendSource =
+      'TRUSTED_BACKEND_CONFIRMATION_GATEWAY';
+
+  final String status;
+  final String code;
+  final String tokenReferenceId;
+  final String verificationSource;
+  final bool oneTimeConsumed;
+  final AgentCallRideBookingCustomerConfirmationScope scope;
+  final DateTime verifiedAt;
+  final DateTime expiresAt;
+  final String reason;
+
+  bool get isVerified =>
+      status == AgentCallRideBookingCustomerConfirmationStatus.verified;
+
+  bool get isBlocked =>
+      status == AgentCallRideBookingCustomerConfirmationStatus.blocked;
+
+  void validate() {
+    if (status != AgentCallRideBookingCustomerConfirmationStatus.verified &&
+        status != AgentCallRideBookingCustomerConfirmationStatus.blocked) {
+      throw const AgentCallRideBookingCustomerConfirmationException(
+        'Invalid customer confirmation verification status.',
+      );
+    }
+
+    if (code.trim().isEmpty) {
+      throw const AgentCallRideBookingCustomerConfirmationException(
+        'Customer confirmation verification code is required.',
+      );
+    }
+
+    scope.validate();
+
+    if (isVerified) {
+      if (tokenReferenceId.trim().isEmpty ||
+          verificationSource != trustedBackendSource ||
+          !oneTimeConsumed ||
+          reason.trim().isNotEmpty) {
+        throw const AgentCallRideBookingCustomerConfirmationException(
+          'VERIFIED confirmation requires trusted backend one-time consumption.',
+        );
+      }
+
+      if (!expiresAt.toUtc().isAfter(verifiedAt.toUtc())) {
+        throw const AgentCallRideBookingCustomerConfirmationException(
+          'Confirmation expiry must be after verification time.',
+        );
+      }
+    } else if (reason.trim().isEmpty) {
+      throw const AgentCallRideBookingCustomerConfirmationException(
+        'Blocked confirmation requires a reason.',
+      );
+    }
+  }
+
+  bool isTrustedFor({
+    required AgentCallRideBookingCustomerConfirmationScope expectedScope,
+    required String expectedTokenReferenceId,
+    required DateTime now,
+  }) {
+    if (!isVerified ||
+        verificationSource != trustedBackendSource ||
+        !oneTimeConsumed ||
+        tokenReferenceId.trim() != expectedTokenReferenceId.trim() ||
+        !scope.exactlyMatches(expectedScope)) {
+      return false;
+    }
+
+    final DateTime utcNow = now.toUtc();
+    final DateTime verified = verifiedAt.toUtc();
+    final DateTime expiry = expiresAt.toUtc();
+
+    if (verified.isAfter(utcNow) ||
+        !expiry.isAfter(utcNow) ||
+        expiry.difference(verified) > const Duration(minutes: 2)) {
+      return false;
+    }
+
+    if (verified.isBefore(expectedScope.fareVerifiedAt.toUtc()) ||
+        expiry.isAfter(expectedScope.fareExpiresAt.toUtc())) {
+      return false;
+    }
+
+    return true;
+  }
+}
+
+class AgentCallRideBookingCustomerConfirmationBoundaryResult {
+  const AgentCallRideBookingCustomerConfirmationBoundaryResult({
+    required this.status,
+    required this.code,
+    required this.tokenReferenceId,
+    required this.createdAt,
+    this.verifiedScope,
+  });
+
+  static const String ready = 'CUSTOMER_CONFIRMATION_VERIFIED_READY';
+  static const String blocked = 'CUSTOMER_CONFIRMATION_BLOCKED';
+
+  final String status;
+  final String code;
+  final String tokenReferenceId;
+  final DateTime createdAt;
+
+  /// Exact scope that passed the trusted confirmation boundary.
+  /// This is evidence for the next handoff step, not standalone authority.
+  final AgentCallRideBookingCustomerConfirmationScope? verifiedScope;
+
+  bool get isReadyForStep1G => status == ready && verifiedScope != null;
+  bool get isBlocked => status == blocked;
+
+  /// Step 1F proves confirmation only. It never performs the Ride write.
+  bool get realRideWritePerformed => false;
+}
+
+class AgentCallRideBookingCustomerConfirmationException implements Exception {
+  const AgentCallRideBookingCustomerConfirmationException(this.message);
+
+  final String message;
+
+  @override
+  String toString() =>
+      'AgentCallRideBookingCustomerConfirmationException: $message';
+}

@@ -1,0 +1,686 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:flutter/material.dart';
+
+import '../services/ride_commission_settlement_service.dart';
+
+class RideCommissionSettlementScreen extends StatefulWidget {
+  const RideCommissionSettlementScreen({
+    super.key,
+    required this.adminId,
+    this.adminName = '',
+  });
+
+  final String adminId;
+  final String adminName;
+
+  @override
+  State<RideCommissionSettlementScreen> createState() =>
+      _RideCommissionSettlementScreenState();
+}
+
+class _RideCommissionSettlementScreenState
+    extends State<RideCommissionSettlementScreen> {
+  final RideCommissionSettlementService _service =
+      RideCommissionSettlementService();
+
+  final TextEditingController _driverIdController = TextEditingController();
+  final TextEditingController _amountController = TextEditingController();
+  final TextEditingController _reasonController = TextEditingController();
+  final TextEditingController _referenceController = TextEditingController();
+  final TextEditingController _superAdminController = TextEditingController();
+
+  bool _saving = false;
+  bool _manualCredit = true;
+
+  String get _driverId => _driverIdController.text.trim();
+
+  bool get _isHighValueAdjustment {
+    final double amount = double.tryParse(_amountController.text.trim()) ?? 0;
+
+    return amount >=
+        RideCommissionSettlementService.highValueAdjustmentThreshold;
+  }
+
+  @override
+  void dispose() {
+    _driverIdController.dispose();
+    _amountController.dispose();
+    _reasonController.dispose();
+    _referenceController.dispose();
+    _superAdminController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFF090909),
+      appBar: AppBar(
+        backgroundColor: const Color(0xFF121212),
+        foregroundColor: Colors.white,
+        title: const Text('Commission Settlement'),
+      ),
+      body: ListView(
+        padding: const EdgeInsets.all(16),
+        children: <Widget>[
+          _buildInfoCard(),
+          const SizedBox(height: 14),
+          _buildDriverLookup(),
+          const SizedBox(height: 14),
+          _buildActionCard(),
+          const SizedBox(height: 22),
+          const Text(
+            'Settlement & Adjustment History',
+            style: TextStyle(
+              color: Colors.white,
+              fontSize: 18,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+          const SizedBox(height: 10),
+          _buildHistory(),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildInfoCard() {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: _cardDecoration(),
+      child: const Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Row(
+            children: <Widget>[
+              Icon(
+                Icons.account_balance_wallet_outlined,
+                color: Colors.amberAccent,
+              ),
+              SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  'Controlled Commission Operations',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 17,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          SizedBox(height: 10),
+          Text(
+            'Use settlement for outstanding driver commission. '
+            'Manual credit/debit adjustments require an explicit amount '
+            'and reason and are recorded through the settlement service.',
+            style: TextStyle(color: Colors.white70, height: 1.4),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildDriverLookup() {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: _cardDecoration(),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: <Widget>[
+          const Text(
+            'Driver',
+            style: TextStyle(color: Colors.white, fontWeight: FontWeight.w800),
+          ),
+          const SizedBox(height: 10),
+          TextField(
+            controller: _driverIdController,
+            style: const TextStyle(color: Colors.white),
+            decoration: _inputDecoration(
+              label: 'Driver ID',
+              icon: Icons.person_search_outlined,
+            ),
+            onChanged: (_) => setState(() {}),
+          ),
+          if (_driverId.isNotEmpty) ...<Widget>[
+            const SizedBox(height: 12),
+            StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+              stream: _service.watchDriver(_driverId),
+              builder: (context, snapshot) {
+                if (snapshot.hasError) {
+                  return Text(
+                    'Unable to load driver: ${snapshot.error}',
+                    style: const TextStyle(color: Colors.redAccent),
+                  );
+                }
+
+                if (!snapshot.hasData) {
+                  return const LinearProgressIndicator();
+                }
+
+                final DocumentSnapshot<Map<String, dynamic>> document =
+                    snapshot.data!;
+
+                if (!document.exists) {
+                  return const Text(
+                    'Driver record not found.',
+                    style: TextStyle(color: Colors.orangeAccent),
+                  );
+                }
+
+                final Map<String, dynamic> data =
+                    document.data() ?? <String, dynamic>{};
+
+                return Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: Colors.white.withValues(alpha: 0.05),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: <Widget>[
+                      _driverValue(
+                        'Name',
+                        _firstValue(data, <String>[
+                          'name',
+                          'driverName',
+                          'fullName',
+                        ]),
+                      ),
+                      _driverValue(
+                        'Outstanding commission',
+                        _moneyValue(data, <String>[
+                          'outstandingCommission',
+                          'commissionOutstanding',
+                          'pendingCommission',
+                        ]),
+                      ),
+                      _driverValue(
+                        'Wallet balance',
+                        _moneyValue(data, <String>['walletBalance', 'balance']),
+                      ),
+                    ],
+                  ),
+                );
+              },
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildActionCard() {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: _cardDecoration(),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: <Widget>[
+          const Text(
+            'Admin Action',
+            style: TextStyle(color: Colors.white, fontWeight: FontWeight.w800),
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _amountController,
+            keyboardType: const TextInputType.numberWithOptions(decimal: true),
+            style: const TextStyle(color: Colors.white),
+            onChanged: (_) => setState(() {}),
+            decoration: _inputDecoration(
+              label: 'Amount',
+              icon: Icons.payments_outlined,
+            ),
+          ),
+          const SizedBox(height: 10),
+          TextField(
+            controller: _reasonController,
+            maxLines: 3,
+            style: const TextStyle(color: Colors.white),
+            decoration: _inputDecoration(
+              label: 'Mandatory reason',
+              icon: Icons.notes_outlined,
+            ),
+          ),
+          const SizedBox(height: 10),
+          TextField(
+            controller: _referenceController,
+            style: const TextStyle(color: Colors.white),
+            decoration: _inputDecoration(
+              label: 'Unique adjustment reference',
+              icon: Icons.tag_outlined,
+            ),
+          ),
+          if (_isHighValueAdjustment) ...<Widget>[
+            const SizedBox(height: 10),
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.orange.withValues(alpha: 0.08),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(
+                  color: Colors.orangeAccent.withValues(alpha: 0.35),
+                ),
+              ),
+              child: const Text(
+                'High-value wallet adjustment: PKR 10,000 or above '
+                'requires Super Admin authorization.',
+                style: TextStyle(color: Colors.orangeAccent, height: 1.35),
+              ),
+            ),
+            const SizedBox(height: 10),
+            TextField(
+              controller: _superAdminController,
+              style: const TextStyle(color: Colors.white),
+              decoration: _inputDecoration(
+                label: 'Super Admin approver ID',
+                icon: Icons.admin_panel_settings_outlined,
+              ),
+            ),
+          ],
+          const SizedBox(height: 14),
+          FilledButton.icon(
+            onPressed: _saving ? null : _settle,
+            icon: const Icon(Icons.account_balance_outlined),
+            label: const Text('Settle Outstanding Commission'),
+          ),
+          const SizedBox(height: 18),
+          const Divider(color: Colors.white24),
+          const SizedBox(height: 10),
+          const Text(
+            'Manual Adjustment',
+            style: TextStyle(color: Colors.white, fontWeight: FontWeight.w800),
+          ),
+          const SizedBox(height: 8),
+          SegmentedButton<bool>(
+            segments: const <ButtonSegment<bool>>[
+              ButtonSegment<bool>(
+                value: true,
+                label: Text('Credit'),
+                icon: Icon(Icons.add_circle_outline),
+              ),
+              ButtonSegment<bool>(
+                value: false,
+                label: Text('Debit'),
+                icon: Icon(Icons.remove_circle_outline),
+              ),
+            ],
+            selected: <bool>{_manualCredit},
+            onSelectionChanged: _saving
+                ? null
+                : (Set<bool> value) {
+                    setState(() {
+                      _manualCredit = value.first;
+                    });
+                  },
+          ),
+          const SizedBox(height: 12),
+          OutlinedButton.icon(
+            onPressed: _saving ? null : _manualAdjustment,
+            icon: Icon(
+              _manualCredit
+                  ? Icons.add_circle_outline
+                  : Icons.remove_circle_outline,
+            ),
+            label: Text(
+              _manualCredit ? 'Record Manual Credit' : 'Record Manual Debit',
+            ),
+          ),
+          if (_saving) ...<Widget>[
+            const SizedBox(height: 14),
+            const LinearProgressIndicator(),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildHistory() {
+    return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+      stream: _service.watchSettlements(),
+      builder: (context, snapshot) {
+        if (snapshot.hasError) {
+          return Text(
+            'Unable to load settlement history: ${snapshot.error}',
+            style: const TextStyle(color: Colors.redAccent),
+          );
+        }
+
+        if (!snapshot.hasData) {
+          return const Center(
+            child: Padding(
+              padding: EdgeInsets.all(20),
+              child: CircularProgressIndicator(),
+            ),
+          );
+        }
+
+        final List<QueryDocumentSnapshot<Map<String, dynamic>>> documents =
+            snapshot.data!.docs;
+
+        if (documents.isEmpty) {
+          return Container(
+            padding: const EdgeInsets.all(18),
+            decoration: _cardDecoration(),
+            child: const Text(
+              'No commission settlement records yet.',
+              style: TextStyle(color: Colors.white70),
+            ),
+          );
+        }
+
+        return Column(
+          children: documents
+              .map((document) {
+                final Map<String, dynamic> data = document.data();
+
+                final String driverId = data['driverId']?.toString() ?? '-';
+
+                final String type =
+                    data['type']?.toString() ??
+                    data['action']?.toString() ??
+                    'settlement';
+
+                final String reason = data['reason']?.toString() ?? '';
+
+                final Object? amount = data['amount'];
+
+                final String admin =
+                    data['adminName']?.toString().trim().isNotEmpty == true
+                    ? data['adminName'].toString()
+                    : data['adminId']?.toString() ?? '-';
+
+                return Container(
+                  width: double.infinity,
+                  margin: const EdgeInsets.only(bottom: 10),
+                  padding: const EdgeInsets.all(14),
+                  decoration: _cardDecoration(),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: <Widget>[
+                      Text(
+                        type.toUpperCase(),
+                        style: const TextStyle(
+                          color: Colors.amberAccent,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                      const SizedBox(height: 7),
+                      Text(
+                        'Driver: $driverId',
+                        style: const TextStyle(color: Colors.white),
+                      ),
+                      Text(
+                        'Amount: ${_formatAmount(amount)}',
+                        style: const TextStyle(color: Colors.white70),
+                      ),
+                      Text(
+                        'Admin: $admin',
+                        style: const TextStyle(color: Colors.white70),
+                      ),
+                      if (reason.isNotEmpty)
+                        Text(
+                          'Reason: $reason',
+                          style: const TextStyle(color: Colors.white70),
+                        ),
+                    ],
+                  ),
+                );
+              })
+              .toList(growable: false),
+        );
+      },
+    );
+  }
+
+  Future<void> _settle() async {
+    final _ActionInput? input = _validateInput();
+
+    if (input == null) {
+      return;
+    }
+
+    setState(() {
+      _saving = true;
+    });
+
+    try {
+      await _service.settleOutstandingCommission(
+        driverId: input.driverId,
+        amount: input.amount,
+        adminId: widget.adminId,
+        adminName: widget.adminName,
+        reason: input.reason,
+      );
+
+      _clearActionFields();
+
+      if (!mounted) {
+        return;
+      }
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Commission settlement recorded.')),
+      );
+    } catch (error) {
+      _showError(error);
+    } finally {
+      if (mounted) {
+        setState(() {
+          _saving = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _manualAdjustment() async {
+    final _ActionInput? input = _validateInput();
+
+    if (input == null) {
+      return;
+    }
+
+    final String reference = _referenceController.text.trim();
+
+    if (reference.isEmpty) {
+      _message('Unique adjustment reference is required.');
+      return;
+    }
+
+    if (_isHighValueAdjustment && _superAdminController.text.trim().isEmpty) {
+      _message(
+        'Super Admin authorization is required for high-value adjustments.',
+      );
+      return;
+    }
+
+    setState(() {
+      _saving = true;
+    });
+
+    try {
+      await _service.recordManualAdjustment(
+        driverId: input.driverId,
+        amount: input.amount,
+        isCredit: _manualCredit,
+        adminId: widget.adminId,
+        adminName: widget.adminName,
+        reason: input.reason,
+        reference: _referenceController.text.trim(),
+        superAdminApprovedBy: _superAdminController.text.trim(),
+      );
+
+      _clearActionFields();
+
+      if (!mounted) {
+        return;
+      }
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            _manualCredit
+                ? 'Manual credit recorded.'
+                : 'Manual debit recorded.',
+          ),
+        ),
+      );
+    } catch (error) {
+      _showError(error);
+    } finally {
+      if (mounted) {
+        setState(() {
+          _saving = false;
+        });
+      }
+    }
+  }
+
+  _ActionInput? _validateInput() {
+    final String driverId = _driverIdController.text.trim();
+    final String reason = _reasonController.text.trim();
+    final double? amount = double.tryParse(_amountController.text.trim());
+
+    if (driverId.isEmpty) {
+      _message('Driver ID is required.');
+      return null;
+    }
+
+    if (amount == null || !amount.isFinite || amount <= 0) {
+      _message('Enter a valid amount greater than zero.');
+      return null;
+    }
+
+    if (reason.isEmpty) {
+      _message('Admin reason is required.');
+      return null;
+    }
+
+    if (widget.adminId.trim().isEmpty) {
+      _message('Admin identity is missing.');
+      return null;
+    }
+
+    return _ActionInput(driverId: driverId, amount: amount, reason: reason);
+  }
+
+  void _clearActionFields() {
+    _amountController.clear();
+    _reasonController.clear();
+    _referenceController.clear();
+    _superAdminController.clear();
+  }
+
+  void _showError(Object error) {
+    if (!mounted) {
+      return;
+    }
+
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text('$error')));
+  }
+
+  void _message(String message) {
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  Widget _driverValue(String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 5),
+      child: Text(
+        '$label: $value',
+        style: const TextStyle(color: Colors.white70),
+      ),
+    );
+  }
+
+  String _firstValue(Map<String, dynamic> data, List<String> keys) {
+    for (final String key in keys) {
+      final Object? value = data[key];
+
+      if (value != null && value.toString().trim().isNotEmpty) {
+        return value.toString();
+      }
+    }
+
+    return '-';
+  }
+
+  String _moneyValue(Map<String, dynamic> data, List<String> keys) {
+    for (final String key in keys) {
+      final Object? value = data[key];
+
+      if (value is num) {
+        return 'PKR ${value.toStringAsFixed(2)}';
+      }
+
+      final double? parsed = double.tryParse(value?.toString() ?? '');
+
+      if (parsed != null) {
+        return 'PKR ${parsed.toStringAsFixed(2)}';
+      }
+    }
+
+    return '-';
+  }
+
+  String _formatAmount(Object? value) {
+    if (value is num) {
+      return 'PKR ${value.toStringAsFixed(2)}';
+    }
+
+    final double? parsed = double.tryParse(value?.toString() ?? '');
+
+    if (parsed != null) {
+      return 'PKR ${parsed.toStringAsFixed(2)}';
+    }
+
+    return value?.toString() ?? '-';
+  }
+
+  InputDecoration _inputDecoration({
+    required String label,
+    required IconData icon,
+  }) {
+    return InputDecoration(
+      labelText: label,
+      labelStyle: const TextStyle(color: Colors.white60),
+      prefixIcon: Icon(icon, color: Colors.white60),
+      filled: true,
+      fillColor: Colors.white.withValues(alpha: 0.05),
+      enabledBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(12),
+        borderSide: const BorderSide(color: Colors.white24),
+      ),
+      focusedBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(12),
+        borderSide: const BorderSide(color: Colors.amberAccent),
+      ),
+    );
+  }
+
+  BoxDecoration _cardDecoration() {
+    return BoxDecoration(
+      color: const Color(0xFF191919),
+      borderRadius: BorderRadius.circular(14),
+      border: Border.all(color: Colors.white12),
+    );
+  }
+}
+
+class _ActionInput {
+  const _ActionInput({
+    required this.driverId,
+    required this.amount,
+    required this.reason,
+  });
+
+  final String driverId;
+  final double amount;
+  final String reason;
+}

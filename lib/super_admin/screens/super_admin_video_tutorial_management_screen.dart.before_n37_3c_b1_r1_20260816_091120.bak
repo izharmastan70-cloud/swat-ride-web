@@ -1,0 +1,311 @@
+import 'package:flutter/material.dart';
+
+import '../../help/models/help_video_tutorial_model.dart';
+import '../services/super_admin_video_tutorial_service.dart';
+
+class SuperAdminVideoTutorialManagementScreen extends StatefulWidget {
+  const SuperAdminVideoTutorialManagementScreen({
+    super.key,
+    required this.adminId,
+  });
+
+  final String adminId;
+
+  @override
+  State<SuperAdminVideoTutorialManagementScreen> createState() =>
+      _SuperAdminVideoTutorialManagementScreenState();
+}
+
+class _SuperAdminVideoTutorialManagementScreenState
+    extends State<SuperAdminVideoTutorialManagementScreen> {
+  final SuperAdminVideoTutorialService _service =
+      SuperAdminVideoTutorialService();
+
+  Future<void> _openEditor({HelpVideoTutorialModel? tutorial}) async {
+    final TextEditingController titleController = TextEditingController(
+      text: tutorial?.title ?? '',
+    );
+
+    final TextEditingController descriptionController = TextEditingController(
+      text: tutorial?.description ?? '',
+    );
+
+    final TextEditingController urlController = TextEditingController(
+      text: tutorial?.videoUrl ?? '',
+    );
+
+    final TextEditingController categoryController = TextEditingController(
+      text: tutorial?.category ?? 'general',
+    );
+
+    final TextEditingController orderController = TextEditingController(
+      text: (tutorial?.displayOrder ?? 0).toString(),
+    );
+
+    bool isEnabled = tutorial?.isEnabled ?? false;
+
+    try {
+      final bool? saved = await showDialog<bool>(
+        context: context,
+        builder: (dialogContext) {
+          return StatefulBuilder(
+            builder: (context, setDialogState) {
+              return AlertDialog(
+                title: Text(
+                  tutorial == null
+                      ? 'Add Video Tutorial'
+                      : 'Edit Video Tutorial',
+                ),
+                content: SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: <Widget>[
+                      TextField(
+                        controller: titleController,
+                        decoration: const InputDecoration(labelText: 'Title'),
+                      ),
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller: descriptionController,
+                        minLines: 2,
+                        maxLines: 4,
+                        decoration: const InputDecoration(
+                          labelText: 'Description',
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller: urlController,
+                        keyboardType: TextInputType.url,
+                        decoration: const InputDecoration(
+                          labelText: 'HTTPS video URL',
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller: categoryController,
+                        decoration: const InputDecoration(
+                          labelText: 'Category',
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller: orderController,
+                        keyboardType: TextInputType.number,
+                        decoration: const InputDecoration(
+                          labelText: 'Display order',
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      SwitchListTile(
+                        contentPadding: EdgeInsets.zero,
+                        title: const Text('Enabled for customers'),
+                        value: isEnabled,
+                        onChanged: (value) {
+                          setDialogState(() {
+                            isEnabled = value;
+                          });
+                        },
+                      ),
+                    ],
+                  ),
+                ),
+                actions: <Widget>[
+                  TextButton(
+                    onPressed: () {
+                      Navigator.of(dialogContext).pop(false);
+                    },
+                    child: const Text('Cancel'),
+                  ),
+                  FilledButton(
+                    onPressed: () async {
+                      final int? displayOrder = int.tryParse(
+                        orderController.text.trim(),
+                      );
+
+                      if (displayOrder == null || displayOrder < 0) {
+                        ScaffoldMessenger.of(this.context).showSnackBar(
+                          const SnackBar(
+                            content: Text(
+                              'Display order must be 0 or greater.',
+                            ),
+                          ),
+                        );
+                        return;
+                      }
+
+                      try {
+                        if (tutorial == null) {
+                          await _service.createTutorial(
+                            title: titleController.text,
+                            description: descriptionController.text,
+                            videoUrl: urlController.text,
+                            category: categoryController.text,
+                            displayOrder: displayOrder,
+                            isEnabled: isEnabled,
+                            adminId: widget.adminId,
+                          );
+                        } else {
+                          await _service.updateTutorial(
+                            tutorialId: tutorial.id,
+                            title: titleController.text,
+                            description: descriptionController.text,
+                            videoUrl: urlController.text,
+                            category: categoryController.text,
+                            displayOrder: displayOrder,
+                            isEnabled: isEnabled,
+                            adminId: widget.adminId,
+                          );
+                        }
+
+                        if (!dialogContext.mounted) {
+                          return;
+                        }
+
+                        Navigator.of(dialogContext).pop(true);
+                      } catch (error) {
+                        if (!this.context.mounted) {
+                          return;
+                        }
+
+                        ScaffoldMessenger.of(this.context).showSnackBar(
+                          SnackBar(
+                            content: Text('Could not save tutorial: $error'),
+                          ),
+                        );
+                      }
+                    },
+                    child: const Text('Save'),
+                  ),
+                ],
+              );
+            },
+          );
+        },
+      );
+
+      if (saved == true && mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('Tutorial saved.')));
+      }
+    } finally {
+      titleController.dispose();
+      descriptionController.dispose();
+      urlController.dispose();
+      categoryController.dispose();
+      orderController.dispose();
+    }
+  }
+
+  Future<void> _setEnabled(HelpVideoTutorialModel tutorial, bool value) async {
+    try {
+      await _service.setEnabled(
+        tutorialId: tutorial.id,
+        isEnabled: value,
+        adminId: widget.adminId,
+      );
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not update tutorial: $error')),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Video Tutorials')),
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: _openEditor,
+        icon: const Icon(Icons.add_rounded),
+        label: const Text('Add tutorial'),
+      ),
+      body: StreamBuilder<List<HelpVideoTutorialModel>>(
+        stream: _service.watchTutorials(),
+        builder: (context, snapshot) {
+          if (snapshot.hasError) {
+            return const Center(
+              child: Text('Tutorial management is unavailable.'),
+            );
+          }
+
+          if (!snapshot.hasData) {
+            return const Center(child: CircularProgressIndicator());
+          }
+
+          final List<HelpVideoTutorialModel> tutorials = snapshot.data!;
+
+          if (tutorials.isEmpty) {
+            return const Center(
+              child: Text('No tutorials yet. Use Add tutorial to create one.'),
+            );
+          }
+
+          return ListView.separated(
+            padding: const EdgeInsets.fromLTRB(16, 16, 16, 100),
+            itemCount: tutorials.length,
+            separatorBuilder: (_, __) => const SizedBox(height: 10),
+            itemBuilder: (context, index) {
+              final HelpVideoTutorialModel tutorial = tutorials[index];
+
+              return Card(
+                child: Padding(
+                  padding: const EdgeInsets.all(14),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: <Widget>[
+                      Row(
+                        children: <Widget>[
+                          Expanded(
+                            child: Text(
+                              tutorial.title,
+                              style: Theme.of(context).textTheme.titleMedium
+                                  ?.copyWith(fontWeight: FontWeight.w700),
+                            ),
+                          ),
+                          Switch(
+                            value: tutorial.isEnabled,
+                            onChanged: (value) => _setEnabled(tutorial, value),
+                          ),
+                        ],
+                      ),
+                      if (tutorial.description.trim().isNotEmpty) ...[
+                        const SizedBox(height: 6),
+                        Text(tutorial.description),
+                      ],
+                      const SizedBox(height: 8),
+                      Text(
+                        'Category: ${tutorial.category}  •  '
+                        'Order: ${tutorial.displayOrder}',
+                      ),
+                      const SizedBox(height: 6),
+                      Text(
+                        tutorial.videoUrl,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      const SizedBox(height: 10),
+                      Align(
+                        alignment: Alignment.centerRight,
+                        child: OutlinedButton.icon(
+                          onPressed: () => _openEditor(tutorial: tutorial),
+                          icon: const Icon(Icons.edit_rounded),
+                          label: const Text('Edit'),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              );
+            },
+          );
+        },
+      ),
+    );
+  }
+}

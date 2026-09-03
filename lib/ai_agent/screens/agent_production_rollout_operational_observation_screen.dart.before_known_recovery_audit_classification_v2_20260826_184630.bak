@@ -1,0 +1,251 @@
+import 'package:flutter/material.dart';
+
+import '../models/agent_production_rollout_operational_observation_models.dart';
+import '../services/agent_production_rollout_operational_observation_reader.dart';
+
+class AgentProductionRolloutOperationalObservationScreen
+    extends StatefulWidget {
+  const AgentProductionRolloutOperationalObservationScreen({
+    super.key,
+    required this.currentAdminId,
+  });
+
+  final String currentAdminId;
+
+  @override
+  State<AgentProductionRolloutOperationalObservationScreen> createState() =>
+      _AgentProductionRolloutOperationalObservationScreenState();
+}
+
+class _AgentProductionRolloutOperationalObservationScreenState
+    extends State<AgentProductionRolloutOperationalObservationScreen> {
+  final AgentProductionRolloutOperationalObservationReader _reader =
+      AgentProductionRolloutOperationalObservationReader();
+
+  bool _working = false;
+  String _message = 'Run a read-only operational safety observation.';
+  AgentProductionRolloutOperationalObservation? _observation;
+
+  Future<void> _run() async {
+    if (_working) return;
+
+    setState(() {
+      _working = true;
+      _message =
+          'Reading persisted audit, crash and Owner Attention signals...';
+      _observation = null;
+    });
+
+    try {
+      final AgentProductionRolloutOperationalObservation observation =
+          await _reader.read(currentAdminId: widget.currentAdminId);
+
+      if (!mounted) return;
+
+      setState(() {
+        _observation = observation;
+
+        if (observation.hardSafetySignalDetected) {
+          _message = 'HARD SAFETY SIGNAL DETECTED. Do not advance rollout.';
+        } else {
+          _message =
+              'No hard persisted safety signal detected in the observed '
+              'post-activation window. Dedicated Security Incident persistence '
+              'is not available, so this does NOT authorize SUGGEST_ONLY.';
+        }
+      });
+    } catch (error) {
+      if (!mounted) return;
+
+      setState(() {
+        _message = 'Operational observation blocked safely: $error';
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          _working = false;
+        });
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final AgentProductionRolloutOperationalObservation? observation =
+        _observation;
+
+    return Scaffold(
+      appBar: AppBar(title: const Text('Operational Safety Observation')),
+      body: ListView(
+        padding: const EdgeInsets.all(16),
+        children: <Widget>[
+          const Card(
+            child: Padding(
+              padding: EdgeInsets.all(16),
+              child: Text(
+                'READ-ONLY. Reads real persisted audit logs, crash events and '
+                'Owner Attention records after MONITOR_ONLY activation. '
+                'Current Security Incident response services do not expose a '
+                'dedicated persistent incident repository, so this screen does '
+                'not claim that dedicated incident count is zero.',
+                style: TextStyle(fontWeight: FontWeight.bold),
+              ),
+            ),
+          ),
+          const SizedBox(height: 12),
+          FilledButton.icon(
+            onPressed: _working ? null : _run,
+            icon: const Icon(Icons.health_and_safety_outlined),
+            label: const Text('RUN OPERATIONAL SAFETY OBSERVATION'),
+          ),
+          if (_working) ...<Widget>[
+            const SizedBox(height: 12),
+            const LinearProgressIndicator(),
+          ],
+          const SizedBox(height: 12),
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Text(_message),
+            ),
+          ),
+          if (observation != null) ...<Widget>[
+            const SizedBox(height: 12),
+            Card(
+              color: observation.hardSafetySignalDetected
+                  ? const Color(0xFF4A1010)
+                  : const Color(0xFF123B1E),
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: <Widget>[
+                    Text(
+                      observation.hardSafetySignalDetected
+                          ? 'MONITOR_ONLY_OPERATIONAL_SIGNAL_DETECTED'
+                          : 'MONITOR_ONLY_PERSISTED_SIGNALS_CLEAR',
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    _section('Audit logs'),
+                    _row('Observed', '${observation.auditEventsObserved}'),
+                    _row('HIGH', '${observation.highAuditEvents}'),
+                    _row('CRITICAL', '${observation.criticalAuditEvents}'),
+                    _row(
+                      'Failures/blocked',
+                      '${observation.failureAuditEvents}',
+                    ),
+                    _row(
+                      'Security-related',
+                      '${observation.securityAuditSignals}',
+                    ),
+                    const Divider(),
+                    _section('Runtime crashes/errors'),
+                    _row('Open', '${observation.openCrashEvents}'),
+                    _row('HIGH', '${observation.highCrashEvents}'),
+                    _row('CRITICAL', '${observation.criticalCrashEvents}'),
+                    _row('Repeated (3+)', '${observation.repeatedCrashEvents}'),
+                    const Divider(),
+                    _section('Owner Attention'),
+                    _row('Observed', '${observation.ownerAttentionObserved}'),
+                    _row(
+                      'Unresolved',
+                      '${observation.unresolvedOwnerAttention}',
+                    ),
+                    _row(
+                      'CRITICAL priority',
+                      '${observation.criticalOwnerAttention}',
+                    ),
+                    _row(
+                      'EMERGENCY priority',
+                      '${observation.emergencyOwnerAttention}',
+                    ),
+                    _row(
+                      'Security alerts',
+                      '${observation.securityOwnerAttention}',
+                    ),
+                    _row(
+                      'Critical crash alerts',
+                      '${observation.crashOwnerAttention}',
+                    ),
+                    _row(
+                      'Fraud findings',
+                      '${observation.fraudOwnerAttention}',
+                    ),
+                    _row(
+                      'Emergency cases',
+                      '${observation.emergencyCaseOwnerAttention}',
+                    ),
+                    const Divider(),
+                    _section('Security Incident persistence'),
+                    _row(
+                      'Dedicated live store',
+                      observation.dedicatedSecurityIncidentStoreAvailable
+                          ? 'AVAILABLE'
+                          : 'NOT AVAILABLE',
+                    ),
+                    _row('SUGGEST_ONLY authorized', 'NO'),
+                    if (observation.failureCodes.isNotEmpty) ...<Widget>[
+                      const Divider(),
+                      _section('Hard safety failure codes'),
+                      Text(
+                        observation.failureCodes.join('\n'),
+                        style: const TextStyle(color: Colors.white),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ),
+          ],
+          const SizedBox(height: 12),
+          const Card(
+            child: Padding(
+              padding: EdgeInsets.all(16),
+              child: Text(
+                'STEP 1H-B LIMIT: A clean result means no hard persisted signal '
+                'was found in the bounded audit/crash/Owner Attention window. '
+                'It is NOT proof that no security incident exists and it does '
+                'NOT authorize SUGGEST_ONLY/AUTO. The dedicated incident '
+                'observability gap must be handled separately.',
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _section(String text) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Text(
+        text,
+        style: const TextStyle(
+          color: Colors.white,
+          fontWeight: FontWeight.bold,
+        ),
+      ),
+    );
+  }
+
+  Widget _row(String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 5),
+      child: Row(
+        children: <Widget>[
+          SizedBox(
+            width: 185,
+            child: Text(label, style: const TextStyle(color: Colors.white70)),
+          ),
+          Expanded(
+            child: Text(value, style: const TextStyle(color: Colors.white)),
+          ),
+        ],
+      ),
+    );
+  }
+}

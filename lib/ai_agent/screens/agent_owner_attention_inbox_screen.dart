@@ -1,0 +1,525 @@
+import 'package:flutter/material.dart';
+
+import '../constants/agent_owner_attention_constants.dart';
+import '../constants/agent_owner_attention_review_constants.dart';
+import '../models/agent_owner_attention_inbox_badges.dart';
+import '../models/agent_owner_attention_inbox_record.dart';
+import '../models/agent_owner_attention_status_transition.dart';
+import '../services/agent_owner_attention_drilldown_policy.dart';
+import '../services/agent_owner_attention_inbox_view_policy.dart';
+import '../services/agent_owner_attention_repository.dart';
+
+class AgentOwnerAttentionInboxScreen extends StatefulWidget {
+  const AgentOwnerAttentionInboxScreen({
+    super.key,
+    required this.currentAdminId,
+    this.reviewerRole = AgentOwnerAttentionReviewRole.superAdmin,
+  });
+
+  final String currentAdminId;
+  final String reviewerRole;
+
+  @override
+  State<AgentOwnerAttentionInboxScreen> createState() =>
+      _AgentOwnerAttentionInboxScreenState();
+}
+
+class _AgentOwnerAttentionInboxScreenState
+    extends State<AgentOwnerAttentionInboxScreen> {
+  final AgentOwnerAttentionRepository _repository =
+      AgentOwnerAttentionRepository();
+
+  final AgentOwnerAttentionInboxViewPolicy _viewPolicy =
+      const AgentOwnerAttentionInboxViewPolicy();
+
+  final AgentOwnerAttentionDrilldownPolicy _drilldownPolicy =
+      const AgentOwnerAttentionDrilldownPolicy();
+
+  String? _categoryFilter;
+  String? _priorityFilter;
+  String? _statusFilter;
+
+  bool _busy = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Owner Attention Inbox')),
+      body: StreamBuilder<List<AgentOwnerAttentionInboxRecord>>(
+        stream: _repository.watchRecent(limit: 100),
+        builder: (context, snapshot) {
+          if (snapshot.hasError) {
+            return _SafeStateMessage(
+              icon: Icons.shield_outlined,
+              title: 'Owner Attention Inbox unavailable',
+              message:
+                  'The inbox could not be loaded. Core SWAT RIDE remains available.',
+            );
+          }
+
+          if (!snapshot.hasData) {
+            return const Center(child: CircularProgressIndicator());
+          }
+
+          final all = snapshot.data!;
+
+          final badges = _viewPolicy.buildBadges(all);
+
+          final visible = _viewPolicy.filter(
+            records: all,
+            category: _categoryFilter,
+            priority: _priorityFilter,
+            status: _statusFilter,
+          );
+
+          return Column(
+            children: <Widget>[
+              _buildBadges(badges),
+              _buildFilters(),
+              Expanded(
+                child: visible.isEmpty
+                    ? const _SafeStateMessage(
+                        icon: Icons.inbox_outlined,
+                        title: 'No attention items',
+                        message:
+                            'No Owner Attention item matches the selected filters.',
+                      )
+                    : ListView.separated(
+                        padding: const EdgeInsets.fromLTRB(12, 4, 12, 24),
+                        itemCount: visible.length,
+                        separatorBuilder: (_, _) => const SizedBox(height: 8),
+                        itemBuilder: (context, index) {
+                          final record = visible[index];
+                          return _buildItem(record);
+                        },
+                      ),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _buildBadges(AgentOwnerAttentionInboxBadges badges) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 12, 12, 6),
+      child: Wrap(
+        spacing: 8,
+        runSpacing: 8,
+        children: <Widget>[
+          _AttentionBadge(
+            label: 'Pending Review',
+            value: badges.pendingReview,
+            icon: Icons.mark_email_unread_outlined,
+          ),
+          _AttentionBadge(
+            label: 'Critical + Emergency',
+            value: badges.criticalOrEmergency,
+            icon: Icons.priority_high_rounded,
+          ),
+          _AttentionBadge(
+            label: 'In Review',
+            value: badges.inReview,
+            icon: Icons.manage_search_outlined,
+          ),
+          _AttentionBadge(
+            label: 'Total Open',
+            value: badges.totalOpen,
+            icon: Icons.inbox_outlined,
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildFilters() {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 6, 12, 10),
+      child: Column(
+        children: <Widget>[
+          DropdownButtonFormField<String?>(
+            initialValue: _priorityFilter,
+            decoration: const InputDecoration(
+              labelText: 'Priority',
+              border: OutlineInputBorder(),
+              isDense: true,
+            ),
+            items: <DropdownMenuItem<String?>>[
+              const DropdownMenuItem<String?>(
+                value: null,
+                child: Text('All priorities'),
+              ),
+              ...AgentOwnerAttentionPriority.values.map(
+                (value) => DropdownMenuItem<String?>(
+                  value: value,
+                  child: Text(_label(value)),
+                ),
+              ),
+            ],
+            onChanged: (value) {
+              setState(() => _priorityFilter = value);
+            },
+          ),
+          const SizedBox(height: 8),
+          DropdownButtonFormField<String?>(
+            initialValue: _statusFilter,
+            decoration: const InputDecoration(
+              labelText: 'Status',
+              border: OutlineInputBorder(),
+              isDense: true,
+            ),
+            items: <DropdownMenuItem<String?>>[
+              const DropdownMenuItem<String?>(
+                value: null,
+                child: Text('All statuses'),
+              ),
+              ...AgentOwnerAttentionStatus.values.map(
+                (value) => DropdownMenuItem<String?>(
+                  value: value,
+                  child: Text(_label(value)),
+                ),
+              ),
+            ],
+            onChanged: (value) {
+              setState(() => _statusFilter = value);
+            },
+          ),
+          const SizedBox(height: 8),
+          DropdownButtonFormField<String?>(
+            initialValue: _categoryFilter,
+            decoration: const InputDecoration(
+              labelText: 'Category',
+              border: OutlineInputBorder(),
+              isDense: true,
+            ),
+            items: <DropdownMenuItem<String?>>[
+              const DropdownMenuItem<String?>(
+                value: null,
+                child: Text('All categories'),
+              ),
+              ...AgentOwnerAttentionCategory.values.map(
+                (value) => DropdownMenuItem<String?>(
+                  value: value,
+                  child: Text(_label(value)),
+                ),
+              ),
+            ],
+            onChanged: (value) {
+              setState(() => _categoryFilter = value);
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildItem(AgentOwnerAttentionInboxRecord record) {
+    final event = record.event;
+
+    return Card(
+      child: ListTile(
+        leading: CircleAvatar(child: Icon(_priorityIcon(event.priority))),
+        title: Text(event.payload.safeTitle),
+        subtitle: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            const SizedBox(height: 4),
+            Text(
+              event.payload.safeSummary,
+              maxLines: 3,
+              overflow: TextOverflow.ellipsis,
+            ),
+            const SizedBox(height: 6),
+            Wrap(
+              spacing: 6,
+              runSpacing: 4,
+              children: <Widget>[
+                _SmallTag(_label(event.category)),
+                _SmallTag(_label(event.priority)),
+                _SmallTag(_label(event.status)),
+              ],
+            ),
+          ],
+        ),
+        trailing: const Icon(Icons.chevron_right),
+        onTap: () => _showSafeDrillDown(record),
+      ),
+    );
+  }
+
+  Future<void> _showSafeDrillDown(AgentOwnerAttentionInboxRecord record) async {
+    final descriptor = _drilldownPolicy.descriptorFor(record);
+
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      builder: (sheetContext) {
+        final nextStatuses = _viewPolicy.allowedNextStatuses(record);
+
+        final sourceHash = record.event.source.sourceReferenceSha256;
+
+        final shortHash = sourceHash.length <= 16
+            ? sourceHash
+            : '${sourceHash.substring(0, 12)}Ã¢â‚¬Â¦${sourceHash.substring(sourceHash.length - 4)}';
+
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.all(20),
+            child: SingleChildScrollView(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  Text(
+                    record.event.payload.safeTitle,
+                    style: Theme.of(sheetContext).textTheme.titleLarge,
+                  ),
+                  const SizedBox(height: 12),
+                  Text(record.event.payload.safeSummary),
+                  const SizedBox(height: 16),
+                  _DetailLine(
+                    label: 'Category',
+                    value: _label(record.event.category),
+                  ),
+                  _DetailLine(
+                    label: 'Priority',
+                    value: _label(record.event.priority),
+                  ),
+                  _DetailLine(
+                    label: 'Status',
+                    value: _label(record.event.status),
+                  ),
+                  _DetailLine(label: 'Source', value: descriptor.sourceLabel),
+                  _DetailLine(label: 'Safe source reference', value: shortHash),
+                  _DetailLine(
+                    label: 'Reason codes',
+                    value: record.event.payload.reasonCodes.join(', '),
+                  ),
+                  const SizedBox(height: 12),
+                  const Text(
+                    'Privacy boundary: safe summary only. Raw body, '
+                    'transcript, recording, secrets, tokens and payment '
+                    'credentials are not shown here.',
+                  ),
+                  const SizedBox(height: 12),
+                  Text(
+                    descriptor.reviewInstruction,
+                    style: Theme.of(sheetContext).textTheme.bodySmall,
+                  ),
+                  const SizedBox(height: 16),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: nextStatuses
+                        .map(
+                          (nextStatus) => FilledButton.tonal(
+                            onPressed: _busy
+                                ? null
+                                : () async {
+                                    Navigator.of(sheetContext).pop();
+                                    await _transition(record, nextStatus);
+                                  },
+                            child: Text(_actionLabel(nextStatus)),
+                          ),
+                        )
+                        .toList(growable: false),
+                  ),
+                  if (nextStatuses.isEmpty)
+                    const Text(
+                      'This inbox workflow item is terminal. '
+                      'Any consequential source action remains in the '
+                      'source-specific admin workflow.',
+                    ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Future<void> _transition(
+    AgentOwnerAttentionInboxRecord record,
+    String nextStatus,
+  ) async {
+    if (_busy) {
+      return;
+    }
+
+    setState(() => _busy = true);
+
+    try {
+      await _repository.transitionStatus(
+        transition: AgentOwnerAttentionStatusTransition(
+          attentionId: record.event.attentionId,
+          expectedStatus: record.event.status,
+          nextStatus: nextStatus,
+          expectedReviewVersion: record.reviewVersion,
+          reviewerRole: widget.reviewerRole,
+          reviewerRef: widget.currentAdminId,
+          reviewedAtUtc: DateTime.now().toUtc(),
+        ),
+      );
+
+      if (!mounted) {
+        return;
+      }
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Inbox review status updated to ${_label(nextStatus)}. '
+            'Source record was not changed.',
+          ),
+        ),
+      );
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Review status could not be changed. Reload and retry.',
+          ),
+        ),
+      );
+    } finally {
+      if (mounted) {
+        setState(() => _busy = false);
+      }
+    }
+  }
+
+  static IconData _priorityIcon(String priority) {
+    switch (priority) {
+      case AgentOwnerAttentionPriority.emergency:
+        return Icons.emergency_outlined;
+      case AgentOwnerAttentionPriority.critical:
+        return Icons.warning_amber_rounded;
+      case AgentOwnerAttentionPriority.high:
+        return Icons.priority_high_rounded;
+      default:
+        return Icons.notifications_none;
+    }
+  }
+
+  static String _actionLabel(String status) {
+    switch (status) {
+      case AgentOwnerAttentionStatus.acknowledged:
+        return 'Acknowledge';
+      case AgentOwnerAttentionStatus.inReview:
+        return 'Start Review';
+      case AgentOwnerAttentionStatus.resolved:
+        return 'Resolve Inbox Item';
+      case AgentOwnerAttentionStatus.dismissed:
+        return 'Dismiss Inbox Item';
+      default:
+        return _label(status);
+    }
+  }
+
+  static String _label(String value) {
+    return value
+        .toLowerCase()
+        .split('_')
+        .map(
+          (part) => part.isEmpty
+              ? part
+              : '${part[0].toUpperCase()}${part.substring(1)}',
+        )
+        .join(' ');
+  }
+}
+
+class _AttentionBadge extends StatelessWidget {
+  const _AttentionBadge({
+    required this.label,
+    required this.value,
+    required this.icon,
+  });
+
+  final String label;
+  final int value;
+  final IconData icon;
+
+  @override
+  Widget build(BuildContext context) {
+    return Chip(avatar: Icon(icon, size: 18), label: Text('$label: $value'));
+  }
+}
+
+class _SmallTag extends StatelessWidget {
+  const _SmallTag(this.label);
+
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    return Chip(visualDensity: VisualDensity.compact, label: Text(label));
+  }
+}
+
+class _DetailLine extends StatelessWidget {
+  const _DetailLine({required this.label, required this.value});
+
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 6),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          SizedBox(
+            width: 130,
+            child: Text(
+              '$label:',
+              style: const TextStyle(fontWeight: FontWeight.w600),
+            ),
+          ),
+          Expanded(child: Text(value)),
+        ],
+      ),
+    );
+  }
+}
+
+class _SafeStateMessage extends StatelessWidget {
+  const _SafeStateMessage({
+    required this.icon,
+    required this.title,
+    required this.message,
+  });
+
+  final IconData icon;
+  final String title;
+  final String message;
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            Icon(icon, size: 44),
+            const SizedBox(height: 12),
+            Text(
+              title,
+              textAlign: TextAlign.center,
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
+            const SizedBox(height: 8),
+            Text(message, textAlign: TextAlign.center),
+          ],
+        ),
+      ),
+    );
+  }
+}

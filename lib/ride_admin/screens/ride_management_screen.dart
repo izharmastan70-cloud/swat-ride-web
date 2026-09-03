@@ -1,0 +1,636 @@
+﻿import 'package:flutter/material.dart';
+import 'off_platform_report_management_screen.dart';
+
+
+import '../services/ride_admin_service.dart';
+
+class RideManagementScreen extends StatefulWidget {
+  const RideManagementScreen({
+    super.key,
+    this.adminId = 'testing_admin',
+  });
+
+  final String adminId;
+
+  @override
+  State<RideManagementScreen> createState() => _RideManagementScreenState();
+}
+
+class _RideManagementScreenState extends State<RideManagementScreen> {
+  static const Color _yellow = Color(0xFFFFD400);
+  static const Color _background = Color(0xFF090909);
+  static const Color _card = Color(0xFF191919);
+  static const Set<String> _activeStatuses = <String>{
+    'driver_assigned',
+    'driver_arriving',
+    'driver_arrived',
+    'ride_started',
+  };
+
+  final RideAdminService _service = RideAdminService();
+  final TextEditingController _searchController = TextEditingController();
+  String _filter = 'all';
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    super.dispose();
+  }
+
+  String? get _firestoreStatus {
+    if (_filter == 'completed' || _filter == 'cancelled' || _filter == 'searching') {
+      return _filter;
+    }
+    return null;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: _background,
+      appBar: AppBar(
+        backgroundColor: const Color(0xFF121212),
+        foregroundColor: Colors.white,
+        elevation: 0,
+        actions: <Widget>[
+          IconButton(
+            tooltip: 'Off-platform reports',
+            icon: const Icon(Icons.gpp_maybe_outlined),
+            onPressed: () {
+              Navigator.of(context).push(
+                MaterialPageRoute<void>(
+                  builder: (_) => OffPlatformReportManagementScreen(
+                    adminId: widget.adminId,
+                  ),
+                ),
+              );
+            },
+          ),
+        ],        title: const Text(
+          'Ride Management',
+          style: TextStyle(fontWeight: FontWeight.w800),
+        ),
+      ),
+      body: SafeArea(
+        child: Column(
+          children: <Widget>[
+            _buildControls(),
+            Expanded(
+              child: StreamBuilder<List<RideAdminRecord>>(
+                stream: _service.watchRides(status: _firestoreStatus),
+                builder: (context, snapshot) {
+                  if (snapshot.hasError) {
+                    return _MessageState(
+                      icon: Icons.cloud_off_rounded,
+                      title: 'Rides could not be loaded',
+                      message: _cleanError(snapshot.error),
+                    );
+                  }
+                  if (!snapshot.hasData) {
+                    return const Center(
+                      child: CircularProgressIndicator(color: _yellow),
+                    );
+                  }
+                  final List<RideAdminRecord> rides =
+                      _filtered(snapshot.data ?? <RideAdminRecord>[]);
+                  if (rides.isEmpty) {
+                    return const _MessageState(
+                      icon: Icons.local_taxi_outlined,
+                      title: 'No rides found',
+                      message: 'Try another filter or search value.',
+                    );
+                  }
+                  return RefreshIndicator(
+                    color: _yellow,
+                    backgroundColor: _card,
+                    onRefresh: () async => Future<void>.delayed(
+                      const Duration(milliseconds: 500),
+                    ),
+                    child: ListView.separated(
+                      padding: const EdgeInsets.fromLTRB(16, 4, 16, 28),
+                      itemCount: rides.length,
+                      separatorBuilder: (_, _) => const SizedBox(height: 12),
+                      itemBuilder: (context, index) =>
+                          _buildRideCard(rides[index]),
+                    ),
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildControls() {
+    return Container(
+      color: const Color(0xFF121212),
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 14),
+      child: Column(
+        children: <Widget>[
+          TextField(
+            controller: _searchController,
+            onChanged: (_) => setState(() {}),
+            style: const TextStyle(color: Colors.white),
+            decoration: InputDecoration(
+              hintText: 'Search ride, rider, driver or location',
+              hintStyle: const TextStyle(color: Colors.white54),
+              prefixIcon: const Icon(Icons.search_rounded, color: _yellow),
+              suffixIcon: _searchController.text.isEmpty
+                  ? null
+                  : IconButton(
+                      onPressed: () {
+                        _searchController.clear();
+                        setState(() {});
+                      },
+                      icon: const Icon(Icons.close, color: Colors.white70),
+                    ),
+              filled: true,
+              fillColor: _card,
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(16),
+                borderSide: BorderSide.none,
+              ),
+            ),
+          ),
+          const SizedBox(height: 12),
+          SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: Row(
+              children: <Widget>[
+                _filterChip('all', 'All'),
+                _filterChip('searching', 'Searching'),
+                _filterChip('active', 'Active'),
+                _filterChip('completed', 'Completed'),
+                _filterChip('cancelled', 'Cancelled'),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _filterChip(String value, String label) {
+    final bool selected = _filter == value;
+    return Padding(
+      padding: const EdgeInsets.only(right: 8),
+      child: ChoiceChip(
+        label: Text(label),
+        selected: selected,
+        onSelected: (_) => setState(() => _filter = value),
+        selectedColor: _yellow,
+        backgroundColor: _card,
+        side: BorderSide(color: selected ? _yellow : Colors.white24),
+        labelStyle: TextStyle(
+          color: selected ? Colors.black : Colors.white70,
+          fontWeight: FontWeight.w700,
+        ),
+        showCheckmark: false,
+      ),
+    );
+  }
+
+  List<RideAdminRecord> _filtered(List<RideAdminRecord> source) {
+    final String query = _searchController.text.trim().toLowerCase();
+    return source.where((ride) {
+      final String status = ride.text('status', fallback: 'searching').toLowerCase();
+      if (_filter == 'active' && !_activeStatuses.contains(status)) return false;
+      if (_filter != 'all' && _filter != 'active' && status != _filter) return false;
+      if (query.isEmpty) return true;
+      final String haystack = <String>[
+        ride.id,
+        ride.text('rideId'),
+        ride.text('userId'),
+        ride.text('userName'),
+        ride.text('riderName'),
+        ride.text('driverId'),
+        ride.text('driverName'),
+        ride.text('vehicleName'),
+        _locationText(ride.map('pickupLocation')),
+        _locationText(ride.map('destinationLocation')),
+      ].join(' ').toLowerCase();
+      return haystack.contains(query);
+    }).toList(growable: false);
+  }
+
+  Widget _buildRideCard(RideAdminRecord ride) {
+    final String status = ride.text('status', fallback: 'searching');
+    final double fare = ride.number('finalFare') > 0
+        ? ride.number('finalFare')
+        : ride.number('estimatedFare');
+    final String pickup = _locationText(ride.map('pickupLocation'));
+    final String destination = _locationText(ride.map('destinationLocation'));
+    return Material(
+      color: _card,
+      borderRadius: BorderRadius.circular(20),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(20),
+        onTap: () => _showRideDetails(ride),
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              Row(
+                children: <Widget>[
+                  Container(
+                    width: 44,
+                    height: 44,
+                    decoration: BoxDecoration(
+                      color: _yellow.withValues(alpha: 0.12),
+                      borderRadius: BorderRadius.circular(13),
+                    ),
+                    child: const Icon(Icons.local_taxi_rounded, color: _yellow),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: <Widget>[
+                        Text(
+                          '#${ride.text('rideId', fallback: ride.id)}',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontWeight: FontWeight.w800,
+                            fontSize: 15,
+                          ),
+                        ),
+                        const SizedBox(height: 3),
+                        Text(
+                          _dateTime(ride.createdAt),
+                          style: const TextStyle(color: Colors.white54),
+                        ),
+                      ],
+                    ),
+                  ),
+                  _StatusBadge(status: status),
+                ],
+              ),
+              const SizedBox(height: 16),
+              _routeRow(Icons.radio_button_checked, pickup, _yellow),
+              Container(
+                height: 18,
+                margin: const EdgeInsets.only(left: 8),
+                decoration: const BoxDecoration(
+                  border: Border(left: BorderSide(color: Colors.white24)),
+                ),
+              ),
+              _routeRow(Icons.location_on_rounded, destination, Colors.redAccent),
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 14),
+                child: Divider(color: Colors.white12, height: 1),
+              ),
+              Row(
+                children: <Widget>[
+                  Expanded(
+                    child: _compactValue('Vehicle', ride.text('vehicleName', fallback: 'Not set')),
+                  ),
+                  Expanded(
+                    child: _compactValue('Payment', _title(ride.text('paymentMethod', fallback: 'cash'))),
+                  ),
+                  _compactValue('Fare', 'Rs ${fare.toStringAsFixed(0)}', alignEnd: true),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _routeRow(IconData icon, String value, Color color) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: <Widget>[
+        Icon(icon, size: 17, color: color),
+        const SizedBox(width: 10),
+        Expanded(
+          child: Text(
+            value.isEmpty ? 'Location not available' : value,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(color: Colors.white70, height: 1.35),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _compactValue(String label, String value, {bool alignEnd = false}) {
+    return Column(
+      crossAxisAlignment: alignEnd ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+      children: <Widget>[
+        Text(label, style: const TextStyle(color: Colors.white38, fontSize: 11)),
+        const SizedBox(height: 3),
+        Text(
+          value,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700),
+        ),
+      ],
+    );
+  }
+
+  Future<void> _showRideDetails(RideAdminRecord ride) async {
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (sheetContext) {
+        final String status = ride.text('status', fallback: 'searching');
+        final bool canCancel = status != 'completed' && status != 'cancelled';
+        final double fare = ride.number('finalFare') > 0
+            ? ride.number('finalFare')
+            : ride.number('estimatedFare');
+        final double commission = ride.number('commissionAmount');
+        final double driverEarning = ride.number('driverEarning') > 0
+            ? ride.number('driverEarning')
+            : (fare - commission).clamp(0, double.infinity);
+        return DraggableScrollableSheet(
+          initialChildSize: 0.88,
+          minChildSize: 0.55,
+          maxChildSize: 0.96,
+          builder: (context, scrollController) => Container(
+            decoration: const BoxDecoration(
+              color: Color(0xFF151515),
+              borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
+            ),
+            child: ListView(
+              controller: scrollController,
+              padding: const EdgeInsets.fromLTRB(20, 12, 20, 32),
+              children: <Widget>[
+                Center(
+                  child: Container(
+                    width: 44,
+                    height: 5,
+                    decoration: BoxDecoration(
+                      color: Colors.white24,
+                      borderRadius: BorderRadius.circular(20),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 22),
+                Row(
+                  children: <Widget>[
+                    const Expanded(
+                      child: Text('Ride details', style: TextStyle(color: Colors.white, fontSize: 23, fontWeight: FontWeight.w900)),
+                    ),
+                    _StatusBadge(status: status),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                SelectableText(
+                  'Ride ID: ${ride.text('rideId', fallback: ride.id)}',
+                  style: const TextStyle(color: Colors.white54),
+                ),
+                const SizedBox(height: 22),
+                _detailSection('Route', <Widget>[
+                  _detailRow('Pickup', _locationText(ride.map('pickupLocation'))),
+                  _detailRow('Destination', _locationText(ride.map('destinationLocation'))),
+                  _detailRow('Distance', '${ride.number('distanceKm').toStringAsFixed(1)} km'),
+                  _detailRow('Estimated time', '${ride.number('estimatedMinutes').toStringAsFixed(0)} min'),
+                ]),
+                _detailSection('Rider & driver', <Widget>[
+                  _detailRow('Rider', _first(<String>[ride.text('userName'), ride.text('riderName'), ride.text('userId')], 'Not available')),
+                  _detailRow('Rider ID', ride.text('userId', fallback: 'Not available')),
+                  _detailRow('Driver', _first(<String>[ride.text('driverName'), ride.text('driverId')], 'Not assigned')),
+                  _detailRow('Driver ID', ride.text('driverId', fallback: 'Not assigned')),
+                  _detailRow('Vehicle', ride.text('vehicleName', fallback: 'Not available')),
+                ]),
+                _detailSection('Fare & payment', <Widget>[
+                  _detailRow('Base fare', 'Rs ${ride.number('baseFare').toStringAsFixed(0)}'),
+                  _detailRow('Promo discount', 'Rs ${ride.number('promoDiscount').toStringAsFixed(0)}'),
+                  _detailRow('Total fare', 'Rs ${fare.toStringAsFixed(0)}', highlighted: true),
+                  _detailRow('Admin commission', 'Rs ${commission.toStringAsFixed(0)}'),
+                  _detailRow('Driver earning', 'Rs ${driverEarning.toStringAsFixed(0)}'),
+                  _detailRow('Payment method', _title(ride.text('paymentMethod', fallback: 'cash'))),
+                  _detailRow('Payment status', _title(ride.text('paymentStatus', fallback: 'pending'))),
+                ]),
+                _detailSection('Activity', <Widget>[
+                  _detailRow('Created', _dateTime(ride.createdAt)),
+                  _detailRow('Last updated', _dateTime(ride.updatedAt)),
+                  if (ride.text('cancellationReason').isNotEmpty)
+                    _detailRow('Cancellation reason', ride.text('cancellationReason')),
+                ]),
+                if (canCancel) ...<Widget>[
+                  const SizedBox(height: 4),
+                  SizedBox(
+                    height: 54,
+                    child: OutlinedButton.icon(
+                      onPressed: () async {
+                        Navigator.pop(sheetContext);
+                        await _requestCancellation(ride);
+                      },
+                      icon: const Icon(Icons.cancel_outlined),
+                      label: const Text('Cancel Ride as Admin'),
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: Colors.redAccent,
+                        side: const BorderSide(color: Colors.redAccent),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
+                      ),
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _detailSection(String title, List<Widget> children) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 14),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(color: _card, borderRadius: BorderRadius.circular(18)),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Text(title, style: const TextStyle(color: _yellow, fontWeight: FontWeight.w800, fontSize: 16)),
+          const SizedBox(height: 12),
+          ...children,
+        ],
+      ),
+    );
+  }
+
+  Widget _detailRow(String label, String value, {bool highlighted = false}) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 6),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          SizedBox(width: 122, child: Text(label, style: const TextStyle(color: Colors.white54))),
+          Expanded(
+            child: Text(
+              value.isEmpty ? 'Not available' : value,
+              textAlign: TextAlign.right,
+              style: TextStyle(
+                color: highlighted ? _yellow : Colors.white,
+                fontWeight: highlighted ? FontWeight.w900 : FontWeight.w600,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _requestCancellation(RideAdminRecord ride) async {
+    final TextEditingController reasonController = TextEditingController();
+    final bool? confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        backgroundColor: const Color(0xFF202020),
+        title: const Text('Cancel this ride?', style: TextStyle(color: Colors.white)),
+        content: TextField(
+          controller: reasonController,
+          minLines: 2,
+          maxLines: 4,
+          style: const TextStyle(color: Colors.white),
+          decoration: const InputDecoration(
+            labelText: 'Cancellation reason',
+            labelStyle: TextStyle(color: Colors.white60),
+            enabledBorder: OutlineInputBorder(borderSide: BorderSide(color: Colors.white24)),
+            focusedBorder: OutlineInputBorder(borderSide: BorderSide(color: _yellow)),
+          ),
+        ),
+        actions: <Widget>[
+          TextButton(onPressed: () => Navigator.pop(dialogContext, false), child: const Text('Back')),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: Colors.redAccent),
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Cancel Ride'),
+          ),
+        ],
+      ),
+    );
+    final String reason = reasonController.text.trim();
+    reasonController.dispose();
+    if (confirmed != true) return;
+    if (reason.length < 5) {
+      _showMessage('Please enter a clear cancellation reason.');
+      return;
+    }
+    try {
+      await _service.cancelRideByAdmin(
+        rideId: ride.id,
+        cancelledBy: widget.adminId,
+        reason: reason,
+      );
+      if (!mounted) return;
+      _showMessage('Ride cancelled successfully.', success: true);
+    } catch (error) {
+      if (!mounted) return;
+      _showMessage(_cleanError(error));
+    }
+  }
+
+  void _showMessage(String message, {bool success = false}) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        backgroundColor: success ? Colors.green : Colors.redAccent,
+        content: Text(message),
+      ),
+    );
+  }
+
+  static String _locationText(Map<String, dynamic> map) => _first(
+        <String>[
+          map['address']?.toString().trim() ?? '',
+          map['name']?.toString().trim() ?? '',
+          map['placeName']?.toString().trim() ?? '',
+        ],
+        '',
+      );
+
+  static String _first(List<String> values, String fallback) {
+    for (final String value in values) {
+      if (value.trim().isNotEmpty) return value.trim();
+    }
+    return fallback;
+  }
+
+  static String _title(String value) => value
+      .replaceAll('_', ' ')
+      .split(' ')
+      .where((part) => part.isNotEmpty)
+      .map((part) => '${part[0].toUpperCase()}${part.substring(1)}')
+      .join(' ');
+
+  static String _dateTime(DateTime value) {
+    if (value.year <= 2000) return 'Not available';
+    String two(int number) => number.toString().padLeft(2, '0');
+    return '${two(value.day)}/${two(value.month)}/${value.year}  ${two(value.hour)}:${two(value.minute)}';
+  }
+
+  static String _cleanError(Object? error) =>
+      error.toString().replaceFirst('Exception: ', '').trim();
+}
+
+class _StatusBadge extends StatelessWidget {
+  const _StatusBadge({required this.status});
+
+  final String status;
+
+  @override
+  Widget build(BuildContext context) {
+    final Color color = switch (status.toLowerCase()) {
+      'completed' => Colors.green,
+      'cancelled' => Colors.redAccent,
+      'searching' => const Color(0xFFFFD400),
+      _ => Colors.lightBlueAccent,
+    };
+    final String label = status
+        .replaceAll('_', ' ')
+        .split(' ')
+        .where((part) => part.isNotEmpty)
+        .map((part) => '${part[0].toUpperCase()}${part.substring(1)}')
+        .join(' ');
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.13),
+        border: Border.all(color: color.withValues(alpha: 0.65)),
+        borderRadius: BorderRadius.circular(30),
+      ),
+      child: Text(
+        label,
+        style: TextStyle(color: color, fontSize: 11, fontWeight: FontWeight.w800),
+      ),
+    );
+  }
+}
+
+class _MessageState extends StatelessWidget {
+  const _MessageState({required this.icon, required this.title, required this.message});
+
+  final IconData icon;
+  final String title;
+  final String message;
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.all(32),
+        child: Column(
+          children: <Widget>[
+            Icon(icon, size: 64, color: Colors.white24),
+            const SizedBox(height: 16),
+            Text(title, textAlign: TextAlign.center, style: const TextStyle(color: Colors.white, fontSize: 19, fontWeight: FontWeight.w800)),
+            const SizedBox(height: 8),
+            Text(message, textAlign: TextAlign.center, style: const TextStyle(color: Colors.white54, height: 1.4)),
+          ],
+        ),
+      ),
+    );
+  }
+}
+

@@ -1,0 +1,347 @@
+import '../constants/agent_future_proposal_constants.dart';
+
+/// Phase 41 structured product-evolution proposal.
+///
+/// This model is intentionally RECOMMENDATION-ONLY.
+/// A Future Agent may create/revise this proposal but may not directly patch
+/// source files, mutate business state, deploy, or invoke Paid Code AI.
+///
+/// Locked workflow:
+/// Future Agent -> Reviewer -> Super Admin Approve/Reject/Edit
+/// -> Code Agent -> QA -> Security -> Owner KEEP/ROLLBACK.
+class AgentFutureProposal {
+  const AgentFutureProposal({
+    required this.proposalId,
+    required this.problem,
+    required this.affectedModule,
+    required this.evidenceRefs,
+    required this.affectedUserCount,
+    required this.affectedEventCount,
+    required this.proposedSolution,
+    required this.expectedBenefit,
+    required this.risk,
+    required this.developmentComplexity,
+    required this.affectedFiles,
+    required this.affectedModules,
+    required this.aiConfidence,
+    required this.createdByAgentId,
+    required this.createdAt,
+    required this.updatedAt,
+    this.status = AgentFutureProposalStatus.draft,
+    this.reviewerId = '',
+    this.reviewNote = '',
+    this.superAdminApprovalId = '',
+    this.approvedBy = '',
+  });
+
+  final String proposalId;
+
+  /// Clear product/customer/business problem being proposed for improvement.
+  final String problem;
+
+  /// Primary module affected by the problem.
+  final String affectedModule;
+
+  /// Read-only evidence references only; never raw secrets/tokens/OTP values.
+  final List<String> evidenceRefs;
+
+  /// Best-known number of unique affected users. Zero means unknown/not counted.
+  final int affectedUserCount;
+
+  /// Best-known number of affected events. Zero means unknown/not counted.
+  final int affectedEventCount;
+
+  final String proposedSolution;
+  final String expectedBenefit;
+
+  /// One of [AgentFutureProposalRisk].
+  final String risk;
+
+  /// One of [AgentFutureProposalComplexity].
+  final String developmentComplexity;
+
+  /// Candidate technical scope only; not permission to modify these files.
+  final List<String> affectedFiles;
+
+  /// Candidate product/module scope.
+  final List<String> affectedModules;
+
+  /// 0.0 to 1.0 confidence based only on available evidence.
+  final double aiConfidence;
+
+  final String status;
+  final String createdByAgentId;
+  final String reviewerId;
+  final String reviewNote;
+
+  /// Existing central AgentApprovalService request bound to this exact proposal.
+  final String superAdminApprovalId;
+
+  /// Human/Super Admin identity copied from the approved central request.
+  final String approvedBy;
+
+  final DateTime createdAt;
+  final DateTime updatedAt;
+
+  /// Safety invariant: Future Agent is never a direct implementation authority.
+  bool get mayImplementDirectly => false;
+
+  /// Every proposal requires human review before Code Agent handoff.
+  bool get requiresHumanReview => true;
+
+  bool get isTerminal => AgentFutureProposalStatus.isTerminal(status);
+
+  double get safeAiConfidence => aiConfidence.clamp(0.0, 1.0).toDouble();
+
+  void validate() {
+    if (proposalId.trim().isEmpty) {
+      throw const AgentFutureProposalValidationException(
+        'proposalId cannot be empty.',
+      );
+    }
+
+    if (problem.trim().isEmpty) {
+      throw const AgentFutureProposalValidationException(
+        'problem cannot be empty.',
+      );
+    }
+
+    if (affectedModule.trim().isEmpty) {
+      throw const AgentFutureProposalValidationException(
+        'affectedModule cannot be empty.',
+      );
+    }
+
+    if (evidenceRefs.isEmpty ||
+        evidenceRefs.every((String item) => item.trim().isEmpty)) {
+      throw const AgentFutureProposalValidationException(
+        'At least one evidence reference is required.',
+      );
+    }
+
+    if (affectedUserCount < 0 || affectedEventCount < 0) {
+      throw const AgentFutureProposalValidationException(
+        'Affected user/event counts cannot be negative.',
+      );
+    }
+
+    if (proposedSolution.trim().isEmpty) {
+      throw const AgentFutureProposalValidationException(
+        'proposedSolution cannot be empty.',
+      );
+    }
+
+    if (expectedBenefit.trim().isEmpty) {
+      throw const AgentFutureProposalValidationException(
+        'expectedBenefit cannot be empty.',
+      );
+    }
+
+    if (!AgentFutureProposalRisk.isValid(risk)) {
+      throw AgentFutureProposalValidationException('Unsupported risk: $risk');
+    }
+
+    if (!AgentFutureProposalComplexity.isValid(developmentComplexity)) {
+      throw AgentFutureProposalValidationException(
+        'Unsupported developmentComplexity: $developmentComplexity',
+      );
+    }
+
+    if (affectedModules.isEmpty ||
+        affectedModules.every((String item) => item.trim().isEmpty)) {
+      throw const AgentFutureProposalValidationException(
+        'At least one affected module is required.',
+      );
+    }
+
+    if (aiConfidence.isNaN ||
+        aiConfidence.isInfinite ||
+        aiConfidence < 0 ||
+        aiConfidence > 1) {
+      throw const AgentFutureProposalValidationException(
+        'aiConfidence must be between 0.0 and 1.0.',
+      );
+    }
+
+    if (!AgentFutureProposalStatus.isValid(status)) {
+      throw AgentFutureProposalValidationException(
+        'Unsupported proposal status: $status',
+      );
+    }
+
+    if (createdByAgentId.trim().isEmpty) {
+      throw const AgentFutureProposalValidationException(
+        'createdByAgentId cannot be empty.',
+      );
+    }
+
+    if (status == AgentFutureProposalStatus.approved) {
+      if (superAdminApprovalId.trim().isEmpty) {
+        throw const AgentFutureProposalValidationException(
+          'Approved Future proposal requires superAdminApprovalId.',
+        );
+      }
+
+      if (approvedBy.trim().isEmpty) {
+        throw const AgentFutureProposalValidationException(
+          'Approved Future proposal requires approvedBy.',
+        );
+      }
+    }
+
+    if (updatedAt.isBefore(createdAt)) {
+      throw const AgentFutureProposalValidationException(
+        'updatedAt cannot be before createdAt.',
+      );
+    }
+  }
+
+  AgentFutureProposal copyWith({
+    String? proposalId,
+    String? problem,
+    String? affectedModule,
+    List<String>? evidenceRefs,
+    int? affectedUserCount,
+    int? affectedEventCount,
+    String? proposedSolution,
+    String? expectedBenefit,
+    String? risk,
+    String? developmentComplexity,
+    List<String>? affectedFiles,
+    List<String>? affectedModules,
+    double? aiConfidence,
+    String? status,
+    String? createdByAgentId,
+    String? reviewerId,
+    String? reviewNote,
+    String? superAdminApprovalId,
+    String? approvedBy,
+    DateTime? createdAt,
+    DateTime? updatedAt,
+  }) {
+    return AgentFutureProposal(
+      proposalId: proposalId ?? this.proposalId,
+      problem: problem ?? this.problem,
+      affectedModule: affectedModule ?? this.affectedModule,
+      evidenceRefs: evidenceRefs ?? this.evidenceRefs,
+      affectedUserCount: affectedUserCount ?? this.affectedUserCount,
+      affectedEventCount: affectedEventCount ?? this.affectedEventCount,
+      proposedSolution: proposedSolution ?? this.proposedSolution,
+      expectedBenefit: expectedBenefit ?? this.expectedBenefit,
+      risk: risk ?? this.risk,
+      developmentComplexity:
+          developmentComplexity ?? this.developmentComplexity,
+      affectedFiles: affectedFiles ?? this.affectedFiles,
+      affectedModules: affectedModules ?? this.affectedModules,
+      aiConfidence: aiConfidence ?? this.aiConfidence,
+      status: status ?? this.status,
+      createdByAgentId: createdByAgentId ?? this.createdByAgentId,
+      reviewerId: reviewerId ?? this.reviewerId,
+      reviewNote: reviewNote ?? this.reviewNote,
+      superAdminApprovalId: superAdminApprovalId ?? this.superAdminApprovalId,
+      approvedBy: approvedBy ?? this.approvedBy,
+      createdAt: createdAt ?? this.createdAt,
+      updatedAt: updatedAt ?? this.updatedAt,
+    );
+  }
+
+  Map<String, dynamic> toMap() {
+    validate();
+
+    return <String, dynamic>{
+      'proposalId': proposalId,
+      'problem': problem,
+      'affectedModule': affectedModule,
+      'evidenceRefs': List<String>.from(evidenceRefs),
+      'affectedUserCount': affectedUserCount,
+      'affectedEventCount': affectedEventCount,
+      'proposedSolution': proposedSolution,
+      'expectedBenefit': expectedBenefit,
+      'risk': risk,
+      'developmentComplexity': developmentComplexity,
+      'affectedFiles': List<String>.from(affectedFiles),
+      'affectedModules': List<String>.from(affectedModules),
+      'aiConfidence': aiConfidence,
+      'status': status,
+      'createdByAgentId': createdByAgentId,
+      'reviewerId': reviewerId,
+      'reviewNote': reviewNote,
+      'superAdminApprovalId': superAdminApprovalId,
+      'approvedBy': approvedBy,
+      'createdAt': createdAt.toUtc().toIso8601String(),
+      'updatedAt': updatedAt.toUtc().toIso8601String(),
+      'recommendationOnly': true,
+      'mayImplementDirectly': false,
+      'requiresHumanReview': true,
+    };
+  }
+
+  factory AgentFutureProposal.fromMap(Map<String, dynamic> map) {
+    final AgentFutureProposal proposal = AgentFutureProposal(
+      proposalId: (map['proposalId'] ?? '').toString(),
+      problem: (map['problem'] ?? '').toString(),
+      affectedModule: (map['affectedModule'] ?? '').toString(),
+      evidenceRefs: _stringList(map['evidenceRefs']),
+      affectedUserCount: _intValue(map['affectedUserCount']),
+      affectedEventCount: _intValue(map['affectedEventCount']),
+      proposedSolution: (map['proposedSolution'] ?? '').toString(),
+      expectedBenefit: (map['expectedBenefit'] ?? '').toString(),
+      risk: (map['risk'] ?? '').toString(),
+      developmentComplexity: (map['developmentComplexity'] ?? '').toString(),
+      affectedFiles: _stringList(map['affectedFiles']),
+      affectedModules: _stringList(map['affectedModules']),
+      aiConfidence: _doubleValue(map['aiConfidence']),
+      status: (map['status'] ?? AgentFutureProposalStatus.draft).toString(),
+      createdByAgentId: (map['createdByAgentId'] ?? '').toString(),
+      reviewerId: (map['reviewerId'] ?? '').toString(),
+      reviewNote: (map['reviewNote'] ?? '').toString(),
+      superAdminApprovalId: (map['superAdminApprovalId'] ?? '').toString(),
+      approvedBy: (map['approvedBy'] ?? '').toString(),
+      createdAt: _dateTimeValue(map['createdAt']),
+      updatedAt: _dateTimeValue(map['updatedAt']),
+    );
+
+    proposal.validate();
+    return proposal;
+  }
+
+  static List<String> _stringList(dynamic value) {
+    if (value is! Iterable) {
+      return const <String>[];
+    }
+
+    return value
+        .map((dynamic item) => item.toString().trim())
+        .where((String item) => item.isNotEmpty)
+        .toList(growable: false);
+  }
+
+  static int _intValue(dynamic value) {
+    if (value is int) return value;
+    if (value is num) return value.toInt();
+    return int.tryParse(value?.toString() ?? '') ?? 0;
+  }
+
+  static double _doubleValue(dynamic value) {
+    if (value is num) return value.toDouble();
+    return double.tryParse(value?.toString() ?? '') ?? 0;
+  }
+
+  static DateTime _dateTimeValue(dynamic value) {
+    if (value is DateTime) {
+      return value.toUtc();
+    }
+
+    return DateTime.tryParse(value?.toString() ?? '')?.toUtc() ??
+        DateTime.fromMillisecondsSinceEpoch(0, isUtc: true);
+  }
+}
+
+class AgentFutureProposalValidationException implements Exception {
+  const AgentFutureProposalValidationException(this.message);
+
+  final String message;
+
+  @override
+  String toString() => 'AgentFutureProposalValidationException: $message';
+}

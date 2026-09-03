@@ -1,0 +1,304 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
+
+import '../constants/agent_audit_constants.dart';
+import '../constants/agent_dispatcher_constants.dart';
+import '../constants/agent_task_constants.dart';
+import '../models/agent_task.dart';
+import '../models/agent_task_assignment.dart';
+import '../models/agent_worker.dart';
+import 'agent_audit_service.dart';
+
+// =========================================================
+// AI AGENT â€” ATOMIC TASK ASSIGNMENT
+// =========================================================
+//
+// Task and worker are revalidated and updated in one
+// Firestore transaction.
+//
+// This prevents:
+// - two dispatchers assigning the same task
+// - worker capacity overflow
+// - assignment to stale/disabled workers
+// - role/module mismatch
+// - invalid or expired task state
+
+class AgentTaskAssignmentService {
+  final FirebaseFirestore _firestore;
+  late final AgentAuditService _auditService;
+
+  AgentTaskAssignmentService({FirebaseFirestore? firestore})
+    : _firestore = firestore ?? FirebaseFirestore.instance {
+    _auditService = AgentAuditService(firestore: _firestore);
+  }
+
+  CollectionReference<Map<String, dynamic>> get _tasks =>
+      _firestore.collection(AgentTaskCollection.tasks);
+
+  CollectionReference<Map<String, dynamic>> get _workers =>
+      _firestore.collection(AgentWorkerCollection.workers);
+
+  Future<AgentTaskAssignment> assign({
+    required String taskId,
+    required String workerId,
+    required String leaseToken,
+    Duration leaseDuration = const Duration(minutes: 2),
+  }) async {
+    final String normalizedTaskId = taskId.trim();
+    final String normalizedWorkerId = workerId.trim();
+    final String normalizedLeaseToken = leaseToken.trim();
+
+    if (normalizedTaskId.isEmpty) {
+      throw const AgentTaskAssignmentServiceException(
+        code: 'invalid_task_id',
+        message: 'taskId is required.',
+      );
+    }
+
+    if (normalizedWorkerId.isEmpty) {
+      throw const AgentTaskAssignmentServiceException(
+        code: 'invalid_worker_id',
+        message: 'workerId is required.',
+      );
+    }
+
+    if (normalizedLeaseToken.isEmpty) {
+      throw const AgentTaskAssignmentServiceException(
+        code: 'invalid_lease_token',
+        message: 'leaseToken is required.',
+      );
+    }
+
+    if (leaseDuration < const Duration(seconds: 30) ||
+        leaseDuration > const Duration(minutes: 10)) {
+      throw const AgentTaskAssignmentServiceException(
+        code: 'invalid_lease_duration',
+        message: 'Lease duration must be between 30 seconds and 10 minutes.',
+      );
+    }
+
+    final DocumentReference<Map<String, dynamic>> taskDocument = _tasks.doc(
+      normalizedTaskId,
+    );
+
+    final DocumentReference<Map<String, dynamic>> workerDocument = _workers.doc(
+      normalizedWorkerId,
+    );
+
+    final AgentTaskAssignment?
+    assignment = await _firestore.runTransaction<AgentTaskAssignment?>((
+      Transaction transaction,
+    ) async {
+      final DocumentSnapshot<Map<String, dynamic>> taskSnapshot =
+          await transaction.get(taskDocument);
+
+      final DocumentSnapshot<Map<String, dynamic>> workerSnapshot =
+          await transaction.get(workerDocument);
+
+      if (!taskSnapshot.exists) {
+        throw const AgentTaskAssignmentServiceException(
+          code: 'task_not_found',
+          message: 'Task does not exist.',
+        );
+      }
+
+      if (!workerSnapshot.exists) {
+        throw const AgentTaskAssignmentServiceException(
+          code: 'worker_not_found',
+          message: 'Worker does not exist.',
+        );
+      }
+
+      final AgentTask task = AgentTask.fromMap(
+        taskSnapshot.data()!,
+        documentId: taskSnapshot.id,
+      );
+
+      final AgentWorker worker = AgentWorker.fromMap(
+        workerSnapshot.data()!,
+        documentId: workerSnapshot.id,
+      );
+
+      final DateTime now = DateTime.now().toUtc();
+
+      if (task.isTerminal) {
+        throw const AgentTaskAssignmentServiceException(
+          code: 'terminal_task',
+          message: 'Terminal task cannot be assigned.',
+        );
+      }
+
+      if (task.status != AgentTaskStatus.queued &&
+          task.status != AgentTaskStatus.failed) {
+        throw AgentTaskAssignmentServiceException(
+          code: 'task_not_assignable',
+          message: 'Task status ${task.status} is not assignable.',
+        );
+      }
+
+      if (task.availableAt.toUtc().isAfter(now)) {
+        throw const AgentTaskAssignmentServiceException(
+          code: 'task_not_available',
+          message: 'Task retry/availability time has not arrived.',
+        );
+      }
+
+      if (task.hasActiveLease) {
+        throw const AgentTaskAssignmentServiceException(
+          code: 'task_already_leased',
+          message: 'Task already has an active lease.',
+        );
+      }
+
+      if (task.attemptCount >= task.maxAttempts) {
+        transaction.update(taskDocument, <String, dynamic>{
+          'status': AgentTaskStatus.deadLetter,
+          'completedAt': Timestamp.fromDate(now),
+          'updatedAt': Timestamp.fromDate(now),
+          'leaseOwnerId': null,
+          'leaseToken': null,
+          'leaseExpiresAt': null,
+          'lastErrorCode': AgentTaskFailureCode.retryLimitReached,
+          'lastErrorMessage': 'Task reached retry limit before assignment.',
+        });
+
+        _auditService.appendInTransaction(
+          transaction: transaction,
+          eventType: AgentAuditEventType.taskDeadLettered,
+          severity: AgentAuditSeverity.warning,
+          actorType: AgentAuditActorType.system,
+          actorId: 'system',
+          module: 'core',
+          actionId: 'task.assign',
+          result: AgentTaskStatus.deadLetter,
+          reason: 'Task reached retry limit before assignment.',
+          scope: <String, dynamic>{
+            'taskId': task.taskId,
+            'workerId': normalizedWorkerId,
+          },
+          metadata: <String, dynamic>{
+            'attemptCount': task.attemptCount,
+            'maxAttempts': task.maxAttempts,
+          },
+        );
+
+        return null;
+      }
+
+      if (!worker.canAcceptTask(
+        roleId: task.targetAgentRoleId,
+        module: task.module,
+        now: now,
+      )) {
+        throw const AgentTaskAssignmentServiceException(
+          code: 'worker_not_eligible',
+          message:
+              'Worker is stale, disabled, at capacity, or does not support the task.',
+        );
+      }
+
+      final DateTime leaseExpiresAt = now.add(leaseDuration);
+
+      final AgentTask assignedTask = task.copyWith(
+        status: AgentTaskStatus.leased,
+        attemptCount: task.attemptCount + 1,
+        leaseOwnerId: worker.workerId,
+        leaseToken: normalizedLeaseToken,
+        leaseExpiresAt: leaseExpiresAt,
+        startedAt: task.startedAt ?? now,
+        updatedAt: now,
+        clearError: true,
+      );
+
+      final List<String> updatedTaskIds = <String>[
+        ...worker.currentTaskIds,
+        task.taskId,
+      ];
+
+      final bool reachesCapacity =
+          updatedTaskIds.length >= worker.maxConcurrentTasks;
+
+      final AgentWorker assignedWorker = worker.copyWith(
+        currentTaskIds: List<String>.unmodifiable(updatedTaskIds),
+        status: reachesCapacity
+            ? AgentWorkerStatus.busy
+            : AgentWorkerStatus.available,
+        updatedAt: now,
+      );
+
+      assignedTask.validate();
+      assignedWorker.validate();
+
+      transaction.update(taskDocument, <String, dynamic>{
+        'status': AgentTaskStatus.leased,
+        'attemptCount': assignedTask.attemptCount,
+        'leaseOwnerId': worker.workerId,
+        'leaseToken': normalizedLeaseToken,
+        'leaseExpiresAt': Timestamp.fromDate(leaseExpiresAt),
+        'assignedAt': Timestamp.fromDate(now),
+        'startedAt': Timestamp.fromDate(assignedTask.startedAt!),
+        'updatedAt': Timestamp.fromDate(now),
+        'lastErrorCode': null,
+        'lastErrorMessage': null,
+      });
+
+      transaction.update(workerDocument, <String, dynamic>{
+        'currentTaskIds': updatedTaskIds,
+        'activeTaskCount': updatedTaskIds.length,
+        'status': assignedWorker.status,
+        'updatedAt': Timestamp.fromDate(now),
+      });
+
+      _auditService.appendInTransaction(
+        transaction: transaction,
+        eventType: AgentAuditEventType.taskAssigned,
+        severity: AgentAuditSeverity.info,
+        actorType: AgentAuditActorType.system,
+        actorId: 'system',
+        module: 'core',
+        actionId: 'task.assign',
+        result: AgentTaskStatus.leased,
+        reason: 'Task assigned to worker.',
+        scope: <String, dynamic>{
+          'taskId': task.taskId,
+          'workerId': normalizedWorkerId,
+        },
+        metadata: <String, dynamic>{
+          'attemptCount': assignedTask.attemptCount,
+          'workerStatus': assignedWorker.status,
+        },
+      );
+
+      final AgentTaskAssignment result = AgentTaskAssignment(
+        task: assignedTask,
+        worker: assignedWorker,
+        leaseToken: normalizedLeaseToken,
+        assignedAt: now,
+      );
+
+      result.validate();
+      return result;
+    });
+
+    if (assignment == null) {
+      throw const AgentTaskAssignmentServiceException(
+        code: 'retry_limit_reached',
+        message: 'Task reached its retry limit and moved to dead-letter.',
+      );
+    }
+
+    return assignment;
+  }
+}
+
+class AgentTaskAssignmentServiceException implements Exception {
+  final String code;
+  final String message;
+
+  const AgentTaskAssignmentServiceException({
+    required this.code,
+    required this.message,
+  });
+
+  @override
+  String toString() => 'AgentTaskAssignmentServiceException($code): $message';
+}

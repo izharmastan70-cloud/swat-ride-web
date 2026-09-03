@@ -1,0 +1,388 @@
+import 'package:flutter_test/flutter_test.dart';
+
+import 'package:swat_ride/ai_agent/models/agent_call_existing_ride_support_contract.dart';
+import 'package:swat_ride/ai_agent/services/agent_call_existing_ride_read_support_service.dart';
+
+class _FakeGateway implements AgentCallExistingRideReadGateway {
+  _FakeGateway({
+    this.status = AgentCallExistingRideReadStatus.found,
+    this.source = AgentCallExistingRideReadEvidence.trustedVerificationSource,
+    this.overrideRideReferenceId,
+    this.overrideCallerReferenceId,
+    this.overrideContactReferenceId,
+    this.overrideSessionId,
+    this.throwOnRead = false,
+    this.lifetime = const Duration(minutes: 1),
+    this.verifiedOffset = Duration.zero,
+    this.snapshotOverride,
+  });
+
+  final String status;
+  final String source;
+  final String? overrideRideReferenceId;
+  final String? overrideCallerReferenceId;
+  final String? overrideContactReferenceId;
+  final String? overrideSessionId;
+  final bool throwOnRead;
+  final Duration lifetime;
+  final Duration verifiedOffset;
+  final AgentCallExistingRideSupportSnapshot? snapshotOverride;
+
+  int calls = 0;
+
+  @override
+  Future<AgentCallExistingRideReadEvidence> readAuthorizedExistingRide({
+    required AgentCallExistingRideSupportRequest request,
+    required DateTime now,
+  }) async {
+    calls += 1;
+
+    if (throwOnRead) {
+      throw StateError('test gateway failure');
+    }
+
+    final DateTime verifiedAt = now.toUtc().add(verifiedOffset);
+    final String rideRef =
+        overrideRideReferenceId ?? request.trustedRideReferenceId;
+
+    final bool found = status == AgentCallExistingRideReadStatus.found;
+
+    return AgentCallExistingRideReadEvidence(
+      status: status,
+      code: found ? 'TEST_FOUND' : 'TEST_UNAVAILABLE',
+      verificationSource: source,
+      callSessionId: overrideSessionId ?? request.callSessionId,
+      requestedBy: request.requestedBy,
+      trustedCallerReferenceId:
+          overrideCallerReferenceId ?? request.trustedCallerReferenceId,
+      trustedContactReferenceId:
+          overrideContactReferenceId ?? request.trustedContactReferenceId,
+      trustedRideReferenceId: rideRef,
+      verifiedAt: verifiedAt,
+      expiresAt: verifiedAt.add(lifetime),
+      snapshot: found
+          ? snapshotOverride ??
+                AgentCallExistingRideSupportSnapshot(
+                  trustedRideReferenceId: rideRef,
+                  rideStatus: 'driver_arriving',
+                  vehicleName: 'Car',
+                  driverAssigned: true,
+                  driverDisplayName: 'Driver A',
+                  driverVehicleType: 'Sedan',
+                  driverVehicleNumber: 'SWAT-123',
+                  estimatedFare: 650,
+                  paymentStatus: 'pending',
+                  observedAt: verifiedAt,
+                )
+          : null,
+    );
+  }
+}
+
+AgentCallExistingRideSupportRequest _request({
+  String intent = AgentCallExistingRideSupportIntent.status,
+  String rideReferenceId = 'trusted-ride-ref-1',
+}) {
+  return AgentCallExistingRideSupportRequest(
+    callSessionId: 'call-session-1',
+    requestedBy: 'trusted-call-session-actor-1',
+    trustedCallerReferenceId: 'caller-ref-1',
+    trustedContactReferenceId: 'contact-ref-1',
+    trustedRideReferenceId: rideReferenceId,
+    intent: intent,
+  );
+}
+
+void main() {
+  group('Phase 49 Stage 2 Step 2B existing Ride read support', () {
+    final DateTime now = DateTime.utc(2026, 8, 18, 9);
+
+    test(
+      'valid trusted status read returns privacy-minimized snapshot',
+      () async {
+        final _FakeGateway gateway = _FakeGateway();
+        final service = AgentCallExistingRideReadSupportService(
+          gateway: gateway,
+        );
+
+        final result = await service.read(request: _request(), now: now);
+
+        expect(result.isReady, isTrue);
+        expect(result.code, 'EXISTING_RIDE_STATUS_READY');
+        expect(result.snapshot?.rideStatus, 'driver_arriving');
+        expect(result.snapshot?.driverDisplayName, 'Driver A');
+        expect(result.snapshot?.driverVehicleNumber, 'SWAT-123');
+        expect(gateway.calls, 1);
+
+        final safe = result.toSafeMap();
+        expect(safe['rideWritePerformed'], isFalse);
+        expect(safe['cancellationPerformed'], isFalse);
+        expect(safe['driverReassignmentPerformed'], isFalse);
+        expect(safe['refundPerformed'], isFalse);
+      },
+    );
+
+    test(
+      'details intent returns details-ready without adding authority',
+      () async {
+        final service = AgentCallExistingRideReadSupportService(
+          gateway: _FakeGateway(),
+        );
+
+        final result = await service.read(
+          request: _request(intent: AgentCallExistingRideSupportIntent.details),
+          now: now,
+        );
+
+        expect(result.isReady, isTrue);
+        expect(result.code, 'EXISTING_RIDE_DETAILS_READY');
+        expect(service.readOnly, isTrue);
+        expect(service.writesRide, isFalse);
+      },
+    );
+
+    test('missing trusted binding blocks before gateway', () async {
+      final _FakeGateway gateway = _FakeGateway();
+      final service = AgentCallExistingRideReadSupportService(gateway: gateway);
+
+      final result = await service.read(
+        request: const AgentCallExistingRideSupportRequest(
+          callSessionId: '',
+          requestedBy: 'actor',
+          trustedCallerReferenceId: 'caller',
+          trustedContactReferenceId: 'contact',
+          trustedRideReferenceId: 'ride',
+          intent: AgentCallExistingRideSupportIntent.status,
+        ),
+        now: now,
+      );
+
+      expect(result.isUnavailable, isTrue);
+      expect(result.code, 'TRUSTED_EXISTING_RIDE_BINDING_REQUIRED');
+      expect(gateway.calls, 0);
+    });
+
+    test('unsupported intent blocks before gateway', () async {
+      final _FakeGateway gateway = _FakeGateway();
+      final service = AgentCallExistingRideReadSupportService(gateway: gateway);
+
+      final result = await service.read(
+        request: const AgentCallExistingRideSupportRequest(
+          callSessionId: 'session',
+          requestedBy: 'actor',
+          trustedCallerReferenceId: 'caller',
+          trustedContactReferenceId: 'contact',
+          trustedRideReferenceId: 'ride',
+          intent: 'CANCEL',
+        ),
+        now: now,
+      );
+
+      expect(result.isUnavailable, isTrue);
+      expect(gateway.calls, 0);
+    });
+
+    test('gateway failure fails closed', () async {
+      final service = AgentCallExistingRideReadSupportService(
+        gateway: _FakeGateway(throwOnRead: true),
+      );
+
+      final result = await service.read(request: _request(), now: now);
+
+      expect(result.isUnavailable, isTrue);
+      expect(result.code, 'EXISTING_RIDE_READ_GATEWAY_FAILED');
+    });
+
+    test('untrusted found source fails closed', () async {
+      final service = AgentCallExistingRideReadSupportService(
+        gateway: _FakeGateway(source: 'CLIENT_ASSERTION'),
+      );
+
+      final result = await service.read(request: _request(), now: now);
+
+      expect(result.isUnavailable, isTrue);
+      expect(result.code, 'EXISTING_RIDE_READ_EVIDENCE_INVALID');
+    });
+
+    test('caller binding mismatch fails closed', () async {
+      final service = AgentCallExistingRideReadSupportService(
+        gateway: _FakeGateway(overrideCallerReferenceId: 'other-caller'),
+      );
+
+      final result = await service.read(request: _request(), now: now);
+
+      expect(result.isUnavailable, isTrue);
+      expect(result.code, 'EXISTING_RIDE_READ_BINDING_MISMATCH');
+    });
+
+    test('contact binding mismatch fails closed', () async {
+      final service = AgentCallExistingRideReadSupportService(
+        gateway: _FakeGateway(overrideContactReferenceId: 'other-contact'),
+      );
+
+      final result = await service.read(request: _request(), now: now);
+
+      expect(result.isUnavailable, isTrue);
+      expect(result.code, 'EXISTING_RIDE_READ_BINDING_MISMATCH');
+    });
+
+    test('call-session binding mismatch fails closed', () async {
+      final service = AgentCallExistingRideReadSupportService(
+        gateway: _FakeGateway(overrideSessionId: 'other-session'),
+      );
+
+      final result = await service.read(request: _request(), now: now);
+
+      expect(result.isUnavailable, isTrue);
+      expect(result.code, 'EXISTING_RIDE_READ_BINDING_MISMATCH');
+    });
+
+    test('Ride reference mismatch fails closed', () async {
+      final service = AgentCallExistingRideReadSupportService(
+        gateway: _FakeGateway(overrideRideReferenceId: 'other-ride'),
+      );
+
+      final result = await service.read(request: _request(), now: now);
+
+      expect(result.isUnavailable, isTrue);
+      expect(result.code, 'EXISTING_RIDE_READ_BINDING_MISMATCH');
+    });
+
+    test('expired evidence fails closed', () async {
+      final service = AgentCallExistingRideReadSupportService(
+        gateway: _FakeGateway(
+          verifiedOffset: const Duration(minutes: -2),
+          lifetime: const Duration(minutes: 1),
+        ),
+      );
+
+      final result = await service.read(request: _request(), now: now);
+
+      expect(result.isUnavailable, isTrue);
+      expect(result.code, 'EXISTING_RIDE_READ_EVIDENCE_EXPIRED');
+    });
+
+    test('evidence lifetime over two minutes is invalid', () async {
+      final service = AgentCallExistingRideReadSupportService(
+        gateway: _FakeGateway(lifetime: const Duration(minutes: 3)),
+      );
+
+      final result = await service.read(request: _request(), now: now);
+
+      expect(result.isUnavailable, isTrue);
+      expect(result.code, 'EXISTING_RIDE_READ_EVIDENCE_INVALID');
+    });
+
+    test('not-found and blocked both hide arbitrary Ride existence', () async {
+      final notFoundService = AgentCallExistingRideReadSupportService(
+        gateway: _FakeGateway(status: AgentCallExistingRideReadStatus.notFound),
+      );
+      final blockedService = AgentCallExistingRideReadSupportService(
+        gateway: _FakeGateway(status: AgentCallExistingRideReadStatus.blocked),
+      );
+
+      final notFound = await notFoundService.read(
+        request: _request(),
+        now: now,
+      );
+      final blocked = await blockedService.read(request: _request(), now: now);
+
+      expect(notFound.isUnavailable, isTrue);
+      expect(blocked.isUnavailable, isTrue);
+      expect(notFound.code, 'EXISTING_RIDE_SUPPORT_UNAVAILABLE');
+      expect(blocked.code, 'EXISTING_RIDE_SUPPORT_UNAVAILABLE');
+      expect(notFound.snapshot, isNull);
+      expect(blocked.snapshot, isNull);
+    });
+
+    test('unassigned Ride cannot expose driver details', () async {
+      final service = AgentCallExistingRideReadSupportService(
+        gateway: _FakeGateway(
+          snapshotOverride: AgentCallExistingRideSupportSnapshot(
+            trustedRideReferenceId: 'trusted-ride-ref-1',
+            rideStatus: 'searching',
+            vehicleName: 'Car',
+            driverAssigned: false,
+            driverDisplayName: 'Should Not Exist',
+            estimatedFare: 650,
+            paymentStatus: 'pending',
+            observedAt: now,
+          ),
+        ),
+      );
+
+      final result = await service.read(request: _request(), now: now);
+
+      expect(result.isUnavailable, isTrue);
+      expect(result.code, 'EXISTING_RIDE_READ_EVIDENCE_INVALID');
+    });
+
+    test('safe snapshot excludes sensitive Ride fields', () {
+      final snapshot = AgentCallExistingRideSupportSnapshot(
+        trustedRideReferenceId: 'ride-ref',
+        rideStatus: 'driver_assigned',
+        vehicleName: 'Car',
+        driverAssigned: true,
+        driverDisplayName: 'Driver A',
+        driverVehicleType: 'Sedan',
+        driverVehicleNumber: 'ABC-123',
+        estimatedFare: 500,
+        paymentStatus: 'pending',
+        observedAt: now,
+      );
+
+      final map = snapshot.toSafeMap();
+
+      expect(map['riderPhoneIncluded'], isFalse);
+      expect(map['driverPhoneIncluded'], isFalse);
+      expect(map['liveDriverLocationIncluded'], isFalse);
+      expect(map['rideStartPinIncluded'], isFalse);
+      expect(map['rawCoordinatesIncluded'], isFalse);
+      expect(map['paymentCredentialIncluded'], isFalse);
+    });
+
+    test(
+      'request safe map excludes phone transcript voice and Firebase user',
+      () {
+        final map = _request().toSafeMap();
+
+        expect(map['rawPhoneStored'], isFalse);
+        expect(map['transcriptStored'], isFalse);
+        expect(map['voiceStored'], isFalse);
+        expect(map['firebaseUserUsedAsCaller'], isFalse);
+      },
+    );
+
+    test('service capability boundary is read-only and fail-closed', () {
+      final service = AgentCallExistingRideReadSupportService(
+        gateway: _FakeGateway(),
+      );
+
+      expect(service.readOnly, isTrue);
+      expect(service.writesRide, isFalse);
+      expect(service.cancelsRide, isFalse);
+      expect(service.reassignsDriver, isFalse);
+      expect(service.changesPayment, isFalse);
+      expect(service.issuesRefund, isFalse);
+      expect(service.changesFare, isFalse);
+      expect(service.changesCommission, isFalse);
+      expect(service.sendsSms, isFalse);
+      expect(service.invokesTelephonyProvider, isFalse);
+      expect(service.invokesSpeechToTextProvider, isFalse);
+      expect(service.invokesTextToSpeechProvider, isFalse);
+
+      expect(service.rawPhoneCanAuthorizeRideRead, isFalse);
+      expect(service.transcriptCanAuthorizeRideRead, isFalse);
+      expect(service.voiceCanAuthorizeRideRead, isFalse);
+      expect(service.currentFirebaseUserCanImpersonateCaller, isFalse);
+      expect(service.rideReferenceAloneIsAuthority, isFalse);
+
+      expect(service.requiresTrustedCallerBinding, isTrue);
+      expect(service.requiresTrustedContactBinding, isTrue);
+      expect(service.requiresCallSessionBinding, isTrue);
+      expect(service.requiresExactRideReferenceBinding, isTrue);
+      expect(service.requiresTrustedReadGateway, isTrue);
+      expect(service.hidesUnauthorizedRideExistence, isTrue);
+    });
+  });
+}

@@ -1,0 +1,1045 @@
+import crypto from 'node:crypto';
+
+import {
+  AUTHORITY_MANIFEST_DOCUMENT,
+  CURRENT_INVENTORY_VERSION,
+  CURRENT_ROLE_COUNT,
+  LOCKED_ROLLOUT_STAGE,
+  MIGRATION_HOLD_DOCUMENT,
+  PHASE66_PROJECT_ID,
+  PROPOSED_INVENTORY_VERSION,
+  PROPOSED_ROLE_COUNT,
+  SECURITY_INCIDENT_ACTION_ID,
+  SECURITY_INCIDENT_MODULE,
+  SECURITY_INCIDENT_ROLE_ID,
+} from './contract.mjs';
+
+import {
+  proposedInventoryFingerprint,
+  proposedRoleProjection,
+  roleInventoryFingerprint,
+} from './fingerprint.mjs';
+
+import {
+  buildTrustedBootstrapPlan,
+} from './trusted_bootstrap_execution_contract.mjs';
+
+import {
+  MIGRATION_OPERATION,
+  buildAtomicMigrationExecutionPlan,
+} from './atomic_migration_execution_contract.mjs';
+
+const AGENT_APPROVALS = 'agent_approvals';
+const AGENT_ROLES = 'agent_roles';
+const AGENT_SETTINGS = 'agent_settings';
+const AGENT_AUDIT_LOGS = 'agent_audit_logs';
+
+const ROLLOUT_DOC = 'production_rollout';
+const GUARD_DOC = 'production_rollout_guard';
+
+export const LIVE_EXECUTOR_DEFAULTS = Object.freeze({
+  executionArmed: false,
+  allowAdminSdkInit: false,
+  allowCredentialLoad: false,
+  allowNetworkRead: false,
+  allowNetworkWrite: false,
+  allowBootstrapTransaction: false,
+  allowMigrationTransaction: false,
+  allowApprovalConsume: false,
+  allowRoleCreate: false,
+  allowManifestMutation: false,
+  allowMigrationHoldMutation: false,
+  allowAuditWrite: false,
+  allowGuardMutation: false,
+  allowTokenMutation: false,
+  allowReceiptMutation: false,
+  allowRepositoryAttach: false,
+  allowRepositoryArm: false,
+  allowIncidentWrite: false,
+  allowSuggestOnly: false,
+  allowAuto: false,
+});
+
+function fail(code) {
+  throw new Error(code);
+}
+
+function norm(value) {
+  return String(value ?? '').trim();
+}
+
+function upper(value) {
+  return norm(value).toUpperCase();
+}
+
+function lower(value) {
+  return norm(value).toLowerCase();
+}
+
+function isSha256(value) {
+  return /^[0-9a-f]{64}$/i.test(norm(value));
+}
+
+function toMillis(value) {
+  if (typeof value?.toMillis === 'function') {
+    return value.toMillis();
+  }
+
+  if (value instanceof Date) {
+    return value.getTime();
+  }
+
+  return Number.NaN;
+}
+
+function sha256Hex(value) {
+  return crypto
+    .createHash('sha256')
+    .update(String(value), 'utf8')
+    .digest('hex');
+}
+
+function stableNormalize(value) {
+  if (Array.isArray(value)) {
+    return value.map(stableNormalize);
+  }
+
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.keys(value)
+        .sort((a, b) => a.localeCompare(b))
+        .map((key) => [key, stableNormalize(value[key])]),
+    );
+  }
+
+  return value;
+}
+
+function stableSha256(value) {
+  return sha256Hex(
+    JSON.stringify(stableNormalize(value)),
+  );
+}
+
+function assertAllWriteControlsFalse(config) {
+  for (const [name, value] of Object.entries(config)) {
+    if (
+      name.startsWith('allow') &&
+      value === true
+    ) {
+      fail(`live_executor_write_or_network_flag_enabled:${name}`);
+    }
+  }
+}
+
+export function assertLiveExecutorDefaultDisarmed() {
+  if (LIVE_EXECUTOR_DEFAULTS.executionArmed !== false) {
+    fail('live_executor_default_execution_must_be_disarmed');
+  }
+
+  assertAllWriteControlsFalse(LIVE_EXECUTOR_DEFAULTS);
+
+  return true;
+}
+
+function assertExecutionWord(config, expected) {
+  if (norm(config?.executionWord) !== expected) {
+    fail('exact_execution_word_required');
+  }
+}
+
+function assertBootstrapArmed(config) {
+  if (config?.executionArmed !== true) {
+    fail('bootstrap_execution_not_armed');
+  }
+
+  assertExecutionWord(
+    config,
+    'PHASE66_BOOTSTRAP_MANIFEST_HOLD_ONLY',
+  );
+
+  const requiredTrue = [
+    'allowAdminSdkInit',
+    'allowCredentialLoad',
+    'allowNetworkRead',
+    'allowNetworkWrite',
+    'allowBootstrapTransaction',
+    'allowManifestMutation',
+    'allowMigrationHoldMutation',
+    'allowAuditWrite',
+  ];
+
+  for (const key of requiredTrue) {
+    if (config?.[key] !== true) {
+      fail(`bootstrap_required_execution_flag_missing:${key}`);
+    }
+  }
+
+  const requiredFalse = [
+    'allowMigrationTransaction',
+    'allowApprovalConsume',
+    'allowRoleCreate',
+    'allowGuardMutation',
+    'allowTokenMutation',
+    'allowReceiptMutation',
+    'allowRepositoryAttach',
+    'allowRepositoryArm',
+    'allowIncidentWrite',
+    'allowSuggestOnly',
+    'allowAuto',
+  ];
+
+  for (const key of requiredFalse) {
+    if (config?.[key] !== false) {
+      fail(`bootstrap_forbidden_flag_must_remain_false:${key}`);
+    }
+  }
+}
+
+function assertMigrationArmed(config) {
+  if (config?.executionArmed !== true) {
+    fail('migration_execution_not_armed');
+  }
+
+  assertExecutionWord(
+    config,
+    'PHASE66_ATOMIC_MIGRATION_22_TO_23_ONLY',
+  );
+
+  const requiredTrue = [
+    'allowAdminSdkInit',
+    'allowCredentialLoad',
+    'allowNetworkRead',
+    'allowNetworkWrite',
+    'allowMigrationTransaction',
+    'allowApprovalConsume',
+    'allowRoleCreate',
+    'allowManifestMutation',
+    'allowMigrationHoldMutation',
+    'allowAuditWrite',
+  ];
+
+  for (const key of requiredTrue) {
+    if (config?.[key] !== true) {
+      fail(`migration_required_execution_flag_missing:${key}`);
+    }
+  }
+
+  const requiredFalse = [
+    'allowBootstrapTransaction',
+    'allowGuardMutation',
+    'allowTokenMutation',
+    'allowReceiptMutation',
+    'allowRepositoryAttach',
+    'allowRepositoryArm',
+    'allowIncidentWrite',
+    'allowSuggestOnly',
+    'allowAuto',
+  ];
+
+  for (const key of requiredFalse) {
+    if (config?.[key] !== false) {
+      fail(`migration_forbidden_flag_must_remain_false:${key}`);
+    }
+  }
+}
+
+function normalizeApproval(snapshot) {
+  if (!snapshot.exists) {
+    fail('approval_document_missing');
+  }
+
+  const data = snapshot.data() ?? {};
+  const scope =
+    data.actionScope && typeof data.actionScope === 'object'
+      ? data.actionScope
+      : {};
+
+  return {
+    approvalId: snapshot.id,
+    roleId: norm(data.roleId),
+    actionId: norm(data.actionId),
+    module: norm(data.module),
+    risk: upper(data.risk),
+    requestedBy: norm(data.requestedBy),
+    status: upper(data.status),
+    createdAt: data.createdAt,
+    expiresAt: data.expiresAt,
+    decidedAt: data.decidedAt,
+    consumedAt: data.consumedAt,
+    decidedBy: norm(data.decidedBy),
+    actionScope: scope,
+  };
+}
+
+function validateFreshApprovedMigrationApproval(
+  approval,
+  nowMillis,
+  expectedBindingSha256,
+) {
+  if (
+    approval.roleId !== SECURITY_INCIDENT_ROLE_ID ||
+    approval.actionId !== SECURITY_INCIDENT_ACTION_ID ||
+    approval.module !== SECURITY_INCIDENT_MODULE ||
+    approval.risk !== 'CRITICAL'
+  ) {
+    fail('approval_exact_role_action_module_risk_mismatch');
+  }
+
+  if (approval.status !== 'APPROVED') {
+    fail('approval_must_be_approved');
+  }
+
+  if (approval.consumedAt != null) {
+    fail('approval_already_consumed');
+  }
+
+  if (!approval.decidedBy) {
+    fail('approval_decided_by_missing');
+  }
+
+  if (
+    approval.requestedBy &&
+    approval.decidedBy === approval.requestedBy
+  ) {
+    fail('requester_approver_separation_violated');
+  }
+
+  const createdMillis = toMillis(approval.createdAt);
+  const expiresMillis = toMillis(approval.expiresAt);
+  const decidedMillis = toMillis(approval.decidedAt);
+
+  if (
+    !Number.isFinite(createdMillis) ||
+    !Number.isFinite(expiresMillis) ||
+    !Number.isFinite(decidedMillis)
+  ) {
+    fail('approval_timestamp_evidence_incomplete');
+  }
+
+  if (expiresMillis - createdMillis !== 15 * 60 * 1000) {
+    fail('approval_validity_window_must_be_exactly_15_minutes');
+  }
+
+  if (
+    decidedMillis < createdMillis ||
+    decidedMillis > expiresMillis
+  ) {
+    fail('approval_decision_outside_validity_window');
+  }
+
+  if (nowMillis > expiresMillis) {
+    fail('approval_expired_before_execution');
+  }
+
+  const scope = approval.actionScope;
+
+  if (
+    norm(scope.operation) !== MIGRATION_OPERATION ||
+    lower(scope.bindingFingerprintSha256) !==
+      lower(expectedBindingSha256) ||
+    norm(scope.currentInventoryVersion) !==
+      CURRENT_INVENTORY_VERSION ||
+    norm(scope.proposedInventoryVersion) !==
+      PROPOSED_INVENTORY_VERSION ||
+    Number(scope.currentRoleCount) !== CURRENT_ROLE_COUNT ||
+    Number(scope.proposedRoleCount) !== PROPOSED_ROLE_COUNT ||
+    Number(scope.currentGuardRevision) !== 2 ||
+    Number(scope.proposedGuardRevision) !== 3 ||
+    norm(scope.targetRoleId) !== SECURITY_INCIDENT_ROLE_ID ||
+    norm(scope.targetModule) !== SECURITY_INCIDENT_MODULE ||
+    norm(scope.targetActionId) !== SECURITY_INCIDENT_ACTION_ID ||
+    norm(scope.requestedRolloutStage) !== LOCKED_ROLLOUT_STAGE ||
+    scope.proposedRoleEnabled !== false ||
+    scope.oldGuardImmutable !== true ||
+    scope.oldArmingTokenImmutable !== true ||
+    scope.oldActivationReceiptImmutable !== true ||
+    scope.existingActivationTokenReuseAllowed !== false ||
+    scope.repositoryAttachAuthorized !== false ||
+    scope.repositoryArmAuthorized !== false ||
+    scope.firstIncidentWriteAuthorized !== false ||
+    scope.authorizesSuggestOnly !== false ||
+    scope.authorizesAuto !== false ||
+    scope.selfApprovalAllowed !== false
+  ) {
+    fail('approval_action_scope_exact_binding_mismatch');
+  }
+
+  for (const key of [
+    'currentInventoryFingerprintSha256',
+    'proposedInventoryFingerprintSha256',
+    'currentControlFingerprintSha256',
+    'preconditionEvidenceFingerprintSha256',
+    'ownerApproverReferenceSha256',
+  ]) {
+    if (!isSha256(scope[key])) {
+      fail(`approval_scope_sha256_missing_or_invalid:${key}`);
+    }
+  }
+
+  return true;
+}
+
+function roleDocumentsToMaps(snapshot) {
+  return snapshot.docs.map((doc) => {
+    const data = doc.data() ?? {};
+    const persistedRoleId = norm(data.roleId);
+
+    if (!persistedRoleId) {
+      fail('live_role_document_missing_role_id');
+    }
+
+    if (doc.id !== persistedRoleId) {
+      fail('live_role_document_id_role_id_mismatch');
+    }
+
+    return {
+      ...data,
+      roleId: persistedRoleId,
+    };
+  });
+}
+
+function exactRoleIds(roles) {
+  return roles
+    .map((role) => norm(role.roleId))
+    .sort((a, b) => a.localeCompare(b));
+}
+
+function validateMonitorOnlyBoundary(
+  rollout,
+  guard,
+  currentControlFingerprintSha256,
+) {
+  if (
+    upper(rollout.stage) !== 'MONITOR_ONLY' ||
+    Number(rollout.autoTrafficPercent ?? 0) !== 0 ||
+    Number(rollout.businessWriteTrafficPercent ?? 0) !== 0 ||
+    rollout.externalChannelsEnabled !== false
+  ) {
+    fail('rollout_not_exact_monitor_only');
+  }
+
+  if (
+    guard.enabled !== true ||
+    Number(guard.revision) !== 2 ||
+    upper(guard.targetStage) !== 'MONITOR_ONLY' ||
+    guard.runtimeMonitorOnlyOverlayEnforced !== true ||
+    guard.noAutoBusinessWriteBoundaryEnforced !== true ||
+    Number(guard.autoTrafficPercent ?? 0) !== 0 ||
+    Number(guard.businessWriteTrafficPercent ?? 0) !== 0 ||
+    guard.externalChannelsEnabled !== false ||
+    Number(guard.roleCount) !== 22 ||
+    lower(guard.controlStateFingerprintSha256) !==
+      lower(currentControlFingerprintSha256)
+  ) {
+    fail('guard_not_exact_monitor_only_revision_2');
+  }
+}
+
+function bootstrapAuditData({
+  approvalId,
+  actorReferenceSha256,
+  migrationIdSha256,
+  currentInventoryFingerprintSha256,
+  proposedInventoryFingerprintSha256,
+  currentControlFingerprintSha256,
+  ownerApprovalBindingSha256,
+  serverTimestamp,
+}) {
+  return {
+    eventType: 'SYSTEM_EVENT',
+    severity: 'WARNING',
+    actorType: 'ADMIN',
+    actorId: actorReferenceSha256,
+    module: 'ai_core',
+    actionId:
+      'ai.production_rollout.role_inventory.bootstrap_22_to_23',
+    result: 'MIGRATION_HOLD_HELD',
+    reason:
+      'Owner-bound 22-to-23 role inventory migration manifest and fail-closed hold bootstrapped.',
+    relatedApprovalId: approvalId,
+    scope: {
+      currentInventoryVersion: CURRENT_INVENTORY_VERSION,
+      proposedInventoryVersion: PROPOSED_INVENTORY_VERSION,
+      currentRoleCount: CURRENT_ROLE_COUNT,
+      proposedRoleCount: PROPOSED_ROLE_COUNT,
+      currentInventoryFingerprintSha256,
+      proposedInventoryFingerprintSha256,
+      currentControlFingerprintSha256,
+      ownerApprovalBindingSha256,
+      migrationIdSha256,
+      expectedGuardRevision: 2,
+      targetRoleId: SECURITY_INCIDENT_ROLE_ID,
+      targetActionId: SECURITY_INCIDENT_ACTION_ID,
+      migrationHoldActive: true,
+      repositoryAttachAuthorized: false,
+      repositoryArmAuthorized: false,
+      firstIncidentWriteAuthorized: false,
+      authorizesSuggestOnly: false,
+      authorizesAuto: false,
+    },
+    createdAt: serverTimestamp(),
+  };
+}
+
+function migrationAuditData({
+  approvalId,
+  actorReferenceSha256,
+  migrationIdSha256,
+  serverTimestamp,
+}) {
+  return {
+    eventType: 'SYSTEM_EVENT',
+    severity: 'WARNING',
+    actorType: 'ADMIN',
+    actorId: actorReferenceSha256,
+    module: 'ai_core',
+    actionId:
+      'ai.production_rollout.role_inventory.migrate_22_to_23',
+    result: 'ROLE_DELTA_COMMITTED',
+    reason:
+      'Fresh Owner-bound approval consumed atomically with disabled 22-to-23 role delta under migration hold.',
+    relatedApprovalId: approvalId,
+    scope: {
+      currentInventoryVersion: CURRENT_INVENTORY_VERSION,
+      proposedInventoryVersion: PROPOSED_INVENTORY_VERSION,
+      currentRoleCount: CURRENT_ROLE_COUNT,
+      proposedRoleCount: PROPOSED_ROLE_COUNT,
+      migrationIdSha256,
+      postMigrationRebindRequired: true,
+      migrationHoldActive: true,
+      repositoryAttachAuthorized: false,
+      repositoryArmAuthorized: false,
+      firstIncidentWriteAuthorized: false,
+      authorizesSuggestOnly: false,
+      authorizesAuto: false,
+      guardRevision: 2,
+    },
+    createdAt: serverTimestamp(),
+  };
+}
+
+async function createAdminContext(config) {
+  if (
+    config.allowAdminSdkInit !== true ||
+    config.allowCredentialLoad !== true ||
+    config.allowNetworkRead !== true
+  ) {
+    fail('admin_context_not_authorized');
+  }
+
+  const [
+    appModule,
+    firestoreModule,
+  ] = await Promise.all([
+    import('firebase-admin/app'),
+    import('firebase-admin/firestore'),
+  ]);
+
+  const app = appModule.initializeApp(
+    {
+      credential: appModule.applicationDefault(),
+      projectId: PHASE66_PROJECT_ID,
+    },
+    `phase66-step1i-trusted-executor-${Date.now()}`,
+  );
+
+  const db = firestoreModule.getFirestore(app);
+
+  return {
+    app,
+    db,
+    deleteApp: appModule.deleteApp,
+    FieldValue: firestoreModule.FieldValue,
+  };
+}
+
+export async function executeTrustedBootstrap({
+  config = LIVE_EXECUTOR_DEFAULTS,
+  approvalId,
+  expectedBindingSha256,
+  migrationIdSha256,
+  actorReferenceSha256,
+}) {
+  assertBootstrapArmed(config);
+
+  if (
+    !norm(approvalId) ||
+    !isSha256(expectedBindingSha256) ||
+    !isSha256(migrationIdSha256) ||
+    !isSha256(actorReferenceSha256)
+  ) {
+    fail('bootstrap_input_binding_invalid');
+  }
+
+  const context = await createAdminContext(config);
+
+  try {
+    const { db, FieldValue } = context;
+
+    const result =
+      await db.runTransaction(async (tx) => {
+        const approvals =
+          db.collection(AGENT_APPROVALS);
+
+        const roles =
+          db.collection(AGENT_ROLES);
+
+        const settings =
+          db.collection(AGENT_SETTINGS);
+
+        const audit =
+          db.collection(AGENT_AUDIT_LOGS).doc();
+
+        const approvalRef =
+          approvals.doc(approvalId);
+
+        const targetRoleRef =
+          roles.doc(SECURITY_INCIDENT_ROLE_ID);
+
+        const rolloutRef =
+          settings.doc(ROLLOUT_DOC);
+
+        const guardRef =
+          settings.doc(GUARD_DOC);
+
+        const manifestRef =
+          settings.doc(AUTHORITY_MANIFEST_DOCUMENT);
+
+        const holdRef =
+          settings.doc(MIGRATION_HOLD_DOCUMENT);
+
+        const [
+          approvalSnap,
+          targetRoleSnap,
+          rolloutSnap,
+          guardSnap,
+          manifestSnap,
+          holdSnap,
+          rolesSnap,
+        ] = await Promise.all([
+          tx.get(approvalRef),
+          tx.get(targetRoleRef),
+          tx.get(rolloutRef),
+          tx.get(guardRef),
+          tx.get(manifestRef),
+          tx.get(holdRef),
+          tx.get(roles.orderBy('__name__')),
+        ]);
+
+        if (manifestSnap.exists || holdSnap.exists) {
+          fail('bootstrap_manifest_or_hold_already_exists');
+        }
+
+        if (targetRoleSnap.exists) {
+          fail('bootstrap_target_role_already_exists');
+        }
+
+        const approval =
+          normalizeApproval(approvalSnap);
+
+        validateFreshApprovedMigrationApproval(
+          approval,
+          Date.now(),
+          expectedBindingSha256,
+        );
+
+        const currentRoles =
+          roleDocumentsToMaps(rolesSnap);
+
+        if (currentRoles.length !== 22) {
+          fail('bootstrap_live_role_count_not_22');
+        }
+
+        const currentFingerprint =
+          roleInventoryFingerprint(currentRoles);
+
+        const proposedFingerprint =
+          proposedInventoryFingerprint(currentRoles);
+
+        const scope =
+          approval.actionScope;
+
+        if (
+          lower(scope.currentInventoryFingerprintSha256) !==
+            lower(currentFingerprint) ||
+          lower(scope.proposedInventoryFingerprintSha256) !==
+            lower(proposedFingerprint)
+        ) {
+          fail('bootstrap_live_inventory_fingerprint_mismatch');
+        }
+
+        const rollout =
+          rolloutSnap.data() ?? {};
+
+        const guard =
+          guardSnap.data() ?? {};
+
+        validateMonitorOnlyBoundary(
+          rollout,
+          guard,
+          scope.currentControlFingerprintSha256,
+        );
+
+        const evidence = {
+          projectId: PHASE66_PROJECT_ID,
+          rolloutStage: 'MONITOR_ONLY',
+          guardRevision: 2,
+          guardRoleCount: 22,
+          freshTrustedLiveInventoryRead: true,
+          freshOwnerVerified: true,
+          ownerApprovalBound: true,
+          clientSecurityRoleWritesDenied: true,
+          clientManifestWritesDenied: true,
+          clientMigrationHoldWritesDenied: true,
+          oldGuardImmutable: true,
+          oldArmingTokenImmutable: true,
+          oldActivationReceiptImmutable: true,
+          sameTransactionAuditReady: true,
+          dedicatedRoleAbsent: true,
+          approvalStatus: 'APPROVED',
+          approvalExpired: false,
+          approvalConsumed: false,
+          ownerApprovalId: approvalId,
+          ownerApprovalBindingSha256:
+            expectedBindingSha256,
+          migrationIdSha256,
+          currentInventoryFingerprintSha256:
+            currentFingerprint,
+          proposedInventoryFingerprintSha256:
+            proposedFingerprint,
+          currentControlFingerprintSha256:
+            scope.currentControlFingerprintSha256,
+          actorReferenceSha256,
+          exactCurrentRoleIds:
+            exactRoleIds(currentRoles),
+          existingActivationTokenReuseAllowed: false,
+        };
+
+        const plan =
+          buildTrustedBootstrapPlan(evidence);
+
+        tx.create(
+          manifestRef,
+          {
+            ...plan.authorityManifest,
+            updatedAt: FieldValue.serverTimestamp(),
+          },
+        );
+
+        tx.create(
+          holdRef,
+          {
+            ...plan.migrationHold,
+            updatedAt: FieldValue.serverTimestamp(),
+          },
+        );
+
+        tx.create(
+          audit,
+          bootstrapAuditData({
+            approvalId,
+            actorReferenceSha256,
+            migrationIdSha256,
+            currentInventoryFingerprintSha256:
+              currentFingerprint,
+            proposedInventoryFingerprintSha256:
+              proposedFingerprint,
+            currentControlFingerprintSha256:
+              scope.currentControlFingerprintSha256,
+            ownerApprovalBindingSha256:
+              expectedBindingSha256,
+            serverTimestamp:
+              FieldValue.serverTimestamp,
+          }),
+        );
+
+        return {
+          status: 'BOOTSTRAP_COMMITTED',
+          manifestRevision: 1,
+          migrationHoldStatus: 'HELD',
+          roleCreated: false,
+          approvalConsumed: false,
+          currentRoleCount: 22,
+        };
+      });
+
+    return result;
+  } finally {
+    await context.deleteApp(context.app);
+  }
+}
+
+export async function executeAtomicMigration({
+  config = LIVE_EXECUTOR_DEFAULTS,
+  approvalId,
+  expectedBindingSha256,
+  migrationIdSha256,
+  actorReferenceSha256,
+}) {
+  assertMigrationArmed(config);
+
+  if (
+    !norm(approvalId) ||
+    !isSha256(expectedBindingSha256) ||
+    !isSha256(migrationIdSha256) ||
+    !isSha256(actorReferenceSha256)
+  ) {
+    fail('migration_input_binding_invalid');
+  }
+
+  const context = await createAdminContext(config);
+
+  try {
+    const { db, FieldValue } = context;
+
+    const result =
+      await db.runTransaction(async (tx) => {
+        const approvals =
+          db.collection(AGENT_APPROVALS);
+
+        const roles =
+          db.collection(AGENT_ROLES);
+
+        const settings =
+          db.collection(AGENT_SETTINGS);
+
+        const audit =
+          db.collection(AGENT_AUDIT_LOGS).doc();
+
+        const approvalRef =
+          approvals.doc(approvalId);
+
+        const targetRoleRef =
+          roles.doc(SECURITY_INCIDENT_ROLE_ID);
+
+        const rolloutRef =
+          settings.doc(ROLLOUT_DOC);
+
+        const guardRef =
+          settings.doc(GUARD_DOC);
+
+        const manifestRef =
+          settings.doc(AUTHORITY_MANIFEST_DOCUMENT);
+
+        const holdRef =
+          settings.doc(MIGRATION_HOLD_DOCUMENT);
+
+        const [
+          approvalSnap,
+          targetRoleSnap,
+          rolloutSnap,
+          guardSnap,
+          manifestSnap,
+          holdSnap,
+          rolesSnap,
+        ] = await Promise.all([
+          tx.get(approvalRef),
+          tx.get(targetRoleRef),
+          tx.get(rolloutRef),
+          tx.get(guardRef),
+          tx.get(manifestRef),
+          tx.get(holdRef),
+          tx.get(roles.orderBy('__name__')),
+        ]);
+
+        if (!manifestSnap.exists || !holdSnap.exists) {
+          fail('migration_manifest_and_hold_required');
+        }
+
+        if (targetRoleSnap.exists) {
+          fail('migration_target_role_collision');
+        }
+
+        const approval =
+          normalizeApproval(approvalSnap);
+
+        validateFreshApprovedMigrationApproval(
+          approval,
+          Date.now(),
+          expectedBindingSha256,
+        );
+
+        const currentRoles =
+          roleDocumentsToMaps(rolesSnap);
+
+        if (currentRoles.length !== 22) {
+          fail('migration_live_role_count_not_22');
+        }
+
+        const currentFingerprint =
+          roleInventoryFingerprint(currentRoles);
+
+        const proposedFingerprint =
+          proposedInventoryFingerprint(currentRoles);
+
+        const scope =
+          approval.actionScope;
+
+        if (
+          lower(scope.currentInventoryFingerprintSha256) !==
+            lower(currentFingerprint) ||
+          lower(scope.proposedInventoryFingerprintSha256) !==
+            lower(proposedFingerprint)
+        ) {
+          fail('migration_live_inventory_fingerprint_mismatch');
+        }
+
+        const rollout =
+          rolloutSnap.data() ?? {};
+
+        const guard =
+          guardSnap.data() ?? {};
+
+        validateMonitorOnlyBoundary(
+          rollout,
+          guard,
+          scope.currentControlFingerprintSha256,
+        );
+
+        const manifest =
+          manifestSnap.data() ?? {};
+
+        const hold =
+          holdSnap.data() ?? {};
+
+        const evidence = {
+          projectId: PHASE66_PROJECT_ID,
+          rolloutStage: 'MONITOR_ONLY',
+          guardRevision: 2,
+          guardRoleCount: 22,
+          autoTrafficPercent: 0,
+          businessWriteTrafficPercent: 0,
+          externalChannelsEnabled: false,
+          runtimeMonitorOnlyOverlayEnforced: true,
+          noAutoBusinessWriteBoundaryEnforced: true,
+
+          freshTrustedLiveInventoryRead: true,
+          dedicatedRoleAbsent: true,
+          requesterApproverSeparated:
+            Boolean(approval.decidedBy) &&
+            approval.decidedBy !== approval.requestedBy,
+          freshOwnerDecisionVerified: true,
+          migrationRulesVerified: true,
+
+          oldGuardImmutable: true,
+          oldArmingTokenImmutable: true,
+          oldActivationReceiptImmutable: true,
+          existingArmingTokenReuseAllowed: false,
+
+          migrationIdSha256,
+          actorReferenceSha256,
+          currentControlFingerprintSha256:
+            scope.currentControlFingerprintSha256,
+
+          currentRoles,
+          currentInventoryFingerprintSha256:
+            currentFingerprint,
+          proposedInventoryFingerprintSha256:
+            proposedFingerprint,
+
+          approval: {
+            approvalId,
+            status: 'APPROVED',
+            expired: false,
+            consumed: false,
+            operation: scope.operation,
+            roleId: approval.roleId,
+            actionId: approval.actionId,
+            module: approval.module,
+            bindingFingerprintSha256:
+              expectedBindingSha256,
+          },
+
+          authorityManifest: manifest,
+          migrationHold: hold,
+        };
+
+        const plan =
+          buildAtomicMigrationExecutionPlan(evidence);
+
+        tx.update(
+          approvalRef,
+          {
+            status: 'CONSUMED',
+            consumedAt: FieldValue.serverTimestamp(),
+          },
+        );
+
+        tx.create(
+          targetRoleRef,
+          {
+            ...plan.transaction.write2CreateDisabledRole,
+            createdAt: FieldValue.serverTimestamp(),
+            updatedAt: FieldValue.serverTimestamp(),
+          },
+        );
+
+        tx.set(
+          manifestRef,
+          {
+            ...plan.transaction.write3AuthorityManifestPatch,
+            updatedAt: FieldValue.serverTimestamp(),
+          },
+          { merge: false },
+        );
+
+        tx.set(
+          holdRef,
+          {
+            ...hold,
+            ...plan.transaction.write4MigrationHoldPatch,
+            updatedAt: FieldValue.serverTimestamp(),
+          },
+          { merge: false },
+        );
+
+        tx.create(
+          audit,
+          migrationAuditData({
+            approvalId,
+            actorReferenceSha256,
+            migrationIdSha256,
+            serverTimestamp:
+              FieldValue.serverTimestamp,
+          }),
+        );
+
+        return {
+          status: 'ROLE_DELTA_COMMITTED',
+          approvalConsumed: true,
+          roleCount: 23,
+          roleEnabled: false,
+          manifestRevision: 2,
+          migrationHoldActive: true,
+          postMigrationRebindRequired: true,
+        };
+      });
+
+    return result;
+  } finally {
+    await context.deleteApp(context.app);
+  }
+}
+
+export const LIVE_EXECUTOR_CONTRACT = Object.freeze({
+  projectId: PHASE66_PROJECT_ID,
+  defaultExecutionArmed: false,
+  bootstrapExecutionWord:
+    'PHASE66_BOOTSTRAP_MANIFEST_HOLD_ONLY',
+  migrationExecutionWord:
+    'PHASE66_ATOMIC_MIGRATION_22_TO_23_ONLY',
+  bootstrapConsumesApproval: false,
+  migrationConsumesApproval: true,
+  migrationCreatesRoleEnabled: false,
+  migrationReleasesHold: false,
+  writesOldGuard: false,
+  writesOldArmingToken: false,
+  writesOldActivationReceipt: false,
+  repositoryAttachAuthorized: false,
+  repositoryArmAuthorized: false,
+  firstIncidentWriteAuthorized: false,
+  suggestOnlyAuthorized: false,
+  autoAuthorized: false,
+});

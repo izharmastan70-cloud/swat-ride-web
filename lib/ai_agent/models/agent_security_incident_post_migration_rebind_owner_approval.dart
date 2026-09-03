@@ -1,0 +1,150 @@
+class AgentSecurityIncidentPostMigrationRebindOwnerApproval {
+  const AgentSecurityIncidentPostMigrationRebindOwnerApproval({
+    required this.approvalId,
+    required this.migrationApprovalId,
+    required this.requesterReferenceSha256,
+    required this.ownerApproverReferenceSha256,
+    required this.postMigrationSnapshotSha256,
+    required this.roleInventoryFingerprintSha256,
+    required this.postMigrationControlStateFingerprintSha256,
+    required this.rebindPlanFingerprintSha256,
+    required this.roleCount,
+    required this.currentAuthorityManifestRevision,
+    required this.targetAuthorityManifestRevision,
+    required this.currentGuardRevision,
+    required this.targetGuardRevision,
+    required this.targetRoleId,
+    required this.targetModule,
+    required this.targetActionId,
+    required this.requestedRolloutStage,
+    required this.approvedAtUtc,
+    required this.expiresAtUtc,
+    required this.freshOwnerVerifiedAtApproval,
+    required this.explicitOwnerApproval,
+    required this.selfApprovalAllowed,
+    required this.migrationApprovalReuseAllowed,
+    required this.oldArmingTokenReuseAllowed,
+    required this.roleEnableAuthorized,
+    required this.migrationHoldReleaseAuthorized,
+    required this.repositoryAttachAuthorized,
+    required this.repositoryArmAuthorized,
+    required this.firstIncidentWriteAuthorized,
+    required this.authorizesSuggestOnly,
+    required this.authorizesAuto,
+  });
+
+  final String approvalId;
+  final String migrationApprovalId;
+
+  /// Hash references only. Raw Owner identity/session/token is not part of this
+  /// contract.
+  final String requesterReferenceSha256;
+  final String ownerApproverReferenceSha256;
+
+  final String postMigrationSnapshotSha256;
+  final String roleInventoryFingerprintSha256;
+  final String postMigrationControlStateFingerprintSha256;
+  final String rebindPlanFingerprintSha256;
+  final int roleCount;
+
+  final int currentAuthorityManifestRevision;
+  final int targetAuthorityManifestRevision;
+
+  final int currentGuardRevision;
+  final int targetGuardRevision;
+
+  final String targetRoleId;
+  final String targetModule;
+  final String targetActionId;
+  final String requestedRolloutStage;
+
+  final DateTime approvedAtUtc;
+  final DateTime expiresAtUtc;
+
+  final bool freshOwnerVerifiedAtApproval;
+  final bool explicitOwnerApproval;
+  final bool selfApprovalAllowed;
+  final bool migrationApprovalReuseAllowed;
+  final bool oldArmingTokenReuseAllowed;
+
+  final bool roleEnableAuthorized;
+  final bool migrationHoldReleaseAuthorized;
+  final bool repositoryAttachAuthorized;
+  final bool repositoryArmAuthorized;
+  final bool firstIncidentWriteAuthorized;
+
+  final bool authorizesSuggestOnly;
+  final bool authorizesAuto;
+
+  Map<String, Object> toExactActionScope() {
+    return <String, Object>{
+      'operation':
+          AgentSecurityIncidentPostMigrationRebindApprovalContract.operation,
+      'postMigrationSnapshotSha256': postMigrationSnapshotSha256.toLowerCase(),
+      'roleInventoryFingerprintSha256': roleInventoryFingerprintSha256
+          .toLowerCase(),
+      'postMigrationControlStateFingerprintSha256':
+          postMigrationControlStateFingerprintSha256.toLowerCase(),
+      'rebindPlanFingerprintSha256': rebindPlanFingerprintSha256.toLowerCase(),
+      'roleCount': roleCount,
+      'currentAuthorityManifestRevision': currentAuthorityManifestRevision,
+      'targetAuthorityManifestRevision': targetAuthorityManifestRevision,
+      'currentGuardRevision': currentGuardRevision,
+      'targetGuardRevision': targetGuardRevision,
+      'targetRoleId': targetRoleId,
+      'targetModule': targetModule,
+      'targetActionId': targetActionId,
+      'requestedRolloutStage': requestedRolloutStage,
+      'migrationApprovalId': migrationApprovalId,
+      'freshOwnerVerifiedAtApproval': freshOwnerVerifiedAtApproval,
+      'explicitOwnerApproval': explicitOwnerApproval,
+      'selfApprovalAllowed': selfApprovalAllowed,
+      'migrationApprovalReuseAllowed': migrationApprovalReuseAllowed,
+      'oldArmingTokenReuseAllowed': oldArmingTokenReuseAllowed,
+      'roleEnableAuthorized': roleEnableAuthorized,
+      'migrationHoldReleaseAuthorized': migrationHoldReleaseAuthorized,
+      'repositoryAttachAuthorized': repositoryAttachAuthorized,
+      'repositoryArmAuthorized': repositoryArmAuthorized,
+      'firstIncidentWriteAuthorized': firstIncidentWriteAuthorized,
+      'authorizesSuggestOnly': authorizesSuggestOnly,
+      'authorizesAuto': authorizesAuto,
+    };
+  }
+}
+
+abstract final class AgentSecurityIncidentPostMigrationRebindApprovalContract {
+  static const String operation =
+      'REBIND_SECURITY_INCIDENT_POST_MIGRATION_AUTHORITY_23_ROLE';
+
+  static const String targetRoleId = 'security_incident_agent';
+  static const String targetModule = 'security_incident';
+  static const String targetActionId = 'security_incident.attach_runtime';
+  static const String targetRolloutStage = 'MONITOR_ONLY';
+
+  static const int roleCount = 23;
+  static const int currentAuthorityManifestRevision = 2;
+  static const int targetAuthorityManifestRevision = 3;
+  static const int currentGuardRevision = 2;
+  static const int targetGuardRevision = 3;
+
+  static const Duration maxApprovalValidity = Duration(minutes: 15);
+
+  static const String lockedPostMigrationSnapshotSha256 =
+      '01ac8f1fc48b9d95a3ca1179ab550fe7c7a630b9605ff937b2feedd10a6c1888';
+
+  static const String lockedRoleInventoryFingerprintSha256 =
+      'd16c6ff23b0d56a9e3b76146eefe22832d86196dee48bb05d6bc0129f48e2f2a';
+
+  static const bool requiresFreshOwnerAtApproval = true;
+  static const bool requiresSeparateRebindApproval = true;
+  static const bool migrationApprovalReuseAllowed = false;
+  static const bool postRebindEnableApprovalReuseAllowed = false;
+
+  static const bool roleEnableAuthorized = false;
+  static const bool migrationHoldReleaseAuthorized = false;
+  static const bool repositoryAttachAuthorized = false;
+  static const bool repositoryArmAuthorized = false;
+  static const bool firstIncidentWriteAuthorized = false;
+  static const bool authorizesSuggestOnly = false;
+  static const bool authorizesAuto = false;
+}

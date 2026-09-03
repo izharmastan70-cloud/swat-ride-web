@@ -1,0 +1,458 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
+
+import '../constants/agent_task_constants.dart';
+import '../models/agent_task.dart';
+import 'agent_task_queue.dart';
+
+// =========================================================
+// AI AGENT Ã¢â‚¬â€ TASK EXECUTION LIFECYCLE
+// =========================================================
+//
+// Phase 21:
+// leased -> processing -> completed
+//
+// Every transition validates worker ID, lease token and lease
+// expiry inside a Firestore transaction.
+
+class AgentTaskExecutionService {
+  final FirebaseFirestore _firestore;
+
+  AgentTaskExecutionService({
+    FirebaseFirestore? firestore,
+  }) : _firestore = firestore ?? FirebaseFirestore.instance;
+
+  CollectionReference<Map<String, dynamic>> get _tasks =>
+      _firestore.collection(AgentTaskCollection.tasks);
+
+  Future<AgentTask> markProcessing({
+    required String taskId,
+    required String workerId,
+    required String leaseToken,
+  }) {
+    return _transitionWithLease(
+      taskId: taskId,
+      workerId: workerId,
+      leaseToken: leaseToken,
+      allowedCurrentStatuses: const <String>[
+        AgentTaskStatus.leased,
+      ],
+      nextStatus: AgentTaskStatus.processing,
+    );
+  }
+
+  Future<AgentTask> complete({
+    required String taskId,
+    required String workerId,
+    required String leaseToken,
+    required String resultSummary,
+  }) async {
+    final String normalizedSummary = resultSummary.trim();
+
+    if (normalizedSummary.isEmpty) {
+      throw const AgentTaskQueueException(
+        code: 'invalid_result_summary',
+        message: 'resultSummary is required.',
+      );
+    }
+
+    if (normalizedSummary.length > 2000) {
+      throw const AgentTaskQueueException(
+        code: 'result_summary_too_long',
+        message:
+            'resultSummary must not exceed 2000 characters.',
+      );
+    }
+
+    return _transitionWithLease(
+      taskId: taskId,
+      workerId: workerId,
+      leaseToken: leaseToken,
+      allowedCurrentStatuses: const <String>[
+        AgentTaskStatus.processing,
+      ],
+      nextStatus: AgentTaskStatus.completed,
+      resultSummary: normalizedSummary,
+      clearLease: true,
+      markCompleted: true,
+    );
+  }
+
+  Future<AgentTask> cancel({
+    required String taskId,
+    required String cancelledBy,
+    required String reason,
+  }) async {
+    final String normalizedTaskId = taskId.trim();
+    final String normalizedCancelledBy = cancelledBy.trim();
+    final String normalizedReason = reason.trim();
+
+    if (normalizedTaskId.isEmpty) {
+      throw const AgentTaskQueueException(
+        code: 'invalid_task_id',
+        message: 'taskId is required.',
+      );
+    }
+
+    if (normalizedCancelledBy.isEmpty) {
+      throw const AgentTaskQueueException(
+        code: 'invalid_cancelled_by',
+        message: 'cancelledBy is required.',
+      );
+    }
+
+    if (normalizedReason.isEmpty) {
+      throw const AgentTaskQueueException(
+        code: 'invalid_cancel_reason',
+        message: 'Cancellation reason is required.',
+      );
+    }
+
+    if (normalizedReason.length >
+        AgentTaskDefaults.maxErrorLength) {
+      throw AgentTaskQueueException(
+        code: 'cancel_reason_too_long',
+        message:
+            'Cancellation reason must not exceed '
+            '${AgentTaskDefaults.maxErrorLength} characters.',
+      );
+    }
+
+    final DocumentReference<Map<String, dynamic>> document =
+        _tasks.doc(normalizedTaskId);
+
+    return _firestore.runTransaction<AgentTask>(
+      (Transaction transaction) async {
+        final DocumentSnapshot<Map<String, dynamic>> snapshot =
+            await transaction.get(document);
+
+        if (!snapshot.exists) {
+          throw const AgentTaskQueueException(
+            code: 'task_not_found',
+            message: 'Task does not exist.',
+          );
+        }
+
+        final AgentTask task = AgentTask.fromMap(
+          snapshot.data()!,
+          documentId: snapshot.id,
+        );
+
+        if (task.status == AgentTaskStatus.cancelled) {
+          return task;
+        }
+
+        if (task.isTerminal) {
+          throw AgentTaskQueueException(
+            code: 'terminal_task',
+            message:
+                'Terminal task with status ${task.status} cannot be cancelled.',
+          );
+        }
+
+        final DateTime now = DateTime.now().toUtc();
+        final String cancellationSummary =
+            'Cancelled by $normalizedCancelledBy. '
+            'Reason: $normalizedReason';
+
+        final AgentTask cancelledTask = task.copyWith(
+          status: AgentTaskStatus.cancelled,
+          completedAt: now,
+          updatedAt: now,
+          resultSummary: cancellationSummary,
+          clearLease: true,
+          clearError: true,
+        );
+
+        cancelledTask.validate();
+
+        transaction.update(
+          document,
+          <String, dynamic>{
+            'status': AgentTaskStatus.cancelled,
+            'completedAt': Timestamp.fromDate(now),
+            'updatedAt': Timestamp.fromDate(now),
+            'resultSummary': cancellationSummary,
+            'cancelledBy': normalizedCancelledBy,
+            'cancelReason': normalizedReason,
+            'leaseOwnerId': null,
+            'leaseToken': null,
+            'leaseExpiresAt': null,
+            'lastErrorCode': null,
+            'lastErrorMessage': null,
+          },
+        );
+
+        return cancelledTask;
+      },
+    );
+  }
+  Future<AgentTask> fail({
+    required String taskId,
+    required String workerId,
+    required String leaseToken,
+    required String errorCode,
+    required String errorMessage,
+    Duration retryDelay = const Duration(seconds: 30),
+  }) async {
+    final String normalizedTaskId = taskId.trim();
+    final String normalizedWorkerId = workerId.trim();
+    final String normalizedLeaseToken = leaseToken.trim();
+    final String normalizedErrorCode = errorCode.trim();
+    final String normalizedErrorMessage = errorMessage.trim();
+
+    if (normalizedTaskId.isEmpty ||
+        normalizedWorkerId.isEmpty ||
+        normalizedLeaseToken.isEmpty) {
+      throw const AgentTaskQueueException(
+        code: 'invalid_failure_request',
+        message:
+            'taskId, workerId and leaseToken are required.',
+      );
+    }
+
+    if (normalizedErrorCode.isEmpty ||
+        normalizedErrorMessage.isEmpty) {
+      throw const AgentTaskQueueException(
+        code: 'invalid_failure_details',
+        message: 'errorCode and errorMessage are required.',
+      );
+    }
+
+    if (normalizedErrorMessage.length >
+        AgentTaskDefaults.maxErrorLength) {
+      throw AgentTaskQueueException(
+        code: 'error_message_too_long',
+        message:
+            'errorMessage must not exceed '
+            '${AgentTaskDefaults.maxErrorLength} characters.',
+      );
+    }
+
+    if (retryDelay.isNegative ||
+        retryDelay > const Duration(hours: 24)) {
+      throw const AgentTaskQueueException(
+        code: 'invalid_retry_delay',
+        message:
+            'retryDelay must be between zero and 24 hours.',
+      );
+    }
+
+    final DocumentReference<Map<String, dynamic>> document =
+        _tasks.doc(normalizedTaskId);
+
+    return _firestore.runTransaction<AgentTask>(
+      (Transaction transaction) async {
+        final DocumentSnapshot<Map<String, dynamic>> snapshot =
+            await transaction.get(document);
+
+        if (!snapshot.exists) {
+          throw const AgentTaskQueueException(
+            code: 'task_not_found',
+            message: 'Task does not exist.',
+          );
+        }
+
+        final AgentTask task = AgentTask.fromMap(
+          snapshot.data()!,
+          documentId: snapshot.id,
+        );
+
+        if (task.status != AgentTaskStatus.leased &&
+            task.status != AgentTaskStatus.processing) {
+          throw AgentTaskQueueException(
+            code: 'invalid_failure_status',
+            message:
+                'Task status ${task.status} cannot be failed by a worker.',
+          );
+        }
+
+        if (task.leaseOwnerId != normalizedWorkerId ||
+            task.leaseToken != normalizedLeaseToken) {
+          throw const AgentTaskQueueException(
+            code: 'lease_mismatch',
+            message:
+                'Worker ID or lease token does not match the active lease.',
+          );
+        }
+
+        final DateTime now = DateTime.now().toUtc();
+        final DateTime? leaseExpiry =
+            task.leaseExpiresAt?.toUtc();
+
+        if (leaseExpiry == null ||
+            !leaseExpiry.isAfter(now)) {
+          throw const AgentTaskQueueException(
+            code: 'lease_expired',
+            message: 'The active task lease has expired.',
+          );
+        }
+
+        final bool retryLimitReached =
+            task.attemptCount >= task.maxAttempts;
+
+        final String nextStatus = retryLimitReached
+            ? AgentTaskStatus.deadLetter
+            : AgentTaskStatus.failed;
+
+        final DateTime nextAvailableAt = retryLimitReached
+            ? now
+            : now.add(retryDelay);
+
+        final AgentTask failedTask = task.copyWith(
+          status: nextStatus,
+          availableAt: nextAvailableAt,
+          updatedAt: now,
+          completedAt: retryLimitReached ? now : null,
+          lastErrorCode: retryLimitReached
+              ? AgentTaskFailureCode.retryLimitReached
+              : normalizedErrorCode,
+          lastErrorMessage: normalizedErrorMessage,
+          clearLease: true,
+        );
+
+        failedTask.validate();
+
+        transaction.update(
+          document,
+          <String, dynamic>{
+            'status': nextStatus,
+            'availableAt': Timestamp.fromDate(nextAvailableAt),
+            'updatedAt': Timestamp.fromDate(now),
+            'completedAt': retryLimitReached
+                ? Timestamp.fromDate(now)
+                : null,
+            'leaseOwnerId': null,
+            'leaseToken': null,
+            'leaseExpiresAt': null,
+            'lastErrorCode': failedTask.lastErrorCode,
+            'lastErrorMessage': normalizedErrorMessage,
+          },
+        );
+
+        return failedTask;
+      },
+    );
+  }
+  Future<AgentTask> _transitionWithLease({
+    required String taskId,
+    required String workerId,
+    required String leaseToken,
+    required List<String> allowedCurrentStatuses,
+    required String nextStatus,
+    String? resultSummary,
+    bool clearLease = false,
+    bool markCompleted = false,
+  }) async {
+    final String normalizedTaskId = taskId.trim();
+    final String normalizedWorkerId = workerId.trim();
+    final String normalizedLeaseToken = leaseToken.trim();
+
+    if (normalizedTaskId.isEmpty) {
+      throw const AgentTaskQueueException(
+        code: 'invalid_task_id',
+        message: 'taskId is required.',
+      );
+    }
+
+    if (normalizedWorkerId.isEmpty) {
+      throw const AgentTaskQueueException(
+        code: 'invalid_worker_id',
+        message: 'workerId is required.',
+      );
+    }
+
+    if (normalizedLeaseToken.isEmpty) {
+      throw const AgentTaskQueueException(
+        code: 'invalid_lease_token',
+        message: 'leaseToken is required.',
+      );
+    }
+
+    final DocumentReference<Map<String, dynamic>> document =
+        _tasks.doc(normalizedTaskId);
+
+    return _firestore.runTransaction<AgentTask>(
+      (Transaction transaction) async {
+        final DocumentSnapshot<Map<String, dynamic>> snapshot =
+            await transaction.get(document);
+
+        if (!snapshot.exists) {
+          throw const AgentTaskQueueException(
+            code: 'task_not_found',
+            message: 'Task does not exist.',
+          );
+        }
+
+        final AgentTask task = AgentTask.fromMap(
+          snapshot.data()!,
+          documentId: snapshot.id,
+        );
+
+        if (!allowedCurrentStatuses.contains(task.status)) {
+          throw AgentTaskQueueException(
+            code: 'invalid_status_transition',
+            message:
+                'Task status ${task.status} cannot transition to $nextStatus.',
+          );
+        }
+
+        if (task.leaseOwnerId != normalizedWorkerId ||
+            task.leaseToken != normalizedLeaseToken) {
+          throw const AgentTaskQueueException(
+            code: 'lease_mismatch',
+            message:
+                'Worker ID or lease token does not match the active lease.',
+          );
+        }
+
+        final DateTime now = DateTime.now().toUtc();
+        final DateTime? leaseExpiry =
+            task.leaseExpiresAt?.toUtc();
+
+        if (leaseExpiry == null ||
+            !leaseExpiry.isAfter(now)) {
+          throw const AgentTaskQueueException(
+            code: 'lease_expired',
+            message: 'The active task lease has expired.',
+          );
+        }
+
+        final AgentTask updatedTask = task.copyWith(
+          status: nextStatus,
+          updatedAt: now,
+          completedAt: markCompleted ? now : null,
+          resultSummary: resultSummary,
+          clearLease: clearLease,
+          clearError: markCompleted,
+        );
+
+        updatedTask.validate();
+
+        final Map<String, dynamic> updates =
+            <String, dynamic>{
+          'status': nextStatus,
+          'updatedAt': Timestamp.fromDate(now),
+        };
+
+        if (resultSummary != null) {
+          updates['resultSummary'] = resultSummary;
+        }
+
+        if (markCompleted) {
+          updates['completedAt'] = Timestamp.fromDate(now);
+          updates['lastErrorCode'] = null;
+          updates['lastErrorMessage'] = null;
+        }
+
+        if (clearLease) {
+          updates['leaseOwnerId'] = null;
+          updates['leaseToken'] = null;
+          updates['leaseExpiresAt'] = null;
+        }
+
+        transaction.update(document, updates);
+        return updatedTask;
+      },
+    );
+  }
+}

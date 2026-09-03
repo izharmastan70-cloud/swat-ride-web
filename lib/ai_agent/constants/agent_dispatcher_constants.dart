@@ -1,0 +1,86 @@
+// =========================================================
+// AI AGENT â€” MASTER DISPATCHER CONSTANTS
+// =========================================================
+//
+// Phase 22 foundation:
+// - worker registration
+// - worker heartbeat
+// - role-based task assignment
+// - workload limits
+// - stale worker detection
+
+class AgentWorkerCollection {
+  AgentWorkerCollection._();
+
+  static const String workers = 'agent_workers';
+}
+
+class AgentWorkerStatus {
+  AgentWorkerStatus._();
+
+  static const String available = 'available';
+  static const String busy = 'busy';
+  static const String draining = 'draining';
+  static const String offline = 'offline';
+  static const String unhealthy = 'unhealthy';
+
+  static const List<String> values = <String>[
+    available,
+    busy,
+    draining,
+    offline,
+    unhealthy,
+  ];
+
+  static bool isValid(String value) => values.contains(value);
+
+
+  static bool canAcceptTask(String value) {
+    return value == available || value == busy;
+  }
+}
+
+class AgentWorkerType {
+  AgentWorkerType._();
+
+  static const String freeAi = 'free_ai';
+  static const String localAi = 'local_ai';
+  static const String paidCodeAi = 'paid_code_ai';
+  static const String rulesWorker = 'rules_worker';
+
+  static const List<String> values = <String>[
+    freeAi,
+    localAi,
+    paidCodeAi,
+    rulesWorker,
+  ];
+
+  static bool isValid(String value) => values.contains(value);
+}
+
+class AgentDispatcherFailureCode {
+  AgentDispatcherFailureCode._();
+
+  static const String noEligibleWorker = 'no_eligible_worker';
+  static const String workerAtCapacity = 'worker_at_capacity';
+  static const String workerStale = 'worker_stale';
+  static const String roleMismatch = 'role_mismatch';
+  static const String moduleMismatch = 'module_mismatch';
+  static const String providerUnavailable =
+      'provider_unavailable';
+  static const String assignmentConflict =
+      'assignment_conflict';
+  static const String dispatchTimeout = 'dispatch_timeout';
+}
+
+class AgentDispatcherDefaults {
+  AgentDispatcherDefaults._();
+
+  static const int heartbeatIntervalSeconds = 30;
+  static const int staleWorkerAfterSeconds = 120;
+  static const int defaultMaxConcurrentTasks = 1;
+  static const int maximumConcurrentTasks = 10;
+  static const int dispatchBatchLimit = 25;
+  static const int maximumRoleCount = 50;
+  static const int maximumModuleCount = 30;
+}

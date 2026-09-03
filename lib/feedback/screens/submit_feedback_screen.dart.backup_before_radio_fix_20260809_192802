@@ -1,0 +1,1091 @@
+import 'package:flutter/material.dart';
+
+import '../models/feedback_model.dart';
+import '../services/feedback_service.dart';
+import '../widgets/star_rating_widget.dart';
+
+class SubmitFeedbackScreen extends StatefulWidget {
+  final FeedbackServiceType serviceType;
+  final FeedbackTargetType targetType;
+
+  final String sourceId;
+  final String sourceReference;
+
+  final String reviewerId;
+  final String reviewerName;
+  final String reviewerPhotoUrl;
+
+  final String targetId;
+  final String targetName;
+  final String targetPhotoUrl;
+
+  final bool serviceCompleted;
+  final bool allowSkip;
+
+  final FeedbackService? feedbackService;
+  final ValueChanged<String>? onSubmitted;
+  final VoidCallback? onSkipped;
+  final VoidCallback? onComplaintRequested;
+
+  const SubmitFeedbackScreen({
+    super.key,
+    required this.serviceType,
+    required this.targetType,
+    required this.sourceId,
+    this.sourceReference = '',
+    required this.reviewerId,
+    this.reviewerName = '',
+    this.reviewerPhotoUrl = '',
+    required this.targetId,
+    required this.targetName,
+    this.targetPhotoUrl = '',
+    this.serviceCompleted = true,
+    this.allowSkip = true,
+    this.feedbackService,
+    this.onSubmitted,
+    this.onSkipped,
+    this.onComplaintRequested,
+  });
+
+  @override
+  State<SubmitFeedbackScreen> createState() => _SubmitFeedbackScreenState();
+}
+
+class _SubmitFeedbackScreenState extends State<SubmitFeedbackScreen> {
+  late final FeedbackService _feedbackService;
+  final TextEditingController _commentController = TextEditingController();
+
+  FeedbackRuntimeSettings? _settings;
+
+  int _rating = 0;
+  final Set<String> _selectedTags = <String>{};
+  FeedbackVisibility _visibility = FeedbackVisibility.public;
+
+  bool _loading = true;
+  bool _submitting = false;
+  bool _canSubmit = false;
+  String _unavailableMessage = '';
+
+  static const Map<int, List<String>> _ratingTags = <int, List<String>>{
+    1: <String>[
+      'Unsafe',
+      'Very Late',
+      'Rude',
+      'Poor Service',
+      'Overcharged',
+      'Not Clean',
+    ],
+    2: <String>[
+      'Late',
+      'Needs Improvement',
+      'Expensive',
+      'Not Clean',
+      'Communication Issue',
+    ],
+    3: <String>[
+      'Good Service',
+      'Average',
+      'On Time',
+      'Fair Price',
+      'Okay Experience',
+    ],
+    4: <String>[
+      'Very Good',
+      'Polite',
+      'Clean',
+      'On Time',
+      'Professional',
+      'Good Value',
+    ],
+    5: <String>[
+      'Excellent',
+      'Very Polite',
+      'Very Clean',
+      'On Time',
+      'Professional',
+      'Highly Recommended',
+    ],
+  };
+
+  @override
+  void initState() {
+    super.initState();
+    _feedbackService = widget.feedbackService ?? FeedbackService();
+    _loadAvailability();
+  }
+
+  @override
+  void dispose() {
+    _commentController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _loadAvailability() async {
+    try {
+      final settings = await _feedbackService.getSettings();
+
+      if (!settings.feedbackEnabled) {
+        _setUnavailable(settings, 'Feedback is currently unavailable.');
+        return;
+      }
+
+      if (!settings.isServiceEnabled(widget.serviceType)) {
+        _setUnavailable(
+          settings,
+          '${widget.serviceType.displayName} ratings are currently unavailable.',
+        );
+        return;
+      }
+
+      if (settings.verifiedServicesOnly && !widget.serviceCompleted) {
+        _setUnavailable(
+          settings,
+          'You can rate this service after it is completed.',
+        );
+        return;
+      }
+
+      final canSubmit = await _feedbackService.canSubmitFeedback(
+        serviceType: widget.serviceType,
+        sourceId: widget.sourceId,
+        reviewerId: widget.reviewerId,
+        serviceCompleted: widget.serviceCompleted,
+      );
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        _settings = settings;
+        _canSubmit = canSubmit;
+        _loading = false;
+        _unavailableMessage = canSubmit
+            ? ''
+            : 'You have already reviewed this completed service.';
+      });
+    } on Object catch (error) {
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        _loading = false;
+        _canSubmit = false;
+        _unavailableMessage = 'Feedback could not be loaded. Please try again.';
+      });
+
+      debugPrint('SubmitFeedbackScreen load error: $error');
+    }
+  }
+
+  void _setUnavailable(FeedbackRuntimeSettings settings, String message) {
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {
+      _settings = settings;
+      _loading = false;
+      _canSubmit = false;
+      _unavailableMessage = message;
+    });
+  }
+
+  List<String> get _availableTags {
+    final commonTags = _ratingTags[_rating] ?? const <String>[];
+    final serviceTags = _serviceSpecificTags();
+
+    return <String>{...commonTags, ...serviceTags}.toList(growable: false);
+  }
+
+  List<String> _serviceSpecificTags() {
+    if (_rating == 0) {
+      return const <String>[];
+    }
+
+    switch (widget.serviceType) {
+      case FeedbackServiceType.ride:
+        return _rating <= 2
+            ? const <String>['Driving Issue', 'Vehicle Issue', 'Pickup Issue']
+            : const <String>[
+                'Safe Driving',
+                'Comfortable Ride',
+                'Good Vehicle',
+              ];
+      case FeedbackServiceType.food:
+        return _rating <= 2
+            ? const <String>[
+                'Food Quality',
+                'Cold Food',
+                'Missing Item',
+                'Delivery Issue',
+              ]
+            : const <String>[
+                'Tasty Food',
+                'Fresh Food',
+                'Good Packaging',
+                'Fast Delivery',
+              ];
+      case FeedbackServiceType.hotel:
+        return _rating <= 2
+            ? const <String>['Room Issue', 'Staff Issue', 'Booking Issue']
+            : const <String>['Clean Room', 'Helpful Staff', 'Good Location'];
+      case FeedbackServiceType.tour:
+        return _rating <= 2
+            ? const <String>['Guide Issue', 'Vehicle Issue', 'Schedule Issue']
+            : const <String>[
+                'Knowledgeable Guide',
+                'Great Experience',
+                'Well Organized',
+              ];
+      case FeedbackServiceType.cargo:
+        return _rating <= 2
+            ? const <String>['Damaged Item', 'Handling Issue', 'Delivery Delay']
+            : const <String>[
+                'Careful Handling',
+                'Safe Delivery',
+                'Fast Delivery',
+              ];
+      case FeedbackServiceType.parcel:
+        return _rating <= 2
+            ? const <String>[
+                'Missing Parcel',
+                'Damaged Parcel',
+                'Delivery Delay',
+              ]
+            : const <String>['Safe Delivery', 'Fast Delivery', 'Good Handling'];
+      case FeedbackServiceType.studentRide:
+        return _rating <= 2
+            ? const <String>[
+                'Safety Concern',
+                'Pickup Delay',
+                'Communication Issue',
+              ]
+            : const <String>[
+                'Safe Driver',
+                'On-time Pickup',
+                'Good Communication',
+              ];
+      case FeedbackServiceType.other:
+        return const <String>[];
+    }
+  }
+
+  void _changeRating(int rating) {
+    setState(() {
+      _rating = rating;
+      _selectedTags.clear();
+    });
+  }
+
+  void _toggleTag(String tag) {
+    setState(() {
+      if (_selectedTags.contains(tag)) {
+        _selectedTags.remove(tag);
+      } else if (_selectedTags.length < FeedbackModel.maximumTagCount) {
+        _selectedTags.add(tag);
+      }
+    });
+  }
+
+  Future<void> _submit() async {
+    if (_rating == 0) {
+      _showMessage('Please select a star rating.');
+      return;
+    }
+
+    if (_submitting || !_canSubmit) {
+      return;
+    }
+
+    setState(() {
+      _submitting = true;
+    });
+
+    try {
+      final now = DateTime.now();
+
+      final feedback = FeedbackModel(
+        id: '',
+        serviceType: widget.serviceType,
+        targetType: widget.targetType,
+        sourceId: widget.sourceId,
+        sourceReference: widget.sourceReference,
+        reviewerId: widget.reviewerId,
+        reviewerName: widget.reviewerName,
+        reviewerPhotoUrl: widget.reviewerPhotoUrl,
+        targetId: widget.targetId,
+        targetName: widget.targetName,
+        targetPhotoUrl: widget.targetPhotoUrl,
+        rating: _rating,
+        tags: _selectedTags.toList(growable: false),
+        comment: _commentController.text,
+        isVerified: widget.serviceCompleted,
+        visibility: _visibility,
+        status: FeedbackStatus.pendingModeration,
+        createdAt: now,
+        updatedAt: now,
+        metadata: <String, dynamic>{'submittedFrom': 'submit_feedback_screen'},
+      );
+
+      final feedbackId = await _feedbackService.submitFeedback(
+        feedback: feedback,
+        serviceCompleted: widget.serviceCompleted,
+      );
+
+      if (!mounted) {
+        return;
+      }
+
+      widget.onSubmitted?.call(feedbackId);
+
+      if (_rating <= 2) {
+        await _showComplaintPrompt();
+      }
+
+      if (!mounted) {
+        return;
+      }
+
+      await _showSuccessDialog();
+
+      if (!mounted) {
+        return;
+      }
+
+      Navigator.of(context).pop(feedbackId);
+    } on FeedbackOperationException catch (error) {
+      if (!mounted) {
+        return;
+      }
+
+      _showMessage(error.message);
+    } on Object catch (error) {
+      if (!mounted) {
+        return;
+      }
+
+      _showMessage('Feedback could not be submitted. Please try again.');
+      debugPrint('Submit feedback error: $error');
+    } finally {
+      if (mounted) {
+        setState(() {
+          _submitting = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _showComplaintPrompt() async {
+    final shouldComplain = await showModalBottomSheet<bool>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (context) {
+        return SafeArea(
+          child: Container(
+            margin: const EdgeInsets.all(12),
+            padding: const EdgeInsets.fromLTRB(22, 18, 22, 22),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(28),
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: <Widget>[
+                Container(
+                  width: 42,
+                  height: 5,
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFDADCE0),
+                    borderRadius: BorderRadius.circular(99),
+                  ),
+                ),
+                const SizedBox(height: 22),
+                Container(
+                  width: 58,
+                  height: 58,
+                  decoration: const BoxDecoration(
+                    color: Color(0xFFFFECEC),
+                    shape: BoxShape.circle,
+                  ),
+                  child: const Icon(
+                    Icons.support_agent_rounded,
+                    color: Color(0xFFD93025),
+                    size: 30,
+                  ),
+                ),
+                const SizedBox(height: 16),
+                const Text(
+                  'Need help with this service?',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    color: Color(0xFF202124),
+                    fontSize: 20,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                const Text(
+                  'You gave a low rating. You can also create a complaint ticket for admin support.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    color: Color(0xFF6F737A),
+                    fontSize: 14,
+                    height: 1.4,
+                  ),
+                ),
+                const SizedBox(height: 22),
+                SizedBox(
+                  width: double.infinity,
+                  height: 52,
+                  child: FilledButton(
+                    onPressed: () => Navigator.of(context).pop(true),
+                    style: FilledButton.styleFrom(
+                      backgroundColor: const Color(0xFF111315),
+                      foregroundColor: Colors.white,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(16),
+                      ),
+                    ),
+                    child: const Text(
+                      'Create complaint',
+                      style: TextStyle(fontWeight: FontWeight.w800),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                TextButton(
+                  onPressed: () => Navigator.of(context).pop(false),
+                  child: const Text('Not now'),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+
+    if (shouldComplain == true) {
+      widget.onComplaintRequested?.call();
+    }
+  }
+
+  Future<void> _showSuccessDialog() {
+    return showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) {
+        return AlertDialog(
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(24),
+          ),
+          icon: Container(
+            width: 64,
+            height: 64,
+            decoration: const BoxDecoration(
+              color: Color(0xFFE8F5E9),
+              shape: BoxShape.circle,
+            ),
+            child: const Icon(
+              Icons.check_rounded,
+              color: Color(0xFF188038),
+              size: 36,
+            ),
+          ),
+          title: const Text('Thank you!', textAlign: TextAlign.center),
+          content: const Text(
+            'Your feedback helps us improve SWAT RIDE.',
+            textAlign: TextAlign.center,
+          ),
+          actionsAlignment: MainAxisAlignment.center,
+          actions: <Widget>[
+            FilledButton(
+              onPressed: () => Navigator.of(context).pop(),
+              style: FilledButton.styleFrom(
+                backgroundColor: const Color(0xFF111315),
+              ),
+              child: const Text('Done'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  void _skip() {
+    widget.onSkipped?.call();
+    Navigator.of(context).pop();
+  }
+
+  void _showMessage(String message) {
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(content: Text(message), behavior: SnackBarBehavior.floating),
+      );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFFF7F7F8),
+      appBar: AppBar(
+        backgroundColor: const Color(0xFFF7F7F8),
+        surfaceTintColor: Colors.transparent,
+        elevation: 0,
+        leading: IconButton(
+          onPressed: () => Navigator.of(context).maybePop(),
+          icon: const Icon(Icons.close_rounded),
+        ),
+        title: const Text(
+          'Rate your experience',
+          style: TextStyle(fontWeight: FontWeight.w800),
+        ),
+        actions: <Widget>[
+          if (widget.allowSkip && !_submitting)
+            TextButton(
+              onPressed: _skip,
+              child: const Text(
+                'Later',
+                style: TextStyle(
+                  color: Color(0xFF5F6368),
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ),
+        ],
+      ),
+      body: _loading
+          ? const Center(
+              child: CircularProgressIndicator(color: Color(0xFF111315)),
+            )
+          : !_canSubmit
+          ? _UnavailableView(
+              message: _unavailableMessage,
+              onClose: () => Navigator.of(context).maybePop(),
+            )
+          : _buildForm(),
+    );
+  }
+
+  Widget _buildForm() {
+    return SafeArea(
+      top: false,
+      child: Column(
+        children: <Widget>[
+          Expanded(
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.fromLTRB(18, 8, 18, 24),
+              child: Column(
+                children: <Widget>[
+                  _buildTargetCard(),
+                  const SizedBox(height: 18),
+                  _buildRatingCard(),
+                  if (_rating > 0) ...<Widget>[
+                    const SizedBox(height: 18),
+                    _buildTagsCard(),
+                    const SizedBox(height: 18),
+                    _buildCommentCard(),
+                    const SizedBox(height: 18),
+                    _buildVisibilityCard(),
+                  ],
+                ],
+              ),
+            ),
+          ),
+          _buildSubmitArea(),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildTargetCard() {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(color: const Color(0xFFE8E9EC)),
+      ),
+      child: Row(
+        children: <Widget>[
+          _TargetAvatar(
+            imageUrl: widget.targetPhotoUrl,
+            targetType: widget.targetType,
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                Text(
+                  widget.targetName.trim().isEmpty
+                      ? widget.targetType.displayName
+                      : widget.targetName.trim(),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: Color(0xFF202124),
+                    fontSize: 18,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  '${widget.serviceType.displayName} • ${widget.targetType.displayName}',
+                  style: const TextStyle(
+                    color: Color(0xFF777C85),
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                if (widget.sourceReference.trim().isNotEmpty) ...[
+                  const SizedBox(height: 4),
+                  Text(
+                    widget.sourceReference.trim(),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: Color(0xFF9AA0A6),
+                      fontSize: 12,
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+          const Icon(
+            Icons.verified_rounded,
+            color: Color(0xFF188038),
+            size: 22,
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildRatingCard() {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(18, 26, 18, 24),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(color: const Color(0xFFE8E9EC)),
+      ),
+      child: Column(
+        children: <Widget>[
+          Text(
+            _ratingQuestion,
+            textAlign: TextAlign.center,
+            style: const TextStyle(
+              color: Color(0xFF202124),
+              fontSize: 20,
+              height: 1.25,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+          const SizedBox(height: 22),
+          StarRatingWidget(
+            rating: _rating,
+            onRatingChanged: _changeRating,
+            showRatingLabel: true,
+            semanticsLabel: '${widget.serviceType.displayName} service rating',
+          ),
+        ],
+      ),
+    );
+  }
+
+  String get _ratingQuestion {
+    switch (widget.targetType) {
+      case FeedbackTargetType.driver:
+      case FeedbackTargetType.foodRider:
+      case FeedbackTargetType.tourismDriver:
+      case FeedbackTargetType.cargoDriver:
+      case FeedbackTargetType.parcelRider:
+      case FeedbackTargetType.studentRideDriver:
+        return 'How was your experience with the driver?';
+      case FeedbackTargetType.restaurant:
+        return 'How was your food experience?';
+      case FeedbackTargetType.hotel:
+        return 'How was your hotel experience?';
+      case FeedbackTargetType.tourGuide:
+        return 'How was your tour guide?';
+      case FeedbackTargetType.service:
+      case FeedbackTargetType.other:
+        return 'How was your experience?';
+    }
+  }
+
+  Widget _buildTagsCard() {
+    return _SectionCard(
+      title: 'What stood out?',
+      subtitle: 'Select all that apply',
+      child: Wrap(
+        spacing: 9,
+        runSpacing: 9,
+        children: _availableTags
+            .map((tag) {
+              final selected = _selectedTags.contains(tag);
+
+              return ChoiceChip(
+                label: Text(tag),
+                selected: selected,
+                onSelected: (_) => _toggleTag(tag),
+                selectedColor: const Color(0xFFFFE082),
+                backgroundColor: const Color(0xFFF4F5F6),
+                side: BorderSide(
+                  color: selected
+                      ? const Color(0xFFFFC107)
+                      : const Color(0xFFE1E4E8),
+                ),
+                labelStyle: TextStyle(
+                  color: const Color(0xFF202124),
+                  fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
+                ),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                showCheckmark: false,
+              );
+            })
+            .toList(growable: false),
+      ),
+    );
+  }
+
+  Widget _buildCommentCard() {
+    return _SectionCard(
+      title: 'Tell us more',
+      subtitle: 'Optional',
+      child: TextField(
+        controller: _commentController,
+        minLines: 4,
+        maxLines: 7,
+        maxLength: FeedbackModel.maximumCommentLength,
+        textCapitalization: TextCapitalization.sentences,
+        decoration: InputDecoration(
+          hintText: 'Share details about your experience...',
+          filled: true,
+          fillColor: const Color(0xFFF6F7F8),
+          counterText: '',
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(16),
+            borderSide: BorderSide.none,
+          ),
+          focusedBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(16),
+            borderSide: const BorderSide(color: Color(0xFF111315), width: 1.5),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildVisibilityCard() {
+    final settings = _settings;
+    final anonymousEnabled = settings?.anonymousReviewsEnabled ?? false;
+    final publicEnabled = settings?.publicReviewsEnabled ?? false;
+
+    return _SectionCard(
+      title: 'Review visibility',
+      subtitle: 'Choose who can see your review',
+      child: Column(
+        children: <Widget>[
+          _VisibilityTile(
+            title: 'Public',
+            subtitle: 'Your name and review may be visible',
+            icon: Icons.public_rounded,
+            value: FeedbackVisibility.public,
+            groupValue: _visibility,
+            enabled: publicEnabled,
+            onChanged: _changeVisibility,
+          ),
+          const Divider(height: 1),
+          _VisibilityTile(
+            title: 'Anonymous',
+            subtitle: 'Your identity will not be shown publicly',
+            icon: Icons.visibility_off_rounded,
+            value: FeedbackVisibility.anonymous,
+            groupValue: _visibility,
+            enabled: publicEnabled && anonymousEnabled,
+            onChanged: _changeVisibility,
+          ),
+          const Divider(height: 1),
+          _VisibilityTile(
+            title: 'Private',
+            subtitle: 'Only SWAT RIDE support and admin can see it',
+            icon: Icons.lock_outline_rounded,
+            value: FeedbackVisibility.private,
+            groupValue: _visibility,
+            enabled: true,
+            onChanged: _changeVisibility,
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _changeVisibility(FeedbackVisibility? visibility) {
+    if (visibility == null) {
+      return;
+    }
+
+    setState(() {
+      _visibility = visibility;
+    });
+  }
+
+  Widget _buildSubmitArea() {
+    final enabled = _rating > 0 && !_submitting && _canSubmit;
+
+    return Container(
+      padding: const EdgeInsets.fromLTRB(18, 14, 18, 18),
+      decoration: const BoxDecoration(
+        color: Colors.white,
+        border: Border(top: BorderSide(color: Color(0xFFE8E9EC))),
+      ),
+      child: SizedBox(
+        width: double.infinity,
+        height: 56,
+        child: FilledButton(
+          onPressed: enabled ? _submit : null,
+          style: FilledButton.styleFrom(
+            backgroundColor: const Color(0xFF111315),
+            disabledBackgroundColor: const Color(0xFFDADCE0),
+            foregroundColor: Colors.white,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(18),
+            ),
+          ),
+          child: _submitting
+              ? const SizedBox(
+                  width: 24,
+                  height: 24,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2.5,
+                    color: Colors.white,
+                  ),
+                )
+              : const Text(
+                  'Submit feedback',
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800),
+                ),
+        ),
+      ),
+    );
+  }
+}
+
+class _SectionCard extends StatelessWidget {
+  final String title;
+  final String subtitle;
+  final Widget child;
+
+  const _SectionCard({
+    required this.title,
+    required this.subtitle,
+    required this.child,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(color: const Color(0xFFE8E9EC)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Text(
+            title,
+            style: const TextStyle(
+              color: Color(0xFF202124),
+              fontSize: 17,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+          const SizedBox(height: 3),
+          Text(
+            subtitle,
+            style: const TextStyle(color: Color(0xFF8A8F98), fontSize: 13),
+          ),
+          const SizedBox(height: 16),
+          child,
+        ],
+      ),
+    );
+  }
+}
+
+class _VisibilityTile extends StatelessWidget {
+  final String title;
+  final String subtitle;
+  final IconData icon;
+  final FeedbackVisibility value;
+  final FeedbackVisibility groupValue;
+  final bool enabled;
+  final ValueChanged<FeedbackVisibility?> onChanged;
+
+  const _VisibilityTile({
+    required this.title,
+    required this.subtitle,
+    required this.icon,
+    required this.value,
+    required this.groupValue,
+    required this.enabled,
+    required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return RadioListTile<FeedbackVisibility>(
+      contentPadding: EdgeInsets.zero,
+      value: value,
+      groupValue: groupValue,
+      onChanged: enabled ? onChanged : null,
+      activeColor: const Color(0xFF111315),
+      secondary: Icon(
+        icon,
+        color: enabled ? const Color(0xFF555960) : const Color(0xFFB7BAC0),
+      ),
+      title: Text(
+        title,
+        style: TextStyle(
+          color: enabled ? const Color(0xFF202124) : const Color(0xFF9AA0A6),
+          fontWeight: FontWeight.w700,
+        ),
+      ),
+      subtitle: Text(
+        subtitle,
+        style: const TextStyle(fontSize: 12, color: Color(0xFF8A8F98)),
+      ),
+    );
+  }
+}
+
+class _TargetAvatar extends StatelessWidget {
+  final String imageUrl;
+  final FeedbackTargetType targetType;
+
+  const _TargetAvatar({required this.imageUrl, required this.targetType});
+
+  @override
+  Widget build(BuildContext context) {
+    final cleanUrl = imageUrl.trim();
+
+    return Container(
+      width: 60,
+      height: 60,
+      clipBehavior: Clip.antiAlias,
+      decoration: const BoxDecoration(
+        color: Color(0xFFF0F1F3),
+        shape: BoxShape.circle,
+      ),
+      child: cleanUrl.isEmpty
+          ? Icon(_fallbackIcon, color: const Color(0xFF555960), size: 29)
+          : Image.network(
+              cleanUrl,
+              fit: BoxFit.cover,
+              errorBuilder: (_, __, ___) {
+                return Icon(
+                  _fallbackIcon,
+                  color: const Color(0xFF555960),
+                  size: 29,
+                );
+              },
+            ),
+    );
+  }
+
+  IconData get _fallbackIcon {
+    switch (targetType) {
+      case FeedbackTargetType.restaurant:
+        return Icons.restaurant_rounded;
+      case FeedbackTargetType.hotel:
+        return Icons.hotel_rounded;
+      case FeedbackTargetType.tourGuide:
+        return Icons.explore_rounded;
+      case FeedbackTargetType.service:
+      case FeedbackTargetType.other:
+        return Icons.star_rounded;
+      case FeedbackTargetType.driver:
+      case FeedbackTargetType.foodRider:
+      case FeedbackTargetType.tourismDriver:
+      case FeedbackTargetType.cargoDriver:
+      case FeedbackTargetType.parcelRider:
+      case FeedbackTargetType.studentRideDriver:
+        return Icons.person_rounded;
+    }
+  }
+}
+
+class _UnavailableView extends StatelessWidget {
+  final String message;
+  final VoidCallback onClose;
+
+  const _UnavailableView({required this.message, required this.onClose});
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(28),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            Container(
+              width: 72,
+              height: 72,
+              decoration: const BoxDecoration(
+                color: Color(0xFFF0F1F3),
+                shape: BoxShape.circle,
+              ),
+              child: const Icon(
+                Icons.rate_review_outlined,
+                size: 34,
+                color: Color(0xFF777C85),
+              ),
+            ),
+            const SizedBox(height: 20),
+            const Text(
+              'Feedback unavailable',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                color: Color(0xFF202124),
+                fontSize: 21,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              message,
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                color: Color(0xFF777C85),
+                fontSize: 14,
+                height: 1.4,
+              ),
+            ),
+            const SizedBox(height: 22),
+            FilledButton(
+              onPressed: onClose,
+              style: FilledButton.styleFrom(
+                backgroundColor: const Color(0xFF111315),
+              ),
+              child: const Text('Close'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}

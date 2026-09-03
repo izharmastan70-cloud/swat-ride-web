@@ -1,0 +1,601 @@
+import '../constants/agent_action_ids.dart';
+import '../models/agent_action_definition.dart';
+
+// =========================================================
+// AI AGENT ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â¦ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â ACTION REGISTRY
+// =========================================================
+//
+// Pure in-memory registry. No Firestore writes.
+// Unknown action = Permission Engine DENY.
+
+class AgentActionRegistry {
+  AgentActionRegistry._();
+
+  static const Map<String, AgentActionDefinition>
+  _definitions = <String, AgentActionDefinition>{
+    AgentActionId.readSystemHealth: AgentActionDefinition(
+      actionId: AgentActionId.readSystemHealth,
+      module: 'core',
+      description: 'Read system health summary.',
+      risk: AgentActionRisk.low,
+      readOnly: true,
+    ),
+    AgentActionId.readDailySummary: AgentActionDefinition(
+      actionId: AgentActionId.readDailySummary,
+      module: 'core',
+      description: 'Read daily business summary.',
+      risk: AgentActionRisk.low,
+      readOnly: true,
+    ),
+    AgentActionId.readAdminIntelligenceReport: AgentActionDefinition(
+      actionId: AgentActionId.readAdminIntelligenceReport,
+      module: 'core',
+      description:
+          'Read verified Admin Intelligence operational findings report.',
+      risk: AgentActionRisk.low,
+      readOnly: true,
+    ),
+    AgentActionId.createSuggestion: AgentActionDefinition(
+      actionId: AgentActionId.createSuggestion,
+      module: 'core',
+      description: 'Create a non-executing suggestion for owner/admin.',
+      risk: AgentActionRisk.low,
+      readOnly: false,
+    ),
+
+    AgentActionId.readWebsiteHealth: AgentActionDefinition(
+      actionId: AgentActionId.readWebsiteHealth,
+      module: 'website',
+      description: 'Read website health and SEO observability.',
+      risk: AgentActionRisk.low,
+      readOnly: true,
+    ),
+
+    AgentActionId.proposeWebsiteChange: AgentActionDefinition(
+      actionId: AgentActionId.proposeWebsiteChange,
+      module: 'website',
+      description:
+          'Prepare a website change proposal without writing or deploying.',
+      risk: AgentActionRisk.medium,
+      readOnly: false,
+      alwaysRequiresApproval: true,
+    ),
+
+    AgentActionId.requestWebsitePreview: AgentActionDefinition(
+      actionId: AgentActionId.requestWebsitePreview,
+      module: 'website',
+      description:
+          'Request an approved website preview after build/lint validation.',
+      risk: AgentActionRisk.high,
+      readOnly: false,
+      alwaysRequiresApproval: true,
+    ),
+
+    AgentActionId.deployWebsiteProduction: AgentActionDefinition(
+      actionId: AgentActionId.deployWebsiteProduction,
+      module: 'website',
+      description:
+          'Request production website deployment. Execution adapter is not connected in Phase 34 Step 3B.',
+      risk: AgentActionRisk.critical,
+      readOnly: false,
+      alwaysRequiresApproval: true,
+    ),
+    AgentActionId.readRide: AgentActionDefinition(
+      actionId: AgentActionId.readRide,
+      module: 'ride',
+      description: 'Read ride details.',
+      risk: AgentActionRisk.low,
+      readOnly: true,
+    ),
+    AgentActionId.readRideStatus: AgentActionDefinition(
+      actionId: AgentActionId.readRideStatus,
+      module: 'ride',
+      description: 'Read ride status.',
+      risk: AgentActionRisk.low,
+      readOnly: true,
+    ),
+    AgentActionId.cancelRide: AgentActionDefinition(
+      actionId: AgentActionId.cancelRide,
+      module: 'ride',
+      description: 'Cancel an active ride.',
+      risk: AgentActionRisk.high,
+      readOnly: false,
+      alwaysRequiresApproval: true,
+    ),
+
+    AgentActionId.readDriver: AgentActionDefinition(
+      actionId: AgentActionId.readDriver,
+      module: 'driver',
+      description: 'Read driver information.',
+      risk: AgentActionRisk.low,
+      readOnly: true,
+    ),
+    AgentActionId.readDriverStatus: AgentActionDefinition(
+      actionId: AgentActionId.readDriverStatus,
+      module: 'driver',
+      description: 'Read driver operational status.',
+      risk: AgentActionRisk.low,
+      readOnly: true,
+    ),
+    AgentActionId.approveDriver: AgentActionDefinition(
+      actionId: AgentActionId.approveDriver,
+      module: 'driver',
+      description: 'Approve a driver application.',
+      risk: AgentActionRisk.high,
+      readOnly: false,
+      alwaysRequiresApproval: true,
+    ),
+    AgentActionId.rejectDriver: AgentActionDefinition(
+      actionId: AgentActionId.rejectDriver,
+      module: 'driver',
+      description: 'Reject a driver application.',
+      risk: AgentActionRisk.high,
+      readOnly: false,
+      alwaysRequiresApproval: true,
+    ),
+    AgentActionId.suspendDriver: AgentActionDefinition(
+      actionId: AgentActionId.suspendDriver,
+      module: 'driver',
+      description: 'Suspend a driver account.',
+      risk: AgentActionRisk.critical,
+      readOnly: false,
+      alwaysRequiresApproval: true,
+    ),
+
+    AgentActionId.readFoodOrder: AgentActionDefinition(
+      actionId: AgentActionId.readFoodOrder,
+      module: 'food',
+      description: 'Read food order details.',
+      risk: AgentActionRisk.low,
+      readOnly: true,
+    ),
+    AgentActionId.readRestaurant: AgentActionDefinition(
+      actionId: AgentActionId.readRestaurant,
+      module: 'restaurant',
+      description: 'Read restaurant status.',
+      risk: AgentActionRisk.low,
+      readOnly: true,
+    ),
+    AgentActionId.suspendRestaurant: AgentActionDefinition(
+      actionId: AgentActionId.suspendRestaurant,
+      module: 'food',
+      description: 'Suspend a restaurant.',
+      risk: AgentActionRisk.critical,
+      readOnly: false,
+      alwaysRequiresApproval: true,
+    ),
+    AgentActionId.refundFoodOrder: AgentActionDefinition(
+      actionId: AgentActionId.refundFoodOrder,
+      module: 'food',
+      description: 'Request/execute a food-order refund.',
+      risk: AgentActionRisk.high,
+      readOnly: false,
+      alwaysRequiresApproval: true,
+    ),
+
+    AgentActionId.readHotelBooking: AgentActionDefinition(
+      actionId: AgentActionId.readHotelBooking,
+      module: 'hotel',
+      description: 'Read hotel booking.',
+      risk: AgentActionRisk.low,
+      readOnly: true,
+    ),
+    AgentActionId.cancelHotelBooking: AgentActionDefinition(
+      actionId: AgentActionId.cancelHotelBooking,
+      module: 'hotel',
+      description: 'Cancel hotel booking.',
+      risk: AgentActionRisk.high,
+      readOnly: false,
+      alwaysRequiresApproval: true,
+    ),
+    AgentActionId.changeHotelPrice: AgentActionDefinition(
+      actionId: AgentActionId.changeHotelPrice,
+      module: 'hotel',
+      description: 'Change hotel pricing.',
+      risk: AgentActionRisk.high,
+      readOnly: false,
+      alwaysRequiresApproval: true,
+    ),
+
+    AgentActionId.readTourBooking: AgentActionDefinition(
+      actionId: AgentActionId.readTourBooking,
+      module: 'tour',
+      description: 'Read tour booking.',
+      risk: AgentActionRisk.low,
+      readOnly: true,
+    ),
+    AgentActionId.cancelTourBooking: AgentActionDefinition(
+      actionId: AgentActionId.cancelTourBooking,
+      module: 'tour',
+      description: 'Cancel tour booking.',
+      risk: AgentActionRisk.high,
+      readOnly: false,
+      alwaysRequiresApproval: true,
+    ),
+    AgentActionId.changeTourPrice: AgentActionDefinition(
+      actionId: AgentActionId.changeTourPrice,
+      module: 'tour',
+      description: 'Change tour pricing.',
+      risk: AgentActionRisk.high,
+      readOnly: false,
+      alwaysRequiresApproval: true,
+    ),
+
+    AgentActionId.readRewards: AgentActionDefinition(
+      actionId: AgentActionId.readRewards,
+      module: 'rewards',
+      description: 'Read reward status/balance.',
+      risk: AgentActionRisk.low,
+      readOnly: true,
+    ),
+    AgentActionId.adjustRewardBalance: AgentActionDefinition(
+      actionId: AgentActionId.adjustRewardBalance,
+      module: 'rewards',
+      description: 'Manually adjust reward balance.',
+      risk: AgentActionRisk.high,
+      readOnly: false,
+      alwaysRequiresApproval: true,
+    ),
+
+    AgentActionId.readFeedback: AgentActionDefinition(
+      actionId: AgentActionId.readFeedback,
+      module: 'feedback',
+      description: 'Read feedback/review.',
+      risk: AgentActionRisk.low,
+      readOnly: true,
+    ),
+    AgentActionId.classifyFeedback: AgentActionDefinition(
+      actionId: AgentActionId.classifyFeedback,
+      module: 'feedback',
+      description: 'Classify feedback without changing source data.',
+      risk: AgentActionRisk.low,
+      readOnly: true,
+    ),
+    AgentActionId.draftFeedbackReply: AgentActionDefinition(
+      actionId: AgentActionId.draftFeedbackReply,
+      module: 'feedback',
+      description: 'Draft a reply but do not send it.',
+      risk: AgentActionRisk.low,
+      readOnly: true,
+    ),
+    AgentActionId.sendFeedbackReply: AgentActionDefinition(
+      actionId: AgentActionId.sendFeedbackReply,
+      module: 'feedback',
+      description: 'Send feedback/review reply.',
+      risk: AgentActionRisk.medium,
+      readOnly: false,
+    ),
+
+    AgentActionId.readSupportCase: AgentActionDefinition(
+      actionId: AgentActionId.readSupportCase,
+      module: 'support',
+      description: 'Read support case.',
+      risk: AgentActionRisk.low,
+      readOnly: true,
+    ),
+    AgentActionId.draftSupportReply: AgentActionDefinition(
+      actionId: AgentActionId.draftSupportReply,
+      module: 'support',
+      description: 'Draft support response.',
+      risk: AgentActionRisk.low,
+      readOnly: true,
+    ),
+    AgentActionId.sendSupportReply: AgentActionDefinition(
+      actionId: AgentActionId.sendSupportReply,
+      module: 'support',
+      description: 'Send support response.',
+      risk: AgentActionRisk.medium,
+      readOnly: false,
+    ),
+
+    AgentActionId.sendEmail: AgentActionDefinition(
+      actionId: AgentActionId.sendEmail,
+
+      module: 'email',
+
+      description:
+          'Send one explicitly approved Email Agent draft. Transport is not connected in Phase 44-D3-B.',
+
+      risk: AgentActionRisk.medium,
+
+      readOnly: false,
+
+      alwaysRequiresApproval: true,
+    ),
+
+    AgentActionId.readCustomerWhatsAppVerifiedData: AgentActionDefinition(
+      actionId: AgentActionId.readCustomerWhatsAppVerifiedData,
+
+      module: 'customer_whatsapp',
+
+      description:
+          'Read only verified customer/service facts for the Customer WhatsApp Agent.',
+
+      risk: AgentActionRisk.low,
+
+      readOnly: true,
+    ),
+
+    AgentActionId.requestCustomerWhatsAppBusinessAction: AgentActionDefinition(
+      actionId: AgentActionId.requestCustomerWhatsAppBusinessAction,
+
+      module: 'customer_whatsapp',
+
+      description:
+          'Request one customer-authorized business action. Execution remains behind central approval/runtime boundaries.',
+
+      risk: AgentActionRisk.medium,
+
+      readOnly: false,
+
+      alwaysRequiresApproval: true,
+    ),
+
+    AgentActionId.readOwnerWhatsAppVerifiedReport: AgentActionDefinition(
+      actionId: AgentActionId.readOwnerWhatsAppVerifiedReport,
+      module: 'owner_whatsapp',
+      description:
+          'Read a verified Owner/Super Admin operational report through the Owner WhatsApp authorization boundary.',
+      risk: AgentActionRisk.medium,
+      readOnly: true,
+    ),
+    AgentActionId
+        .requestOwnerWhatsAppConsequentialAction: AgentActionDefinition(
+      actionId: AgentActionId.requestOwnerWhatsAppConsequentialAction,
+      module: 'owner_whatsapp',
+      description:
+          'Request one strongly re-authenticated Owner/Super Admin consequential action. Execution remains behind central approval/runtime boundaries.',
+      risk: AgentActionRisk.high,
+      readOnly: false,
+      alwaysRequiresApproval: true,
+    ),
+
+    AgentActionId.readVoiceSuperAdminVerifiedReport: AgentActionDefinition(
+      actionId: AgentActionId.readVoiceSuperAdminVerifiedReport,
+      module: 'voice_super_admin',
+      description:
+          'Authorize one verified Owner/Super Admin whole-ecosystem read/report request for the Voice Super Admin boundary.',
+      risk: AgentActionRisk.medium,
+      readOnly: true,
+    ),
+
+    AgentActionId.readEmergencyWhatsAppVerifiedSafety: AgentActionDefinition(
+      actionId: AgentActionId.readEmergencyWhatsAppVerifiedSafety,
+      module: 'emergency_whatsapp',
+      description:
+          'Read only verified, privacy-minimized safety status through the Emergency WhatsApp identity and authorization boundary.',
+      risk: AgentActionRisk.high,
+      readOnly: true,
+    ),
+    AgentActionId.requestEmergencyWhatsAppEscalation: AgentActionDefinition(
+      actionId: AgentActionId.requestEmergencyWhatsAppEscalation,
+      module: 'emergency_whatsapp',
+      description:
+          'Request one emergency escalation handoff. This does not send WhatsApp/SMS, place a call, or mutate Universal Safety directly.',
+      risk: AgentActionRisk.high,
+      readOnly: false,
+      alwaysRequiresApproval: true,
+    ),
+
+    AgentActionId.readSafetyAlert: AgentActionDefinition(
+      actionId: AgentActionId.readSafetyAlert,
+      module: 'safety',
+      description: 'Read safety/SOS alert.',
+      risk: AgentActionRisk.medium,
+      readOnly: true,
+    ),
+    AgentActionId.sendSafetyAlert: AgentActionDefinition(
+      actionId: AgentActionId.sendSafetyAlert,
+      module: 'safety',
+      description: 'Send/escalate safety alert.',
+      risk: AgentActionRisk.high,
+      readOnly: false,
+      alwaysRequiresApproval: true,
+    ),
+
+    AgentActionId.readCallSession: AgentActionDefinition(
+      actionId: AgentActionId.readCallSession,
+      module: 'call',
+      description: 'Read call-session context.',
+      risk: AgentActionRisk.medium,
+      readOnly: true,
+    ),
+    AgentActionId.draftCallResponse: AgentActionDefinition(
+      actionId: AgentActionId.draftCallResponse,
+      module: 'call',
+      description:
+          'Generate a call response without executing business action.',
+      risk: AgentActionRisk.low,
+      readOnly: true,
+    ),
+    AgentActionId.createCallRideBooking: AgentActionDefinition(
+      actionId: AgentActionId.createCallRideBooking,
+      module: 'call',
+      description:
+          'Create one Call Agent ride booking only after central authorization, verified preflight and explicit customer confirmation.',
+      risk: AgentActionRisk.low,
+      readOnly: false,
+    ),
+    AgentActionId.transferCallToHuman: AgentActionDefinition(
+      actionId: AgentActionId.transferCallToHuman,
+      module: 'call',
+      description: 'Transfer call to human support.',
+      risk: AgentActionRisk.medium,
+      readOnly: false,
+    ),
+    AgentActionId.transferCallToManager: AgentActionDefinition(
+      actionId: AgentActionId.transferCallToManager,
+      module: 'call',
+      description: 'Transfer call to manager/admin.',
+      risk: AgentActionRisk.medium,
+      readOnly: false,
+    ),
+    AgentActionId.transferCallToOwner: AgentActionDefinition(
+      actionId: AgentActionId.transferCallToOwner,
+      module: 'call',
+      description: 'Transfer call to owner.',
+      risk: AgentActionRisk.high,
+      readOnly: false,
+    ),
+
+    AgentActionId.readCrashLog: AgentActionDefinition(
+      actionId: AgentActionId.readCrashLog,
+      module: 'crash',
+      description: 'Read sanitized crash/error log.',
+      risk: AgentActionRisk.medium,
+      readOnly: true,
+    ),
+    AgentActionId.classifyCrash: AgentActionDefinition(
+      actionId: AgentActionId.classifyCrash,
+      module: 'crash',
+      description: 'Classify technical error.',
+      risk: AgentActionRisk.low,
+      readOnly: true,
+    ),
+    AgentActionId.handoffCrashToCodeAgent: AgentActionDefinition(
+      actionId: AgentActionId.handoffCrashToCodeAgent,
+      module: 'crash',
+      description: 'Hand technical issue to paid Code Agent.',
+      risk: AgentActionRisk.medium,
+      readOnly: false,
+      alwaysRequiresApproval: true,
+    ),
+
+    AgentActionId.readCode: AgentActionDefinition(
+      actionId: AgentActionId.readCode,
+      module: 'code',
+      description: 'Read source code.',
+      risk: AgentActionRisk.medium,
+      readOnly: true,
+    ),
+    AgentActionId.analyzeCodeError: AgentActionDefinition(
+      actionId: AgentActionId.analyzeCodeError,
+      module: 'code',
+      description: 'Analyze a technical/code error.',
+      risk: AgentActionRisk.medium,
+      readOnly: true,
+    ),
+    AgentActionId.prepareCodeFix: AgentActionDefinition(
+      actionId: AgentActionId.prepareCodeFix,
+      module: 'code',
+      description: 'Prepare a code patch without writing it.',
+      risk: AgentActionRisk.medium,
+      readOnly: true,
+    ),
+    AgentActionId.modifyCode: AgentActionDefinition(
+      actionId: AgentActionId.modifyCode,
+      module: 'code',
+      description: 'Modify source code.',
+      risk: AgentActionRisk.critical,
+      readOnly: false,
+      alwaysRequiresApproval: true,
+    ),
+    AgentActionId.deployCode: AgentActionDefinition(
+      actionId: AgentActionId.deployCode,
+      module: 'code',
+      description: 'Deploy code to production.',
+      risk: AgentActionRisk.critical,
+      readOnly: false,
+      alwaysRequiresApproval: true,
+    ),
+
+    AgentActionId.readFinanceSummary: AgentActionDefinition(
+      actionId: AgentActionId.readFinanceSummary,
+      module: 'finance',
+      description: 'Read finance summary.',
+      risk: AgentActionRisk.medium,
+      readOnly: true,
+    ),
+    AgentActionId.prepareSettlement: AgentActionDefinition(
+      actionId: AgentActionId.prepareSettlement,
+      module: 'finance',
+      description: 'Prepare settlement without executing it.',
+      risk: AgentActionRisk.medium,
+      readOnly: true,
+    ),
+    AgentActionId.executeRefund: AgentActionDefinition(
+      actionId: AgentActionId.executeRefund,
+      module: 'finance',
+      description: 'Execute refund.',
+      risk: AgentActionRisk.critical,
+      readOnly: false,
+      alwaysRequiresApproval: true,
+    ),
+    AgentActionId.approveWithdrawal: AgentActionDefinition(
+      actionId: AgentActionId.approveWithdrawal,
+      module: 'finance',
+      description: 'Approve withdrawal.',
+      risk: AgentActionRisk.critical,
+      readOnly: false,
+      alwaysRequiresApproval: true,
+    ),
+
+    AgentActionId.readCargoBooking: AgentActionDefinition(
+      actionId: AgentActionId.readCargoBooking,
+      module: 'cargo',
+      description: 'Read cargo booking when Cargo connector exists.',
+      risk: AgentActionRisk.low,
+      readOnly: true,
+    ),
+    AgentActionId.readCargoStatus: AgentActionDefinition(
+      actionId: AgentActionId.readCargoStatus,
+      module: 'cargo',
+      description: 'Read cargo status when Cargo connector exists.',
+      risk: AgentActionRisk.low,
+      readOnly: true,
+    ),
+    AgentActionId.cancelCargoBooking: AgentActionDefinition(
+      actionId: AgentActionId.cancelCargoBooking,
+      module: 'cargo',
+      description: 'Cancel cargo booking.',
+      risk: AgentActionRisk.high,
+      readOnly: false,
+      alwaysRequiresApproval: true,
+    ),
+
+    AgentActionId.readStudentRide: AgentActionDefinition(
+      actionId: AgentActionId.readStudentRide,
+      module: 'student',
+      description: 'Read Student Ride data when connector exists.',
+      risk: AgentActionRisk.medium,
+      readOnly: true,
+    ),
+    AgentActionId.readStudentAttendance: AgentActionDefinition(
+      actionId: AgentActionId.readStudentAttendance,
+      module: 'student',
+      description: 'Read student attendance when connector exists.',
+      risk: AgentActionRisk.medium,
+      readOnly: true,
+    ),
+    AgentActionId.readStudentSafety: AgentActionDefinition(
+      actionId: AgentActionId.readStudentSafety,
+      module: 'student',
+      description: 'Read Student Ride safety data.',
+      risk: AgentActionRisk.high,
+      readOnly: true,
+    ),
+    AgentActionId.changeGuardian: AgentActionDefinition(
+      actionId: AgentActionId.changeGuardian,
+      module: 'student',
+      description: 'Change guardian authorization.',
+      risk: AgentActionRisk.critical,
+      readOnly: false,
+      permanentlyForbiddenForAi: true,
+    ),
+    AgentActionId.overrideStudentSafety: AgentActionDefinition(
+      actionId: AgentActionId.overrideStudentSafety,
+      module: 'student',
+      description: 'Override Student Ride safety decision.',
+      risk: AgentActionRisk.critical,
+      readOnly: false,
+      permanentlyForbiddenForAi: true,
+    ),
+  };
+
+  static AgentActionDefinition? get(String actionId) => _definitions[actionId];
+
+  static bool contains(String actionId) => _definitions.containsKey(actionId);
+
+  static List<AgentActionDefinition> get all =>
+      _definitions.values.toList(growable: false);
+}

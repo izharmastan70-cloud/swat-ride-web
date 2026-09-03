@@ -1,0 +1,158 @@
+import '../constants/agent_enums.dart';
+
+/// Phase 66 Step1I-T-G.
+///
+/// OFFLINE DESIGN ONLY.
+///
+/// This model describes a proposed versioned production role-inventory
+/// revision for Security Incident persistence runtime attachment.
+///
+/// It does NOT:
+/// - add an AgentActionId to the production registry;
+/// - add or sync a live agent_roles document;
+/// - mutate the current MONITOR_ONLY guard/token/receipt;
+/// - grant repository attach/arm authority;
+/// - consume an Owner approval;
+/// - write a security incident.
+abstract final class AgentSecurityIncidentRoleInventoryRevisionDesign {
+  static const String currentInventoryVersion = 'phase66_roles_v1_22';
+  static const int currentRoleCount = 22;
+
+  static const String proposedInventoryVersion =
+      'phase66_roles_v2_23_security_incident';
+  static const int proposedRoleCount = 23;
+
+  static const int roleCountDelta = proposedRoleCount - currentRoleCount;
+
+  static const String dedicatedRoleId = 'security_incident_agent';
+  static const String dedicatedRoleName = 'Security Incident Agent';
+
+  static const String dedicatedRoleDescription =
+      'Dedicated security incident persistence authority.';
+  static const String dedicatedModule = 'security_incident';
+
+  static const String forbiddenReuseRoleId = 'safety_agent';
+
+  static const String attachRuntimeActionId =
+      'security_incident.attach_runtime';
+
+  static const String attachRuntimeActionRisk = 'CRITICAL';
+
+  static const bool attachRuntimeReadOnly = false;
+  static const bool attachRuntimeAlwaysRequiresApproval = true;
+
+  // ASK_FIRST is the least-privilege core mode for this proposed
+  // consequential role. This is design-only and does not change live state.
+  static const String proposedStoredRoleMode = 'ASK_FIRST';
+
+  // Concrete persisted role authority.
+  //
+  // The 22 -> 23 role commit MUST create this role disabled. A disabled
+  // AgentRole is not operational, so the migration cannot accidentally make
+  // security incident runtime attachment available before the separate fresh
+  // 23-role snapshot + guard + token + receipt rebind and Owner-bound enable
+  // boundary.
+  static const bool proposedEnabled = false;
+
+  static const String proposedAiClass = AiClass.freeAi;
+
+  static const String proposedPrivacyLevel = PrivacyLevel.highlySensitive;
+
+  static const List<String> proposedForbiddenActions = <String>[];
+
+  static const bool requiresSeparatePostRebindEnableBoundary = true;
+
+  static const bool proposedRoleAuto = false;
+  static const bool proposedRoleFullSafeAuto = false;
+
+  static const List<String> proposedAllowedActions = <String>[
+    attachRuntimeActionId,
+  ];
+
+  static const List<String> proposedApprovalRequiredActions = <String>[
+    attachRuntimeActionId,
+  ];
+
+  static const String approvalModule = dedicatedModule;
+
+  static const Map<String, Object> approvalScopeTemplate = <String, Object>{
+    'operation': 'ATTACH_SECURITY_INCIDENT_RUNTIME',
+    'inventoryFrom': currentInventoryVersion,
+    'inventoryTo': proposedInventoryVersion,
+    'fromRoleCount': currentRoleCount,
+    'toRoleCount': proposedRoleCount,
+    'targetRoleId': dedicatedRoleId,
+    'targetModule': dedicatedModule,
+    'targetActionId': attachRuntimeActionId,
+    'expectedRolloutStage': 'MONITOR_ONLY',
+    'firstIncidentWriteAuthorized': false,
+  };
+
+  static const bool mutateExistingGuard = false;
+  static const bool mutateExistingArmingToken = false;
+  static const bool mutateExistingActivationReceipt = false;
+  static const bool reuseExistingArmingToken = false;
+
+  static const bool newLiveSnapshotRequired = true;
+  static const bool freshOwnerVerificationRequired = true;
+  static const bool newOwnerApprovalRequired = true;
+  static const bool newGuardRevisionRequired = true;
+  static const bool newOneTimeArmingTokenRequired = true;
+  static const bool newActivationOrMigrationReceiptRequired = true;
+  static const bool postMigrationMonitorObservationRequired = true;
+
+  static const bool callerSuppliedRoleMayAuthorizeExecution = false;
+  static const bool persistedRoleResolutionRequired = true;
+  static const bool exactPersistedRoleBindingRequired = true;
+
+  static const bool changesCurrentRolloutStage = false;
+  static const bool currentRolloutRemainsMonitorOnly = true;
+  static const bool authorizesSuggestOnly = false;
+  static const bool authorizesAuto = false;
+
+  static const bool writesFirestore = false;
+  static const bool addsLiveRole = false;
+  static const bool addsLiveAction = false;
+  static const bool consumesApproval = false;
+  static const bool attachesRuntime = false;
+  static const bool armsRepository = false;
+  static const bool writesIncident = false;
+
+  static bool get countRevisionIsExact =>
+      proposedRoleCount == currentRoleCount + 1 && roleCountDelta == 1;
+
+  static bool get permissionPolicyIsLeastPrivilege =>
+      proposedAllowedActions.length == 1 &&
+      proposedAllowedActions.single == attachRuntimeActionId &&
+      proposedApprovalRequiredActions.length == 1 &&
+      proposedApprovalRequiredActions.single == attachRuntimeActionId &&
+      attachRuntimeAlwaysRequiresApproval &&
+      !attachRuntimeReadOnly &&
+      !proposedRoleAuto;
+
+  static bool get oldActivationEvidenceIsImmutable =>
+      !mutateExistingGuard &&
+      !mutateExistingArmingToken &&
+      !mutateExistingActivationReceipt &&
+      !reuseExistingArmingToken;
+
+  static bool get migrationRequiresFreshEvidence =>
+      newLiveSnapshotRequired &&
+      freshOwnerVerificationRequired &&
+      newOwnerApprovalRequired &&
+      newGuardRevisionRequired &&
+      newOneTimeArmingTokenRequired &&
+      newActivationOrMigrationReceiptRequired;
+
+  static bool get designOnlyFailClosed =>
+      !writesFirestore &&
+      !addsLiveRole &&
+      !addsLiveAction &&
+      !consumesApproval &&
+      !attachesRuntime &&
+      !armsRepository &&
+      !writesIncident &&
+      currentRolloutRemainsMonitorOnly &&
+      !authorizesSuggestOnly &&
+      !authorizesAuto;
+}

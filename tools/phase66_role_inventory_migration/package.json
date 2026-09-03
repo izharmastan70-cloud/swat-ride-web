@@ -1,0 +1,37 @@
+{
+  "name": "swat-ride-phase66-role-inventory-migration",
+  "version": "0.0.0-offline",
+  "private": true,
+  "type": "module",
+  "description": "Phase 66 Security Incident role-inventory migration tool scaffold. Offline/dry-run only.",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test test/dry_run_contract.test.mjs",
+    "dry-run": "node src/dry_run_cli.mjs --evidence test/fixtures/valid_dry_run_evidence.json",
+    "syntax-check": "node --check src/contract.mjs && node --check src/fingerprint.mjs && node --check src/validate_evidence.mjs && node --check src/dry_run_cli.mjs"
+  },
+  "dependencies": {
+    "firebase-admin": "13.0.0"
+  },
+  "phase66Safety": {
+    "executionArmed": false,
+    "dryRunOnly": true,
+    "networkReadEnabled": false,
+    "networkWriteEnabled": false,
+    "credentialLoadingEnabled": false,
+    "adminSdkInitializationEnabled": false,
+    "liveFirestoreBootstrapEnabled": false,
+    "roleDeltaEnabled": false,
+    "approvalConsumptionEnabled": false,
+    "guardMutationEnabled": false,
+    "tokenMutationEnabled": false,
+    "receiptMutationEnabled": false,
+    "repositoryAttachEnabled": false,
+    "repositoryArmEnabled": false,
+    "incidentWriteEnabled": false,
+    "suggestOnlyAuthorized": false,
+    "autoAuthorized": false
+  }
+}

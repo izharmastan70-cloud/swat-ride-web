@@ -1,0 +1,681 @@
+// lib/food/screens/order_history_screen.dart
+// =============================================================
+// SWAT RIDE - FOOD DELIVERY
+// Customer Food Order History Screen
+//
+// Connected with:
+// - FirebaseAuth
+// - Cloud Firestore
+// - FoodOrderModel
+//
+// Firestore collection:
+// food_orders
+//
+// Features:
+// - Live customer order history
+// - Active / Completed / Cancelled filters
+// - Order totals and status
+// - Order details navigation
+// - Live tracking navigation for active orders
+//
+// Existing non-Food modules remain untouched.
+// =============================================================
+
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/material.dart';
+
+import '../models/food_order_model.dart';
+import '../models/food_order_dispute_model.dart';
+import '../services/food_order_dispute_service.dart';
+
+enum _OrderHistoryFilter { all, active, completed, cancelled }
+
+class OrderHistoryScreen extends StatefulWidget {
+  const OrderHistoryScreen({super.key});
+
+  @override
+  State<OrderHistoryScreen> createState() => _OrderHistoryScreenState();
+}
+
+class _OrderHistoryScreenState extends State<OrderHistoryScreen> {
+  static const Color yellow = Color(0xFFFFD60A);
+  static const Color background = Color(0xFF0D0D0D);
+  static const Color cardColor = Color(0xFF1A1A1A);
+
+  final FirebaseFirestore _firestore = FirebaseFirestore.instance;
+
+  _OrderHistoryFilter _selectedFilter = _OrderHistoryFilter.all;
+
+  String get _customerId {
+    return FirebaseAuth.instance.currentUser?.uid ?? '';
+  }
+
+  Stream<List<FoodOrderModel>> _watchOrders() {
+    if (_customerId.isEmpty) {
+      return Stream<List<FoodOrderModel>>.value(const <FoodOrderModel>[]);
+    }
+
+    return _firestore
+        .collection('food_orders')
+        .where('customerId', isEqualTo: _customerId)
+        .snapshots()
+        .map((QuerySnapshot<Map<String, dynamic>> snapshot) {
+          final List<FoodOrderModel> orders = snapshot.docs.map((
+            QueryDocumentSnapshot<Map<String, dynamic>> document,
+          ) {
+            final Map<String, dynamic> data = Map<String, dynamic>.from(
+              document.data(),
+            );
+
+            data['orderId'] = document.id;
+
+            return FoodOrderModel.fromMap(data);
+          }).toList();
+
+          orders.sort(
+            (FoodOrderModel first, FoodOrderModel second) =>
+                second.createdAt.compareTo(first.createdAt),
+          );
+
+          return orders;
+        });
+  }
+
+  List<FoodOrderModel> _filterOrders(List<FoodOrderModel> orders) {
+    switch (_selectedFilter) {
+      case _OrderHistoryFilter.all:
+        return orders;
+
+      case _OrderHistoryFilter.active:
+        return orders.where((FoodOrderModel order) {
+          return order.status == FoodOrderStatus.pending ||
+              order.status == FoodOrderStatus.accepted ||
+              order.status == FoodOrderStatus.preparing ||
+              order.status == FoodOrderStatus.readyForPickup ||
+              order.status == FoodOrderStatus.pickedUp ||
+              order.status == FoodOrderStatus.onTheWay;
+        }).toList();
+
+      case _OrderHistoryFilter.completed:
+        return orders
+            .where(
+              (FoodOrderModel order) =>
+                  order.status == FoodOrderStatus.delivered,
+            )
+            .toList();
+
+      case _OrderHistoryFilter.cancelled:
+        return orders
+            .where(
+              (FoodOrderModel order) =>
+                  order.status == FoodOrderStatus.cancelled,
+            )
+            .toList();
+    }
+  }
+
+  int _countForFilter(List<FoodOrderModel> orders, _OrderHistoryFilter filter) {
+    switch (filter) {
+      case _OrderHistoryFilter.all:
+        return orders.length;
+
+      case _OrderHistoryFilter.active:
+        return orders.where((FoodOrderModel order) {
+          return order.status == FoodOrderStatus.pending ||
+              order.status == FoodOrderStatus.accepted ||
+              order.status == FoodOrderStatus.preparing ||
+              order.status == FoodOrderStatus.readyForPickup ||
+              order.status == FoodOrderStatus.pickedUp ||
+              order.status == FoodOrderStatus.onTheWay;
+        }).length;
+
+      case _OrderHistoryFilter.completed:
+        return orders
+            .where(
+              (FoodOrderModel order) =>
+                  order.status == FoodOrderStatus.delivered,
+            )
+            .length;
+
+      case _OrderHistoryFilter.cancelled:
+        return orders
+            .where(
+              (FoodOrderModel order) =>
+                  order.status == FoodOrderStatus.cancelled,
+            )
+            .length;
+    }
+  }
+
+  void _openOrderDetails(FoodOrderModel order) {
+    Navigator.pushNamed(
+      context,
+      '/food_customer_order_details',
+      arguments: order,
+    );
+  }
+
+  void _openTracking(FoodOrderModel order) {
+    Navigator.pushNamed(context, '/food_live_order_tracking', arguments: order);
+  }
+
+  bool _isActiveOrder(FoodOrderStatus status) {
+    return status == FoodOrderStatus.pending ||
+        status == FoodOrderStatus.accepted ||
+        status == FoodOrderStatus.preparing ||
+        status == FoodOrderStatus.readyForPickup ||
+        status == FoodOrderStatus.pickedUp ||
+        status == FoodOrderStatus.onTheWay;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: background,
+      appBar: AppBar(
+        backgroundColor: background,
+        elevation: 0,
+        title: const Text(
+          'Food Order History',
+          style: TextStyle(fontWeight: FontWeight.bold),
+        ),
+      ),
+      body: SafeArea(
+        child: StreamBuilder<List<FoodOrderModel>>(
+          stream: _watchOrders(),
+          builder:
+              (
+                BuildContext context,
+                AsyncSnapshot<List<FoodOrderModel>> snapshot,
+              ) {
+                if (_customerId.isEmpty) {
+                  return _buildLoginRequired();
+                }
+
+                if (snapshot.connectionState == ConnectionState.waiting &&
+                    !snapshot.hasData) {
+                  return const Center(
+                    child: CircularProgressIndicator(color: yellow),
+                  );
+                }
+
+                if (snapshot.hasError) {
+                  return _buildErrorState(snapshot.error.toString());
+                }
+
+                final List<FoodOrderModel> allOrders =
+                    snapshot.data ?? const <FoodOrderModel>[];
+
+                final List<FoodOrderModel> visibleOrders = _filterOrders(
+                  allOrders,
+                );
+
+                return Column(
+                  children: <Widget>[
+                    _buildSummaryCard(allOrders),
+                    _buildFilters(allOrders),
+                    Expanded(
+                      child: visibleOrders.isEmpty
+                          ? _buildEmptyState()
+                          : RefreshIndicator(
+                              color: yellow,
+                              onRefresh: () async {
+                                setState(() {});
+                              },
+                              child: ListView.separated(
+                                physics: const AlwaysScrollableScrollPhysics(),
+                                padding: const EdgeInsets.fromLTRB(
+                                  16,
+                                  12,
+                                  16,
+                                  30,
+                                ),
+                                itemCount: visibleOrders.length,
+                                separatorBuilder:
+                                    (BuildContext context, int index) =>
+                                        const SizedBox(height: 12),
+                                itemBuilder: (BuildContext context, int index) {
+                                  final FoodOrderModel order =
+                                      visibleOrders[index];
+
+                                  return _OrderHistoryCard(
+                                    order: order,
+                                    onTap: () => _openOrderDetails(order),
+                                    onTrack: _isActiveOrder(order.status)
+                                        ? () => _openTracking(order)
+                                        : null,
+                                    onReport: _canReportIssue(order.status)
+                                        ? () => _showDisputeDialog(order)
+                                        : null,
+                                  );
+                                },
+                              ),
+                            ),
+                    ),
+                  ],
+                );
+              },
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSummaryCard(List<FoodOrderModel> orders) {
+    final int completed = _countForFilter(
+      orders,
+      _OrderHistoryFilter.completed,
+    );
+
+    final int active = _countForFilter(orders, _OrderHistoryFilter.active);
+
+    final double completedSpend = orders
+        .where(
+          (FoodOrderModel order) => order.status == FoodOrderStatus.delivered,
+        )
+        .fold<double>(
+          0,
+          (double total, FoodOrderModel order) => total + order.grandTotal,
+        );
+
+    return Container(
+      margin: const EdgeInsets.fromLTRB(16, 14, 16, 10),
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: yellow,
+        borderRadius: BorderRadius.circular(21),
+      ),
+      child: Row(
+        children: <Widget>[
+          const CircleAvatar(
+            radius: 29,
+            backgroundColor: Colors.black,
+            child: Icon(Icons.receipt_long_outlined, color: yellow, size: 31),
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                const Text(
+                  'Your Food Orders',
+                  style: TextStyle(
+                    color: Colors.black,
+                    fontSize: 20,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(height: 5),
+                Text(
+                  '$active active â€¢ $completed completed',
+                  style: const TextStyle(color: Colors.black87, fontSize: 12),
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  'Completed spend: Rs. ${completedSpend.toStringAsFixed(0)}',
+                  style: const TextStyle(color: Colors.black87, fontSize: 11),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildFilters(List<FoodOrderModel> orders) {
+    final List<_FilterItem> filters = <_FilterItem>[
+      _FilterItem(filter: _OrderHistoryFilter.all, label: 'All'),
+      _FilterItem(filter: _OrderHistoryFilter.active, label: 'Active'),
+      _FilterItem(filter: _OrderHistoryFilter.completed, label: 'Completed'),
+      _FilterItem(filter: _OrderHistoryFilter.cancelled, label: 'Cancelled'),
+    ];
+
+    return SizedBox(
+      height: 56,
+      child: ListView.separated(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 7),
+        scrollDirection: Axis.horizontal,
+        itemCount: filters.length,
+        separatorBuilder: (BuildContext context, int index) =>
+            const SizedBox(width: 8),
+        itemBuilder: (BuildContext context, int index) {
+          final _FilterItem item = filters[index];
+
+          final bool selected = _selectedFilter == item.filter;
+
+          final int count = _countForFilter(orders, item.filter);
+
+          return ChoiceChip(
+            label: Text('${item.label} ($count)'),
+            selected: selected,
+            onSelected: (_) {
+              setState(() {
+                _selectedFilter = item.filter;
+              });
+            },
+            selectedColor: yellow,
+            backgroundColor: cardColor,
+            checkmarkColor: Colors.black,
+            labelStyle: TextStyle(
+              color: selected ? Colors.black : Colors.white,
+              fontWeight: FontWeight.bold,
+            ),
+            side: BorderSide.none,
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _buildEmptyState() {
+    return const Center(
+      child: Padding(
+        padding: EdgeInsets.all(30),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: <Widget>[
+            Icon(Icons.receipt_long_outlined, color: yellow, size: 76),
+            SizedBox(height: 16),
+            Text(
+              'No food orders found',
+              style: TextStyle(fontSize: 21, fontWeight: FontWeight.bold),
+            ),
+            SizedBox(height: 8),
+            Text(
+              'Orders matching this filter will appear here.',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: Colors.grey),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildLoginRequired() {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(30),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: <Widget>[
+            const Icon(Icons.login, color: yellow, size: 72),
+            const SizedBox(height: 16),
+            const Text(
+              'Login required',
+              style: TextStyle(fontSize: 21, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              'Please log in to view your food order history.',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: Colors.grey, height: 1.4),
+            ),
+            const SizedBox(height: 20),
+            ElevatedButton(
+              onPressed: () {
+                Navigator.pop(context);
+              },
+              style: ElevatedButton.styleFrom(
+                backgroundColor: yellow,
+                foregroundColor: Colors.black,
+              ),
+              child: const Text('Go Back'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildErrorState(String error) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(30),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: <Widget>[
+            const Icon(Icons.cloud_off, color: Colors.redAccent, size: 72),
+            const SizedBox(height: 16),
+            const Text(
+              'Unable to load orders',
+              style: TextStyle(fontSize: 21, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              error,
+              textAlign: TextAlign.center,
+              style: const TextStyle(color: Colors.grey, height: 1.4),
+            ),
+            const SizedBox(height: 18),
+            ElevatedButton(
+              onPressed: () {
+                setState(() {});
+              },
+              style: ElevatedButton.styleFrom(
+                backgroundColor: yellow,
+                foregroundColor: Colors.black,
+              ),
+              child: const Text('Try Again'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _OrderHistoryCard extends StatelessWidget {
+  const _OrderHistoryCard({
+    required this.order,
+    required this.onTap,
+    required this.onTrack,
+  });
+
+  static const Color yellow = Color(0xFFFFD60A);
+  static const Color cardColor = Color(0xFF1A1A1A);
+
+  final FoodOrderModel order;
+  final VoidCallback onTap;
+  final VoidCallback? onTrack;
+  final VoidCallback? onReport;
+
+  String get _shortOrderId {
+    if (order.orderId.length <= 8) {
+      return order.orderId;
+    }
+
+    return order.orderId.substring(0, 8);
+  }
+
+  String get _statusText {
+    switch (order.status) {
+      case FoodOrderStatus.pending:
+        return 'Pending';
+      case FoodOrderStatus.accepted:
+        return 'Accepted';
+      case FoodOrderStatus.preparing:
+        return 'Preparing';
+      case FoodOrderStatus.readyForPickup:
+        return 'Ready';
+      case FoodOrderStatus.pickedUp:
+        return 'Picked Up';
+      case FoodOrderStatus.onTheWay:
+        return 'On The Way';
+      case FoodOrderStatus.delivered:
+        return 'Delivered';
+      case FoodOrderStatus.cancelled:
+        return 'Cancelled';
+    }
+  }
+
+  Color get _statusColor {
+    switch (order.status) {
+      case FoodOrderStatus.pending:
+        return yellow;
+      case FoodOrderStatus.accepted:
+      case FoodOrderStatus.preparing:
+        return Colors.orangeAccent;
+      case FoodOrderStatus.readyForPickup:
+      case FoodOrderStatus.pickedUp:
+      case FoodOrderStatus.onTheWay:
+        return Colors.lightBlueAccent;
+      case FoodOrderStatus.delivered:
+        return Colors.greenAccent;
+      case FoodOrderStatus.cancelled:
+        return Colors.redAccent;
+    }
+  }
+
+  String get _dateText {
+    final DateTime value = order.createdAt;
+
+    final String day = value.day.toString().padLeft(2, '0');
+    final String month = value.month.toString().padLeft(2, '0');
+    final String hour = value.hour.toString().padLeft(2, '0');
+    final String minute = value.minute.toString().padLeft(2, '0');
+
+    return '$day/$month/${value.year} â€¢ $hour:$minute';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: cardColor,
+      borderRadius: BorderRadius.circular(19),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(19),
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              Row(
+                children: <Widget>[
+                  CircleAvatar(
+                    backgroundColor: _statusColor.withValues(alpha: 0.14),
+                    child: Icon(
+                      Icons.receipt_long_outlined,
+                      color: _statusColor,
+                    ),
+                  ),
+                  const SizedBox(width: 11),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: <Widget>[
+                        Text(
+                          'Order #$_shortOrderId',
+                          style: const TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                        const SizedBox(height: 3),
+                        Text(
+                          _dateText,
+                          style: const TextStyle(
+                            color: Colors.grey,
+                            fontSize: 11,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 9,
+                      vertical: 5,
+                    ),
+                    decoration: BoxDecoration(
+                      color: _statusColor.withValues(alpha: 0.12),
+                      borderRadius: BorderRadius.circular(20),
+                    ),
+                    child: Text(
+                      _statusText,
+                      style: TextStyle(
+                        color: _statusColor,
+                        fontSize: 10,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 13),
+              Text(
+                '${order.items.length} item(s)',
+                style: const TextStyle(color: Colors.grey),
+              ),
+              const SizedBox(height: 5),
+              Text(
+                order.deliveryAddress.fullAddress,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  color: Colors.grey,
+                  fontSize: 11,
+                  height: 1.35,
+                ),
+              ),
+              const SizedBox(height: 13),
+              Row(
+                children: <Widget>[
+                  Text(
+                    'Rs. ${order.grandTotal.toStringAsFixed(0)}',
+                    style: const TextStyle(
+                      color: yellow,
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  const Spacer(),
+                  if (onReport != null)
+                    TextButton.icon(
+                      onPressed: onReport,
+                      icon: const Icon(
+                        Icons.report_problem_outlined,
+                        color: Colors.orangeAccent,
+                      ),
+                      label: const Text(
+                        'Report Issue',
+                        style: TextStyle(
+                          color: Colors.orangeAccent,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ),
+                  if (onReport != null && onTrack != null)
+                    const SizedBox(width: 4),
+                  if (onTrack != null)
+                    TextButton.icon(
+                      onPressed: onTrack,
+                      icon: const Icon(Icons.route, color: yellow),
+                      label: const Text(
+                        'Track',
+                        style: TextStyle(
+                          color: yellow,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    )
+                  else
+                    const Icon(Icons.chevron_right, color: Colors.grey),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _FilterItem {
+  const _FilterItem({required this.filter, required this.label});
+
+  final _OrderHistoryFilter filter;
+  final String label;
+}

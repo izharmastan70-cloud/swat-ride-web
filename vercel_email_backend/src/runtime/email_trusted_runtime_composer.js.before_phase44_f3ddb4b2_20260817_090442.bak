@@ -1,0 +1,86 @@
+import { createFirebaseAdminServiceHandles } from
+  '../firebase/firebase_admin_service_factory.js';
+
+import { FirebaseAdminIdTokenVerifier } from
+  '../security/firebase_admin_id_token_verifier.js';
+
+import { FirebaseAdminSuperAdminAuthorizer } from
+  '../security/firebase_admin_super_admin_authorizer.js';
+
+import { FirebaseAdminConsumedApprovalRechecker } from
+  '../security/firebase_admin_consumed_approval_rechecker.js';
+
+import { FirebaseAdminVerifiedSenderIdentityVerifier } from
+  '../security/firebase_admin_verified_sender_identity_verifier.js';
+
+import { FirebaseAdminEmailReplayGuard } from
+  '../security/firebase_admin_email_replay_guard.js';
+
+export function createDisabledTrustedEmailRuntime({
+  app,
+  serverConfig,
+  serviceHandleFactory =
+      createFirebaseAdminServiceHandles,
+  providerTransport,
+  serverTimestamp,
+}) {
+  if (!app) {
+    throw new Error(
+        'Trusted Email runtime requires an initialized Firebase Admin app.');
+  }
+
+  if (!serverConfig ||
+      serverConfig.liveSendEnabled !== false) {
+    throw new Error(
+        'Phase 44-F3D-D-B3 composer only accepts liveSendEnabled=false.');
+  }
+
+  if (!providerTransport ||
+      providerTransport.liveNetworkAllowed !== false) {
+    throw new Error(
+        'Phase 44-F3D-D-B3 composer requires a disabled provider transport.');
+  }
+
+  const handles =
+      serviceHandleFactory(app);
+
+  const authVerifier =
+      new FirebaseAdminIdTokenVerifier({
+        auth: handles.auth,
+      });
+
+  const superAdminAuthorizer =
+      new FirebaseAdminSuperAdminAuthorizer({
+        firestore: handles.firestore,
+      });
+
+  const approvalRechecker =
+      new FirebaseAdminConsumedApprovalRechecker({
+        firestore: handles.firestore,
+      });
+
+  const senderVerifier =
+      new FirebaseAdminVerifiedSenderIdentityVerifier({
+        firestore: handles.firestore,
+      });
+
+  const replayGuard =
+      new FirebaseAdminEmailReplayGuard({
+        firestore: handles.firestore,
+        ...(serverTimestamp
+          ? { serverTimestamp }
+          : {}),
+      });
+
+  return Object.freeze({
+    authVerifier,
+    superAdminAuthorizer,
+    approvalRechecker,
+    senderVerifier,
+    replayGuard,
+    providerTransport,
+    liveSendEnabled: false,
+    providerNetworkAllowed: false,
+    routeWiringAllowed: false,
+  });
+}

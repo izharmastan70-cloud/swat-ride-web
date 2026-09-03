@@ -1,0 +1,242 @@
+import '../constants/agent_future_proposal_constants.dart';
+import '../models/agent_code_test_result.dart';
+import '../models/agent_future_proposal.dart';
+import '../models/agent_future_quality_lifecycle.dart';
+import '../models/agent_security_finding.dart';
+
+/// Pure Phase 41-G1 transition engine.
+///
+/// It does NOT:
+/// - run tests;
+/// - run Security Agent automatically;
+/// - persist Firestore state;
+/// - execute code rollback;
+/// - invoke Code Agent/Paid AI;
+/// - deploy.
+///
+/// It only validates already-produced evidence and determines the next
+/// lifecycle status.
+class AgentFutureQualityLifecycleService {
+  const AgentFutureQualityLifecycleService();
+
+  AgentFutureQualityLifecycle beginQa({required AgentFutureProposal proposal}) {
+    proposal.validate();
+
+    if (proposal.status != AgentFutureProposalStatus.handedToCodeAgent &&
+        proposal.status != AgentFutureProposalStatus.codeChangePrepared) {
+      throw AgentFutureQualityLifecycleServiceException(
+        'QA can start only after Code Agent handoff/code-change preparation. '
+        'Current status: ${proposal.status}.',
+      );
+    }
+
+    final AgentFutureQualityLifecycle lifecycle = AgentFutureQualityLifecycle(
+      proposalId: proposal.proposalId,
+      status: AgentFutureProposalStatus.qaPending,
+      qaEvidence: null,
+      securityEvidence: null,
+      ownerDecision: AgentFutureOwnerDecision.pending,
+      ownerId: '',
+      ownerDecisionNote: '',
+      updatedAt: DateTime.now().toUtc(),
+    );
+
+    lifecycle.validate();
+    return lifecycle;
+  }
+
+  AgentFutureQualityLifecycle recordQa({
+    required AgentFutureQualityLifecycle lifecycle,
+    required String codeChangeId,
+    required String backupId,
+    required String reviewerId,
+    required AgentCodeTestResult testResult,
+  }) {
+    lifecycle.validate();
+
+    if (lifecycle.status != AgentFutureProposalStatus.qaPending) {
+      throw AgentFutureQualityLifecycleServiceException(
+        'QA evidence requires QA_PENDING state. '
+        'Current status: ${lifecycle.status}.',
+      );
+    }
+
+    final AgentFutureQaEvidence evidence = AgentFutureQaEvidence(
+      codeChangeId: codeChangeId,
+      backupId: backupId,
+      reviewerId: reviewerId,
+      testResult: testResult,
+      recordedAt: DateTime.now().toUtc(),
+    );
+
+    evidence.validate();
+
+    final AgentFutureQualityLifecycle updated = lifecycle.copyWith(
+      status: evidence.strictPassed
+          ? AgentFutureProposalStatus.qaPassed
+          : AgentFutureProposalStatus.qaFailed,
+      qaEvidence: evidence,
+      updatedAt: DateTime.now().toUtc(),
+    );
+
+    updated.validate();
+    return updated;
+  }
+
+  AgentFutureQualityLifecycle beginSecurity({
+    required AgentFutureQualityLifecycle lifecycle,
+  }) {
+    lifecycle.validate();
+
+    if (lifecycle.status != AgentFutureProposalStatus.qaPassed ||
+        !lifecycle.qaPassed) {
+      throw const AgentFutureQualityLifecycleServiceException(
+        'Security review requires strict QA_PASSED evidence.',
+      );
+    }
+
+    final AgentFutureQualityLifecycle updated = lifecycle.copyWith(
+      status: AgentFutureProposalStatus.securityPending,
+      updatedAt: DateTime.now().toUtc(),
+    );
+
+    updated.validate();
+    return updated;
+  }
+
+  AgentFutureQualityLifecycle recordSecurity({
+    required AgentFutureQualityLifecycle lifecycle,
+    required String reviewerId,
+    required bool reviewCompleted,
+    required List<AgentSecurityFinding> findings,
+  }) {
+    lifecycle.validate();
+
+    if (lifecycle.status != AgentFutureProposalStatus.securityPending) {
+      throw AgentFutureQualityLifecycleServiceException(
+        'Security evidence requires SECURITY_PENDING state. '
+        'Current status: ${lifecycle.status}.',
+      );
+    }
+
+    if (!reviewCompleted) {
+      throw const AgentFutureQualityLifecycleServiceException(
+        'Incomplete Security review cannot be marked PASS/REJECTED.',
+      );
+    }
+
+    final AgentFutureSecurityEvidence evidence = AgentFutureSecurityEvidence(
+      reviewerId: reviewerId,
+      reviewCompleted: reviewCompleted,
+      findings: List<AgentSecurityFinding>.unmodifiable(findings),
+      recordedAt: DateTime.now().toUtc(),
+    );
+
+    evidence.validate();
+
+    final AgentFutureQualityLifecycle updated = lifecycle.copyWith(
+      status: evidence.passed
+          ? AgentFutureProposalStatus.securityPassed
+          : AgentFutureProposalStatus.securityRejected,
+      securityEvidence: evidence,
+      updatedAt: DateTime.now().toUtc(),
+    );
+
+    updated.validate();
+    return updated;
+  }
+
+  AgentFutureQualityLifecycle requestOwnerDecision({
+    required AgentFutureQualityLifecycle lifecycle,
+  }) {
+    lifecycle.validate();
+
+    if (lifecycle.status != AgentFutureProposalStatus.securityPassed ||
+        !lifecycle.qaPassed ||
+        !lifecycle.securityPassed ||
+        !lifecycle.rollbackAvailable) {
+      throw const AgentFutureQualityLifecycleServiceException(
+        'Owner decision requires QA pass, Security pass and valid rollback backup.',
+      );
+    }
+
+    final AgentFutureQualityLifecycle updated = lifecycle.copyWith(
+      status: AgentFutureProposalStatus.ownerDecisionPending,
+      updatedAt: DateTime.now().toUtc(),
+    );
+
+    updated.validate();
+    return updated;
+  }
+
+  AgentFutureQualityLifecycle ownerKeep({
+    required AgentFutureQualityLifecycle lifecycle,
+    required String ownerId,
+    required String note,
+  }) {
+    lifecycle.validate();
+
+    if (!lifecycle.ownerKeepAllowed) {
+      throw const AgentFutureQualityLifecycleServiceException(
+        'KEEP is blocked until strict QA + Security pass and rollback backup are ready.',
+      );
+    }
+
+    if (ownerId.trim().isEmpty || note.trim().isEmpty) {
+      throw const AgentFutureQualityLifecycleServiceException(
+        'KEEP requires explicit Owner identity and decision note.',
+      );
+    }
+
+    final AgentFutureQualityLifecycle updated = lifecycle.copyWith(
+      status: AgentFutureProposalStatus.kept,
+      ownerDecision: AgentFutureOwnerDecision.keep,
+      ownerId: ownerId.trim(),
+      ownerDecisionNote: note.trim(),
+      updatedAt: DateTime.now().toUtc(),
+    );
+
+    updated.validate();
+    return updated;
+  }
+
+  AgentFutureQualityLifecycle ownerRollbackDecision({
+    required AgentFutureQualityLifecycle lifecycle,
+    required String ownerId,
+    required String note,
+  }) {
+    lifecycle.validate();
+
+    if (!lifecycle.ownerRollbackAllowed) {
+      throw const AgentFutureQualityLifecycleServiceException(
+        'ROLLBACK decision is unavailable without a valid backup or from this lifecycle state.',
+      );
+    }
+
+    if (ownerId.trim().isEmpty || note.trim().isEmpty) {
+      throw const AgentFutureQualityLifecycleServiceException(
+        'ROLLBACK requires explicit Owner identity and decision note.',
+      );
+    }
+
+    final AgentFutureQualityLifecycle updated = lifecycle.copyWith(
+      status: AgentFutureProposalStatus.rolledBack,
+      ownerDecision: AgentFutureOwnerDecision.rollback,
+      ownerId: ownerId.trim(),
+      ownerDecisionNote: note.trim(),
+      updatedAt: DateTime.now().toUtc(),
+    );
+
+    updated.validate();
+    return updated;
+  }
+}
+
+class AgentFutureQualityLifecycleServiceException implements Exception {
+  const AgentFutureQualityLifecycleServiceException(this.message);
+
+  final String message;
+
+  @override
+  String toString() => 'AgentFutureQualityLifecycleServiceException: $message';
+}

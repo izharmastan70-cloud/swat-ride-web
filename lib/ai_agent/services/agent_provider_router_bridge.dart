@@ -1,0 +1,328 @@
+import '../constants/agent_provider_constants.dart';
+import '../models/agent_provider_health.dart';
+import '../models/agent_provider_routing_profile.dart';
+import 'agent_ai_provider.dart';
+import 'agent_provider_router_coordinator.dart';
+import 'agent_provider_selection_policy.dart';
+
+// =========================================================
+// AI AGENT - PROVIDER ROUTER BRIDGE
+// =========================================================
+//
+// Phase 29 Step 5.
+//
+// Bridges existing AgentAiProvider implementations into the
+// new Provider Router Coordinator without executing them.
+//
+// Responsibilities:
+// - map existing providers to routing candidates
+// - preserve provider IDs/types/priorities
+// - attach routing profiles
+// - attach provider-health snapshot
+// - produce controlled routing plan
+//
+// IMPORTANT:
+// PLAN/BRIDGE ONLY.
+//
+// NO PROVIDER complete() CALL.
+// NO API CALL.
+// NO FIRESTORE WRITE.
+// NO SECRET ACCESS.
+// NO PAID-CODE AUTO FALLBACK.
+
+class AgentProviderRouterBridge {
+  final AgentProviderRouterCoordinator coordinator;
+
+  const AgentProviderRouterBridge({
+    this.coordinator = const AgentProviderRouterCoordinator(),
+  });
+
+  AgentProviderSelectionCandidate buildCandidate({
+    required AgentAiProvider provider,
+    required AgentProviderRoutingProfile profile,
+    required AgentProviderHealth health,
+    int requestsInCurrentWindow = 0,
+  }) {
+    profile.validate();
+
+    if (provider.providerId != profile.providerId) {
+      throw AgentProviderRouterBridgeException(
+        'Provider/profile ID mismatch: '
+        '${provider.providerId} != ${profile.providerId}.',
+      );
+    }
+
+    if (provider.providerType != profile.providerType) {
+      throw AgentProviderRouterBridgeException(
+        'Provider/profile type mismatch: '
+        '${provider.providerType} != ${profile.providerType}.',
+      );
+    }
+
+    if (health.providerId != provider.providerId) {
+      throw AgentProviderRouterBridgeException(
+        'Provider/health ID mismatch: '
+        '${provider.providerId} != ${health.providerId}.',
+      );
+    }
+
+    if (requestsInCurrentWindow < 0) {
+      throw const AgentProviderRouterBridgeException(
+        'requestsInCurrentWindow cannot be negative.',
+      );
+    }
+
+    return AgentProviderSelectionCandidate(
+      profile: profile,
+      health: health,
+      requestsInCurrentWindow: requestsInCurrentWindow,
+    );
+  }
+
+  AgentProviderRoutingPlan buildFreeOrLocalPlan({
+    required String taskId,
+    required String requiredCapability,
+    required Iterable<AgentAiProvider> providers,
+    required Map<String, AgentProviderRoutingProfile> profilesByProviderId,
+    required Map<String, AgentProviderHealth> healthByProviderId,
+    Map<String, int> requestsInCurrentWindow = const <String, int>{},
+    bool allowFallback = true,
+  }) {
+    final List<AgentProviderSelectionCandidate> candidates =
+        <AgentProviderSelectionCandidate>[];
+
+    for (final AgentAiProvider provider in providers) {
+      if (!provider.enabled) {
+        continue;
+      }
+
+      // Paid-code providers are never allowed into this bridge.
+      if (provider.providerType.trim().toUpperCase() == 'PAID_CODE_AI') {
+        continue;
+      }
+
+      final AgentProviderRoutingProfile? profile =
+          profilesByProviderId[provider.providerId];
+
+      if (profile == null) {
+        continue;
+      }
+
+      final AgentProviderHealth? health =
+          healthByProviderId[provider.providerId];
+
+      if (health == null) {
+        continue;
+      }
+
+      candidates.add(
+        buildCandidate(
+          provider: provider,
+          profile: profile,
+          health: health,
+          requestsInCurrentWindow:
+              requestsInCurrentWindow[provider.providerId] ?? 0,
+        ),
+      );
+    }
+
+    return coordinator.buildPlan(
+      request: AgentProviderRouterRequest(
+        taskId: taskId,
+        requiredCapability: requiredCapability,
+        routingLane: AgentProviderRoutingLane.freeOrLocal,
+        maxCostTier: AgentProviderCostTier.free,
+        allowFallback: allowFallback,
+      ),
+      candidates: candidates,
+    );
+  }
+
+  AgentProviderRoutingPlan buildPaidReasoningPlan({
+    required String taskId,
+    required String requiredCapability,
+    required Iterable<AgentAiProvider> providers,
+    required Map<String, AgentProviderRoutingProfile> profilesByProviderId,
+    required Map<String, AgentProviderHealth> healthByProviderId,
+    Map<String, int> requestsInCurrentWindow = const <String, int>{},
+    String maxCostTier = AgentProviderCostTier.high,
+    bool allowFallback = true,
+  }) {
+    final List<AgentProviderSelectionCandidate> candidates =
+        <AgentProviderSelectionCandidate>[];
+
+    for (final AgentAiProvider provider in providers) {
+      if (!provider.enabled) {
+        continue;
+      }
+
+      if (provider.providerType != AgentProviderType.paidReasoning) {
+        continue;
+      }
+
+      final AgentProviderRoutingProfile? profile =
+          profilesByProviderId[provider.providerId];
+
+      if (profile == null) {
+        continue;
+      }
+
+      final AgentProviderHealth? health =
+          healthByProviderId[provider.providerId];
+
+      if (health == null) {
+        continue;
+      }
+
+      candidates.add(
+        buildCandidate(
+          provider: provider,
+          profile: profile,
+          health: health,
+          requestsInCurrentWindow:
+              requestsInCurrentWindow[provider.providerId] ?? 0,
+        ),
+      );
+    }
+
+    return coordinator.buildPlan(
+      request: AgentProviderRouterRequest(
+        taskId: taskId,
+        requiredCapability: requiredCapability,
+        routingLane: AgentProviderRoutingLane.paidReasoning,
+        maxCostTier: maxCostTier,
+        allowFallback: allowFallback,
+      ),
+      candidates: candidates,
+    );
+  }
+
+  Map<String, AgentAiProvider> mapProvidersById(
+    Iterable<AgentAiProvider> providers,
+  ) {
+    final Map<String, AgentAiProvider> result = <String, AgentAiProvider>{};
+
+    for (final AgentAiProvider provider in providers) {
+      final String id = provider.providerId.trim();
+
+      if (id.isEmpty) {
+        throw const AgentProviderRouterBridgeException(
+          'Provider ID cannot be empty.',
+        );
+      }
+
+      if (result.containsKey(id)) {
+        throw AgentProviderRouterBridgeException(
+          'Duplicate provider ID "$id".',
+        );
+      }
+
+      result[id] = provider;
+    }
+
+    return Map<String, AgentAiProvider>.unmodifiable(result);
+  }
+
+  List<AgentAiProvider> resolvePlanProviders({
+    required AgentProviderRoutingPlan plan,
+    required Map<String, AgentAiProvider> providersById,
+  }) {
+    if (plan.routingLane != AgentProviderRoutingLane.freeOrLocal) {
+      throw const AgentProviderRouterBridgeException(
+        'This bridge resolves FREE_OR_LOCAL plans only.',
+      );
+    }
+
+    if (plan.isFailClosed) {
+      return const <AgentAiProvider>[];
+    }
+
+    final List<String> orderedIds = <String>[
+      if (plan.primaryProviderId != null) plan.primaryProviderId!,
+      ...plan.fallbackProviderIds,
+    ];
+
+    final List<AgentAiProvider> result = <AgentAiProvider>[];
+
+    for (final String providerId in orderedIds) {
+      final AgentAiProvider? provider = providersById[providerId];
+
+      if (provider == null) {
+        throw AgentProviderRouterBridgeException(
+          'Routing plan references unknown provider '
+          '"$providerId".',
+        );
+      }
+
+      if (!provider.enabled) {
+        continue;
+      }
+
+      if (provider.providerType.trim().toUpperCase() == 'PAID_CODE_AI') {
+        throw const AgentProviderRouterBridgeException(
+          'Paid Code provider cannot enter FREE/LOCAL plan.',
+        );
+      }
+
+      result.add(provider);
+    }
+
+    return List<AgentAiProvider>.unmodifiable(result);
+  }
+
+  List<AgentAiProvider> resolvePaidReasoningPlanProviders({
+    required AgentProviderRoutingPlan plan,
+    required Map<String, AgentAiProvider> providersById,
+  }) {
+    if (plan.routingLane != AgentProviderRoutingLane.paidReasoning) {
+      throw const AgentProviderRouterBridgeException(
+        'This resolver accepts PAID_REASONING plans only.',
+      );
+    }
+
+    if (plan.isFailClosed) {
+      return const <AgentAiProvider>[];
+    }
+
+    final List<String> orderedIds = <String>[
+      if (plan.primaryProviderId != null) plan.primaryProviderId!,
+      ...plan.fallbackProviderIds,
+    ];
+
+    final List<AgentAiProvider> result = <AgentAiProvider>[];
+
+    for (final String providerId in orderedIds) {
+      final AgentAiProvider? provider = providersById[providerId];
+
+      if (provider == null) {
+        throw AgentProviderRouterBridgeException(
+          'Paid reasoning plan references unknown provider '
+          '"$providerId".',
+        );
+      }
+
+      if (!provider.enabled) {
+        continue;
+      }
+
+      if (provider.providerType != AgentProviderType.paidReasoning) {
+        throw const AgentProviderRouterBridgeException(
+          'Non-paid-reasoning provider entered PAID_REASONING plan.',
+        );
+      }
+
+      result.add(provider);
+    }
+
+    return List<AgentAiProvider>.unmodifiable(result);
+  }
+}
+
+class AgentProviderRouterBridgeException implements Exception {
+  final String message;
+
+  const AgentProviderRouterBridgeException(this.message);
+
+  @override
+  String toString() => 'AgentProviderRouterBridgeException: $message';
+}

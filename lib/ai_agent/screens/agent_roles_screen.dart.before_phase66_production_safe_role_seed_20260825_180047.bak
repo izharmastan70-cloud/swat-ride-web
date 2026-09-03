@@ -1,0 +1,289 @@
+import 'package:flutter/material.dart';
+
+import '../constants/agent_enums.dart';
+import '../data/initial_agent_roles_seed.dart';
+import '../models/agent_role.dart';
+import '../services/agent_role_service.dart';
+
+// =========================================================
+// AGENT ROLES SCREEN
+// =========================================================
+//
+// Phase 1 standalone screen. Not wired into main.dart.
+// Seed action is development/bootstrap only.
+
+class AgentRolesScreen extends StatefulWidget {
+  const AgentRolesScreen({super.key});
+
+  @override
+  State<AgentRolesScreen> createState() => _AgentRolesScreenState();
+}
+
+class _AgentRolesScreenState extends State<AgentRolesScreen> {
+  final AgentRoleService _service = AgentRoleService();
+  bool _seeding = false;
+
+  Future<void> _seedRoles() async {
+    setState(() => _seeding = true);
+    try {
+      await seedInitialAgentRoles(_service);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Initial agent roles seeded.')),
+        );
+      }
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Seed failed: $error')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _seeding = false);
+    }
+  }
+
+  Future<void> _changeMode(AgentRole role, String newMode) async {
+    try {
+      await _service.updateMode(roleId: role.roleId, mode: newMode);
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Mode update failed: $error')),
+        );
+      }
+    }
+  }
+
+  Future<void> _toggleEnabled(AgentRole role, bool enabled) async {
+    try {
+      await _service.setEnabled(roleId: role.roleId, enabled: enabled);
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Toggle failed: $error')),
+        );
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFF0D0D0D),
+      appBar: AppBar(
+        title: const Text('AI Agent Roles'),
+        actions: <Widget>[
+          IconButton(
+            onPressed: _seeding ? null : _seedRoles,
+            tooltip: 'Seed initial roles (dev/bootstrap only)',
+            icon: _seeding
+                ? const SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.cloud_upload_outlined),
+          ),
+        ],
+      ),
+      body: StreamBuilder<List<AgentRole>>(
+        stream: _service.watchAllRoles(),
+        builder: (
+          BuildContext context,
+          AsyncSnapshot<List<AgentRole>> snapshot,
+        ) {
+          if (snapshot.hasError) {
+            return Center(
+              child: Text(
+                'Error loading roles: ${snapshot.error}',
+                style: const TextStyle(color: Colors.redAccent),
+              ),
+            );
+          }
+
+          if (!snapshot.hasData) {
+            return const Center(child: CircularProgressIndicator());
+          }
+
+          final List<AgentRole> roles = snapshot.data!;
+
+          if (roles.isEmpty) {
+            return Center(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: <Widget>[
+                  const Text(
+                    'No agent roles yet.',
+                    style: TextStyle(color: Colors.white70),
+                  ),
+                  const SizedBox(height: 12),
+                  ElevatedButton(
+                    onPressed: _seeding ? null : _seedRoles,
+                    child: const Text('Seed Initial Roles'),
+                  ),
+                ],
+              ),
+            );
+          }
+
+          return ListView.separated(
+            padding: const EdgeInsets.all(16),
+            itemCount: roles.length,
+            separatorBuilder: (BuildContext _, int _) =>
+                const SizedBox(height: 12),
+            itemBuilder: (BuildContext context, int index) {
+              final AgentRole role = roles[index];
+              return _AgentRoleCard(
+                role: role,
+                onModeChanged: (String mode) => _changeMode(role, mode),
+                onEnabledChanged: (bool enabled) =>
+                    _toggleEnabled(role, enabled),
+              );
+            },
+          );
+        },
+      ),
+    );
+  }
+}
+
+class _AgentRoleCard extends StatelessWidget {
+  final AgentRole role;
+  final ValueChanged<String> onModeChanged;
+  final ValueChanged<bool> onEnabledChanged;
+
+  const _AgentRoleCard({
+    required this.role,
+    required this.onModeChanged,
+    required this.onEnabledChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final bool isCodeAgent = role.roleId == AgentRole.codeAgentRoleId;
+    final bool modeRecognized = AgentMode.isValid(role.mode);
+    final String displayMode =
+        modeRecognized ? role.mode : AgentMode.off;
+    final bool isLocked = role.isFailClosed || !modeRecognized;
+
+    final List<DropdownMenuItem<String>> modeItems = AgentMode.values
+        .map(
+          (String mode) => DropdownMenuItem<String>(
+            value: mode,
+            child: Text(mode),
+          ),
+        )
+        .toList(growable: false);
+
+    return Card(
+      color: const Color(0xFF1A1A1A),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            if (isLocked) ...<Widget>[
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 10,
+                  vertical: 6,
+                ),
+                decoration: BoxDecoration(
+                  color: Colors.redAccent.withValues(alpha: 0.15),
+                  borderRadius: BorderRadius.circular(6),
+                  border: Border.all(color: Colors.redAccent),
+                ),
+                child: const Text(
+                  'Corrupted/unrecognized data — forced OFF and locked. '
+                  'Repair the Firestore document to restore control.',
+                  style: TextStyle(
+                    color: Colors.redAccent,
+                    fontSize: 12,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 8),
+            ],
+            Row(
+              children: <Widget>[
+                Expanded(
+                  child: Text(
+                    role.name,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.bold,
+                      fontSize: 16,
+                    ),
+                  ),
+                ),
+                Switch(
+                  value: role.enabled,
+                  activeThumbColor: const Color(0xFFFFD60A),
+                  onChanged: isLocked ? null : onEnabledChanged,
+                ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            Text(
+              role.description,
+              style: const TextStyle(color: Colors.white54),
+            ),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 12,
+              runSpacing: 8,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: <Widget>[
+                DropdownButton<String>(
+                  value: displayMode,
+                  dropdownColor: const Color(0xFF1A1A1A),
+                  style: const TextStyle(color: Colors.white),
+                  underline: Container(
+                    height: 1,
+                    color: Colors.white24,
+                  ),
+                  items: modeItems,
+                  onChanged: isLocked
+                      ? null
+                      : (String? value) {
+                          if (value != null) onModeChanged(value);
+                        },
+                ),
+                Chip(
+                  label: Text(role.module),
+                  backgroundColor: Colors.white10,
+                  labelStyle: const TextStyle(color: Colors.white70),
+                ),
+                Chip(
+                  avatar: isCodeAgent
+                      ? const Icon(
+                          Icons.lock,
+                          size: 14,
+                          color: Colors.white70,
+                        )
+                      : null,
+                  label: Text(role.aiClass),
+                  backgroundColor: isCodeAgent
+                      ? Colors.deepOrange.withValues(alpha: 0.25)
+                      : Colors.white10,
+                  labelStyle: const TextStyle(color: Colors.white70),
+                ),
+                if (!role.isOperational)
+                  const Chip(
+                    label: Text('INACTIVE'),
+                    backgroundColor: Colors.white10,
+                    labelStyle: TextStyle(
+                      color: Colors.white38,
+                      fontSize: 11,
+                    ),
+                  ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}

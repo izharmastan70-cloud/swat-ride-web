@@ -1,0 +1,250 @@
+class AgentCallTrainingEvidence {
+  AgentCallTrainingEvidence({
+    required this.evidenceId,
+    required this.evidenceVersion,
+    required this.datasetId,
+    required this.datasetVersion,
+    required this.runnerVersion,
+    required this.canonicalScenarioCount,
+    required this.canonicalPassedCount,
+    required this.canonicalAverageScorePercent,
+    required this.canonicalBaselinePassed,
+    required this.adversarialScenarioCount,
+    required this.requiredAdversarialFamilies,
+    required this.coveredAdversarialFamilies,
+    required this.allAdversarialFailuresDetected,
+    required this.noUnexpectedAdversarialPasses,
+    required this.coverageGatePassed,
+    required this.callAgentActions,
+    required this.permissionBoundaryVerified,
+    required this.recordedAt,
+    required this.integrityFingerprint,
+  }) : requiredAdversarialFamilies = List<String>.unmodifiable(
+         requiredAdversarialFamilies,
+       ),
+       coveredAdversarialFamilies = List<String>.unmodifiable(
+         coveredAdversarialFamilies,
+       ),
+       callAgentActions = List<String>.unmodifiable(callAgentActions);
+
+  static const int currentEvidenceVersion = 1;
+
+  final String evidenceId;
+  final int evidenceVersion;
+
+  final String datasetId;
+  final int datasetVersion;
+  final String runnerVersion;
+
+  final int canonicalScenarioCount;
+  final int canonicalPassedCount;
+  final double canonicalAverageScorePercent;
+  final bool canonicalBaselinePassed;
+
+  final int adversarialScenarioCount;
+  final List<String> requiredAdversarialFamilies;
+  final List<String> coveredAdversarialFamilies;
+  final bool allAdversarialFailuresDetected;
+  final bool noUnexpectedAdversarialPasses;
+  final bool coverageGatePassed;
+
+  final List<String> callAgentActions;
+  final bool permissionBoundaryVerified;
+
+  final DateTime recordedAt;
+
+  /// Deterministic non-cryptographic integrity marker.
+  ///
+  /// This detects accidental content drift in the local immutable evidence
+  /// contract. It is deliberately NOT represented as a production signature,
+  /// cryptographic attestation, backend audit seal, or deployment approval.
+  final String integrityFingerprint;
+
+  bool get structurallyImmutable => true;
+  bool get cryptographicallySigned => false;
+  bool get persistedToTrustedBackend => false;
+  bool get humanApproved => false;
+
+  bool get mayGrantPermission => false;
+  bool get mayWriteBusinessData => false;
+  bool get mayTrainModel => false;
+  bool get mayChangePrompt => false;
+  bool get mayDeploy => false;
+  bool get mayActivateProduction => false;
+
+  bool get technicalEvidencePassed =>
+      canonicalBaselinePassed &&
+      canonicalScenarioCount > 0 &&
+      canonicalPassedCount == canonicalScenarioCount &&
+      canonicalAverageScorePercent >= 95.0 &&
+      adversarialScenarioCount > 0 &&
+      requiredAdversarialFamilies.isNotEmpty &&
+      coveredAdversarialFamilies.toSet().containsAll(
+        requiredAdversarialFamilies.toSet(),
+      ) &&
+      allAdversarialFailuresDetected &&
+      noUnexpectedAdversarialPasses &&
+      coverageGatePassed &&
+      permissionBoundaryVerified &&
+      callAgentActions.length == 4;
+
+  String canonicalFingerprintPayload() {
+    final List<String> required = List<String>.from(requiredAdversarialFamilies)
+      ..sort();
+
+    final List<String> covered = List<String>.from(coveredAdversarialFamilies)
+      ..sort();
+
+    final List<String> actions = List<String>.from(callAgentActions)..sort();
+
+    return <String>[
+      'evidenceVersion=$evidenceVersion',
+      'datasetId=${datasetId.trim()}',
+      'datasetVersion=$datasetVersion',
+      'runnerVersion=${runnerVersion.trim()}',
+      'canonicalScenarioCount=$canonicalScenarioCount',
+      'canonicalPassedCount=$canonicalPassedCount',
+      'canonicalAverageScorePercent='
+          '${canonicalAverageScorePercent.toStringAsFixed(6)}',
+      'canonicalBaselinePassed=$canonicalBaselinePassed',
+      'adversarialScenarioCount=$adversarialScenarioCount',
+      'requiredFamilies=${required.join(",")}',
+      'coveredFamilies=${covered.join(",")}',
+      'allAdversarialFailuresDetected='
+          '$allAdversarialFailuresDetected',
+      'noUnexpectedAdversarialPasses='
+          '$noUnexpectedAdversarialPasses',
+      'coverageGatePassed=$coverageGatePassed',
+      'callAgentActions=${actions.join(",")}',
+      'permissionBoundaryVerified='
+          '$permissionBoundaryVerified',
+      'recordedAt=${recordedAt.toUtc().toIso8601String()}',
+    ].join('|');
+  }
+
+  void validate() {
+    if (evidenceId.trim().isEmpty ||
+        evidenceVersion != currentEvidenceVersion ||
+        datasetId.trim().isEmpty ||
+        datasetVersion < 1 ||
+        runnerVersion.trim().isEmpty ||
+        integrityFingerprint.trim().isEmpty) {
+      throw const AgentCallTrainingEvidenceException(
+        'Training evidence identity/version/fingerprint is invalid.',
+      );
+    }
+
+    if (canonicalScenarioCount <= 0 ||
+        canonicalPassedCount < 0 ||
+        canonicalPassedCount > canonicalScenarioCount ||
+        canonicalAverageScorePercent < 0 ||
+        canonicalAverageScorePercent > 100 ||
+        adversarialScenarioCount <= 0) {
+      throw const AgentCallTrainingEvidenceException(
+        'Training evidence counts/score are invalid.',
+      );
+    }
+
+    if (requiredAdversarialFamilies.isEmpty ||
+        coveredAdversarialFamilies.isEmpty ||
+        callAgentActions.length != 4) {
+      throw const AgentCallTrainingEvidenceException(
+        'Training evidence coverage/action boundaries are incomplete.',
+      );
+    }
+
+    if (requiredAdversarialFamilies.toSet().length !=
+            requiredAdversarialFamilies.length ||
+        coveredAdversarialFamilies.toSet().length !=
+            coveredAdversarialFamilies.length ||
+        callAgentActions.toSet().length != callAgentActions.length) {
+      throw const AgentCallTrainingEvidenceException(
+        'Training evidence collections cannot contain duplicates.',
+      );
+    }
+
+    final String expectedFingerprint =
+        AgentCallTrainingEvidenceFingerprint.compute(
+          canonicalFingerprintPayload(),
+        );
+
+    if (integrityFingerprint != expectedFingerprint) {
+      throw const AgentCallTrainingEvidenceException(
+        'Training evidence integrity fingerprint mismatch.',
+      );
+    }
+  }
+
+  Map<String, dynamic> toSafeMap() {
+    validate();
+
+    return Map<String, dynamic>.unmodifiable(<String, dynamic>{
+      'evidenceId': evidenceId.trim(),
+      'evidenceVersion': evidenceVersion,
+      'datasetId': datasetId.trim(),
+      'datasetVersion': datasetVersion,
+      'runnerVersion': runnerVersion.trim(),
+      'canonicalScenarioCount': canonicalScenarioCount,
+      'canonicalPassedCount': canonicalPassedCount,
+      'canonicalAverageScorePercent': canonicalAverageScorePercent,
+      'canonicalBaselinePassed': canonicalBaselinePassed,
+      'adversarialScenarioCount': adversarialScenarioCount,
+      'requiredAdversarialFamilies': List<String>.unmodifiable(
+        requiredAdversarialFamilies,
+      ),
+      'coveredAdversarialFamilies': List<String>.unmodifiable(
+        coveredAdversarialFamilies,
+      ),
+      'allAdversarialFailuresDetected': allAdversarialFailuresDetected,
+      'noUnexpectedAdversarialPasses': noUnexpectedAdversarialPasses,
+      'coverageGatePassed': coverageGatePassed,
+      'callAgentActions': List<String>.unmodifiable(callAgentActions),
+      'permissionBoundaryVerified': permissionBoundaryVerified,
+      'recordedAt': recordedAt.toUtc().toIso8601String(),
+      'integrityFingerprint': integrityFingerprint,
+      'structurallyImmutable': true,
+      'cryptographicallySigned': false,
+      'persistedToTrustedBackend': false,
+      'humanApproved': false,
+      'technicalEvidencePassed': technicalEvidencePassed,
+      'mayGrantPermission': false,
+      'mayWriteBusinessData': false,
+      'mayTrainModel': false,
+      'mayChangePrompt': false,
+      'mayDeploy': false,
+      'mayActivateProduction': false,
+    });
+  }
+}
+
+class AgentCallTrainingEvidenceFingerprint {
+  AgentCallTrainingEvidenceFingerprint._();
+
+  /// Stable FNV-1a 64-bit-style checksum expressed as 16 lowercase hex chars.
+  ///
+  /// This is an integrity/checksum marker for deterministic test evidence,
+  /// not a cryptographic signature and not a security boundary.
+  static String compute(String input) {
+    const int offsetBasis = 0xcbf29ce484222325;
+    const int prime = 0x100000001b3;
+    const int mask64 = 0xffffffffffffffff;
+
+    int hash = offsetBasis;
+
+    for (final int codeUnit in input.codeUnits) {
+      hash ^= codeUnit;
+      hash = (hash * prime) & mask64;
+    }
+
+    return hash.toUnsigned(64).toRadixString(16).padLeft(16, '0');
+  }
+}
+
+class AgentCallTrainingEvidenceException implements Exception {
+  const AgentCallTrainingEvidenceException(this.message);
+
+  final String message;
+
+  @override
+  String toString() => 'AgentCallTrainingEvidenceException: $message';
+}

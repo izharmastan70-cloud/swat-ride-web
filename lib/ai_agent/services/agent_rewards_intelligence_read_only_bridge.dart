@@ -1,0 +1,492 @@
+import '../../rewards/models/referral_model.dart';
+import '../models/agent_rewards_intelligence_assessment.dart';
+import 'agent_rewards_intelligence_service.dart';
+
+// =========================================================
+// AI AGENT - REWARDS INTELLIGENCE READ-ONLY BRIDGE
+// =========================================================
+//
+// Phase 31 Step 4.
+//
+// Safely maps already-read Rewards module data into the
+// Rewards Intelligence analysis service.
+//
+// Supported read-side inputs:
+// - reward transaction/history records
+// - successful coupon usage records
+// - successful promo usage records
+// - ReferralModel fraud/manual-review flags
+// - cashback history records
+// - loyalty history records
+//
+// IMPORTANT:
+//
+// This bridge DOES NOT:
+// - query Firestore directly
+// - write Firestore
+// - record coupon/promo usage
+// - issue rewards
+// - modify wallet balances
+// - change cashback values
+// - change loyalty levels
+// - ban/suspend accounts
+//
+// Missing analytics must NOT be invented.
+
+class AgentRewardsReadOnlySnapshot {
+  final int rewardTransactions;
+  final int rewardEarnEvents;
+  final int rewardRedeemEvents;
+
+  final int couponAttempts;
+  final int couponSuccesses;
+
+  final int promoAttempts;
+  final int promoSuccesses;
+
+  final int referralCount;
+  final int suspiciousReferralCount;
+  final int manualReviewReferralCount;
+
+  final int cashbackEligibleEvents;
+  final int cashbackAwardedEvents;
+  final double cashbackValueRs;
+
+  final int loyaltyUsersObserved;
+  final int loyaltyUpgradeCount;
+  final int loyaltyDowngradeCount;
+
+  const AgentRewardsReadOnlySnapshot({
+    required this.rewardTransactions,
+    required this.rewardEarnEvents,
+    required this.rewardRedeemEvents,
+    required this.couponAttempts,
+    required this.couponSuccesses,
+    required this.promoAttempts,
+    required this.promoSuccesses,
+    required this.referralCount,
+    required this.suspiciousReferralCount,
+    required this.manualReviewReferralCount,
+    required this.cashbackEligibleEvents,
+    required this.cashbackAwardedEvents,
+    required this.cashbackValueRs,
+    required this.loyaltyUsersObserved,
+    required this.loyaltyUpgradeCount,
+    required this.loyaltyDowngradeCount,
+  });
+
+  Map<String, dynamic> toMap() {
+    return <String, dynamic>{
+      'rewardTransactions': rewardTransactions,
+      'rewardEarnEvents': rewardEarnEvents,
+      'rewardRedeemEvents': rewardRedeemEvents,
+      'couponAttempts': couponAttempts,
+      'couponSuccesses': couponSuccesses,
+      'promoAttempts': promoAttempts,
+      'promoSuccesses': promoSuccesses,
+      'referralCount': referralCount,
+      'suspiciousReferralCount':
+          suspiciousReferralCount,
+      'manualReviewReferralCount':
+          manualReviewReferralCount,
+      'cashbackEligibleEvents':
+          cashbackEligibleEvents,
+      'cashbackAwardedEvents':
+          cashbackAwardedEvents,
+      'cashbackValueRs': cashbackValueRs,
+      'loyaltyUsersObserved':
+          loyaltyUsersObserved,
+      'loyaltyUpgradeCount':
+          loyaltyUpgradeCount,
+      'loyaltyDowngradeCount':
+          loyaltyDowngradeCount,
+    };
+  }
+}
+
+class AgentRewardsIntelligenceReadOnlyBridge {
+  final AgentRewardsIntelligenceService intelligenceService;
+
+  const AgentRewardsIntelligenceReadOnlyBridge({
+    this.intelligenceService =
+        const AgentRewardsIntelligenceService(),
+  });
+
+  AgentRewardsReadOnlySnapshot buildSnapshot({
+    Iterable<Map<String, dynamic>>
+        rewardHistory =
+        const <Map<String, dynamic>>[],
+    Iterable<Map<String, dynamic>>
+        couponUsageRecords =
+        const <Map<String, dynamic>>[],
+    Iterable<Map<String, dynamic>>
+        promoUsageRecords =
+        const <Map<String, dynamic>>[],
+    Iterable<ReferralModel> referrals =
+        const <ReferralModel>[],
+    Iterable<Map<String, dynamic>>
+        cashbackHistory =
+        const <Map<String, dynamic>>[],
+    Iterable<Map<String, dynamic>>
+        loyaltyHistory =
+        const <Map<String, dynamic>>[],
+
+    int? observedCouponAttempts,
+    int? observedPromoAttempts,
+    int? cashbackEligibleEvents,
+    int? loyaltyUsersObserved,
+  }) {
+    final List<Map<String, dynamic>> rewardRecords =
+        rewardHistory.toList(growable: false);
+
+    final List<Map<String, dynamic>> couponRecords =
+        couponUsageRecords.toList(growable: false);
+
+    final List<Map<String, dynamic>> promoRecords =
+        promoUsageRecords.toList(growable: false);
+
+    final List<ReferralModel> referralRecords =
+        referrals.toList(growable: false);
+
+    final List<Map<String, dynamic>> cashbackRecords =
+        cashbackHistory.toList(growable: false);
+
+    final List<Map<String, dynamic>> loyaltyRecords =
+        loyaltyHistory.toList(growable: false);
+
+    final int rewardEarnEvents =
+        rewardRecords.where(_isRewardEarnRecord).length;
+
+    final int rewardRedeemEvents =
+        rewardRecords.where(_isRewardRedeemRecord).length;
+
+    final int couponSuccesses =
+        couponRecords.length;
+
+    final int promoSuccesses =
+        promoRecords.length;
+
+    final int safeCouponAttempts =
+        observedCouponAttempts ??
+            couponSuccesses;
+
+    final int safePromoAttempts =
+        observedPromoAttempts ??
+            promoSuccesses;
+
+    if (safeCouponAttempts < couponSuccesses) {
+      throw const AgentRewardsIntelligenceReadOnlyBridgeException(
+        'observedCouponAttempts cannot be lower than successful coupon usage records.',
+      );
+    }
+
+    if (safePromoAttempts < promoSuccesses) {
+      throw const AgentRewardsIntelligenceReadOnlyBridgeException(
+        'observedPromoAttempts cannot be lower than successful promo usage records.',
+      );
+    }
+
+    final int suspiciousReferralCount =
+        referralRecords
+            .where(
+              (ReferralModel referral) =>
+                  referral.isFraudSuspected,
+            )
+            .length;
+
+    final int manualReviewReferralCount =
+        referralRecords
+            .where(
+              (ReferralModel referral) =>
+                  referral.requiresManualReview,
+            )
+            .length;
+
+    final int cashbackAwardedEvents =
+        cashbackRecords
+            .where(_isCashbackAwardedRecord)
+            .length;
+
+    final double cashbackValueRs =
+        cashbackRecords
+            .where(_isCashbackAwardedRecord)
+            .fold<double>(
+          0,
+          (
+            double total,
+            Map<String, dynamic> record,
+          ) {
+            return total +
+                _cashbackAmount(record);
+          },
+        );
+
+    final int safeCashbackEligibleEvents =
+        cashbackEligibleEvents ??
+            cashbackRecords.length;
+
+    if (safeCashbackEligibleEvents <
+        cashbackAwardedEvents) {
+      throw const AgentRewardsIntelligenceReadOnlyBridgeException(
+        'cashbackEligibleEvents cannot be lower than awarded cashback records.',
+      );
+    }
+
+    final int loyaltyUpgradeCount =
+        loyaltyRecords
+            .where(_isLoyaltyUpgradeRecord)
+            .length;
+
+    final int loyaltyDowngradeCount =
+        loyaltyRecords
+            .where(_isLoyaltyDowngradeRecord)
+            .length;
+
+    final int safeLoyaltyUsersObserved =
+        loyaltyUsersObserved ??
+            _uniqueLoyaltyUsers(loyaltyRecords);
+
+    if (safeLoyaltyUsersObserved < 0) {
+      throw const AgentRewardsIntelligenceReadOnlyBridgeException(
+        'loyaltyUsersObserved cannot be negative.',
+      );
+    }
+
+    return AgentRewardsReadOnlySnapshot(
+      rewardTransactions:
+          rewardRecords.length,
+      rewardEarnEvents:
+          rewardEarnEvents,
+      rewardRedeemEvents:
+          rewardRedeemEvents,
+      couponAttempts:
+          safeCouponAttempts,
+      couponSuccesses:
+          couponSuccesses,
+      promoAttempts:
+          safePromoAttempts,
+      promoSuccesses:
+          promoSuccesses,
+      referralCount:
+          referralRecords.length,
+      suspiciousReferralCount:
+          suspiciousReferralCount,
+      manualReviewReferralCount:
+          manualReviewReferralCount,
+      cashbackEligibleEvents:
+          safeCashbackEligibleEvents,
+      cashbackAwardedEvents:
+          cashbackAwardedEvents,
+      cashbackValueRs:
+          cashbackValueRs,
+      loyaltyUsersObserved:
+          safeLoyaltyUsersObserved,
+      loyaltyUpgradeCount:
+          loyaltyUpgradeCount,
+      loyaltyDowngradeCount:
+          loyaltyDowngradeCount,
+    );
+  }
+
+  AgentRewardsIntelligenceAssessment assessSnapshot({
+    required String assessmentId,
+    required DateTime periodStart,
+    required DateTime periodEnd,
+    required AgentRewardsReadOnlySnapshot snapshot,
+  }) {
+    return intelligenceService.assess(
+      assessmentId: assessmentId,
+      periodStart: periodStart,
+      periodEnd: periodEnd,
+      rewardTransactions:
+          snapshot.rewardTransactions,
+      rewardEarnEvents:
+          snapshot.rewardEarnEvents,
+      rewardRedeemEvents:
+          snapshot.rewardRedeemEvents,
+      couponAttempts:
+          snapshot.couponAttempts,
+      couponSuccesses:
+          snapshot.couponSuccesses,
+      promoAttempts:
+          snapshot.promoAttempts,
+      promoSuccesses:
+          snapshot.promoSuccesses,
+      referralCount:
+          snapshot.referralCount,
+      suspiciousReferralCount:
+          snapshot.suspiciousReferralCount,
+      manualReviewReferralCount:
+          snapshot.manualReviewReferralCount,
+      cashbackEligibleEvents:
+          snapshot.cashbackEligibleEvents,
+      cashbackAwardedEvents:
+          snapshot.cashbackAwardedEvents,
+      cashbackValueRs:
+          snapshot.cashbackValueRs,
+      loyaltyUsersObserved:
+          snapshot.loyaltyUsersObserved,
+      loyaltyUpgradeCount:
+          snapshot.loyaltyUpgradeCount,
+      loyaltyDowngradeCount:
+          snapshot.loyaltyDowngradeCount,
+    );
+  }
+
+  bool _isRewardEarnRecord(
+    Map<String, dynamic> record,
+  ) {
+    final String value =
+        _firstText(
+          record,
+          const <String>[
+            'type',
+            'transactionType',
+            'action',
+            'direction',
+          ],
+        ).toLowerCase();
+
+    return value.contains('earn') ||
+        value.contains('credit') ||
+        value.contains('award') ||
+        value.contains('bonus');
+  }
+
+  bool _isRewardRedeemRecord(
+    Map<String, dynamic> record,
+  ) {
+    final String value =
+        _firstText(
+          record,
+          const <String>[
+            'type',
+            'transactionType',
+            'action',
+            'direction',
+          ],
+        ).toLowerCase();
+
+    return value.contains('redeem') ||
+        value.contains('debit') ||
+        value.contains('spend') ||
+        value.contains('use');
+  }
+
+  bool _isCashbackAwardedRecord(
+    Map<String, dynamic> record,
+  ) {
+    final String status =
+        _firstText(
+          record,
+          const <String>[
+            'status',
+            'cashbackStatus',
+          ],
+        ).toLowerCase();
+
+    return status == 'completed' ||
+        status == 'available' ||
+        status == 'awarded' ||
+        status == 'credited';
+  }
+
+  double _cashbackAmount(
+    Map<String, dynamic> record,
+  ) {
+    final dynamic value =
+        record['cashbackAmount'] ??
+        record['amount'];
+
+    return value is num
+        ? value.toDouble()
+        : 0;
+  }
+
+  bool _isLoyaltyUpgradeRecord(
+    Map<String, dynamic> record,
+  ) {
+    final String value =
+        _firstText(
+          record,
+          const <String>[
+            'type',
+            'eventType',
+            'changeType',
+            'action',
+          ],
+        ).toLowerCase();
+
+    return value.contains('upgrade');
+  }
+
+  bool _isLoyaltyDowngradeRecord(
+    Map<String, dynamic> record,
+  ) {
+    final String value =
+        _firstText(
+          record,
+          const <String>[
+            'type',
+            'eventType',
+            'changeType',
+            'action',
+          ],
+        ).toLowerCase();
+
+    return value.contains('downgrade');
+  }
+
+  int _uniqueLoyaltyUsers(
+    Iterable<Map<String, dynamic>> records,
+  ) {
+    final Set<String> userIds = <String>{};
+
+    for (final Map<String, dynamic> record
+        in records) {
+      final String userId =
+          _firstText(
+        record,
+        const <String>[
+          'userId',
+          'uid',
+        ],
+      );
+
+      if (userId.trim().isNotEmpty) {
+        userIds.add(userId.trim());
+      }
+    }
+
+    return userIds.length;
+  }
+
+  String _firstText(
+    Map<String, dynamic> record,
+    Iterable<String> keys,
+  ) {
+    for (final String key in keys) {
+      final dynamic value = record[key];
+
+      if (value != null &&
+          value.toString().trim().isNotEmpty) {
+        return value.toString().trim();
+      }
+    }
+
+    return '';
+  }
+}
+
+class AgentRewardsIntelligenceReadOnlyBridgeException
+    implements Exception {
+  final String message;
+
+  const AgentRewardsIntelligenceReadOnlyBridgeException(
+    this.message,
+  );
+
+  @override
+  String toString() =>
+      'AgentRewardsIntelligenceReadOnlyBridgeException: $message';
+}

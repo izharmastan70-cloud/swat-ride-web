@@ -1,0 +1,503 @@
+﻿import 'package:flutter/material.dart';
+
+import '../models/ride_model.dart';
+import '../services/ride_service.dart';
+import 'ride_searching_screen.dart';
+
+class MyRidesScreen extends StatefulWidget {
+  const MyRidesScreen({super.key});
+
+  @override
+  State<MyRidesScreen> createState() => _MyRidesScreenState();
+}
+
+class _MyRidesScreenState extends State<MyRidesScreen> {
+  static const Color _green = Color(0xFF087F5B);
+  static const Color _background = Color(0xFFF5F6F8);
+
+  final RideService _rideService = RideService();
+  _RideHistoryFilter _selectedFilter = _RideHistoryFilter.all;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: _background,
+      appBar: AppBar(
+        title: const Text(
+          'My Rides',
+          style: TextStyle(fontWeight: FontWeight.w900),
+        ),
+        centerTitle: true,
+        backgroundColor: Colors.white,
+        surfaceTintColor: Colors.white,
+      ),
+      body: StreamBuilder<List<RideModel>>(
+        stream: _rideService.currentUserRidesStream(),
+        builder: (
+          BuildContext context,
+          AsyncSnapshot<List<RideModel>> snapshot,
+        ) {
+          if (snapshot.connectionState == ConnectionState.waiting &&
+              !snapshot.hasData) {
+            return const Center(child: CircularProgressIndicator());
+          }
+
+          if (snapshot.hasError) {
+            return _HistoryMessage(
+              icon: Icons.cloud_off_rounded,
+              title: 'Unable to load rides',
+              message: _cleanError(snapshot.error),
+              color: Colors.orange,
+            );
+          }
+
+          final List<RideModel> allRides =
+              snapshot.data ?? <RideModel>[];
+          final List<RideModel> visibleRides =
+              _applyFilter(allRides, _selectedFilter);
+
+          return SafeArea(
+            child: Column(
+              children: <Widget>[
+                _filterBar(allRides),
+                Expanded(
+                  child: visibleRides.isEmpty
+                      ? _emptyState(allRides.isEmpty)
+                      : RefreshIndicator(
+                          color: _green,
+                          onRefresh: () async {
+                            await Future<void>.delayed(
+                              const Duration(milliseconds: 450),
+                            );
+                            if (mounted) setState(() {});
+                          },
+                          child: ListView.separated(
+                            physics: const AlwaysScrollableScrollPhysics(),
+                            padding: const EdgeInsets.fromLTRB(16, 8, 16, 28),
+                            itemCount: visibleRides.length,
+                            separatorBuilder: (_, _) =>
+                                const SizedBox(height: 12),
+                            itemBuilder: (BuildContext context, int index) {
+                              return _rideCard(visibleRides[index]);
+                            },
+                          ),
+                        ),
+                ),
+              ],
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _filterBar(List<RideModel> rides) {
+    return Container(
+      color: Colors.white,
+      padding: const EdgeInsets.fromLTRB(16, 10, 16, 14),
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: Row(
+          children: _RideHistoryFilter.values.map((_RideHistoryFilter filter) {
+            final bool selected = filter == _selectedFilter;
+            final int count = _applyFilter(rides, filter).length;
+
+            return Padding(
+              padding: const EdgeInsets.only(right: 8),
+              child: ChoiceChip(
+                selected: selected,
+                showCheckmark: false,
+                label: Text('${_filterName(filter)}  $count'),
+                selectedColor: _green,
+                backgroundColor: const Color(0xFFF0F2F4),
+                labelStyle: TextStyle(
+                  color: selected ? Colors.white : Colors.black87,
+                  fontWeight: FontWeight.w800,
+                ),
+                side: BorderSide.none,
+                onSelected: (_) {
+                  setState(() => _selectedFilter = filter);
+                },
+              ),
+            );
+          }).toList(growable: false),
+        ),
+      ),
+    );
+  }
+
+  Widget _rideCard(RideModel ride) {
+    final Color statusColor = _statusColor(ride.status);
+    final bool canOpen = ride.isActive || ride.status == RideModel.completed;
+
+    return Material(
+      color: Colors.white,
+      borderRadius: BorderRadius.circular(20),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: canOpen ? () => _openRide(ride) : null,
+        child: Padding(
+          padding: const EdgeInsets.all(17),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              Row(
+                children: <Widget>[
+                  Container(
+                    width: 48,
+                    height: 48,
+                    decoration: BoxDecoration(
+                      color: statusColor.withValues(alpha: 0.11),
+                      shape: BoxShape.circle,
+                    ),
+                    child: Icon(
+                      _statusIcon(ride.status),
+                      color: statusColor,
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: <Widget>[
+                        Text(
+                          _formatDate(ride.createdAt),
+                          style: const TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.w900,
+                          ),
+                        ),
+                        const SizedBox(height: 3),
+                        Text(
+                          '${ride.vehicleName} â€¢ ${ride.distanceKm.toStringAsFixed(1)} km',
+                          style: const TextStyle(color: Colors.black54),
+                        ),
+                      ],
+                    ),
+                  ),
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 6,
+                    ),
+                    decoration: BoxDecoration(
+                      color: statusColor.withValues(alpha: 0.1),
+                      borderRadius: BorderRadius.circular(20),
+                    ),
+                    child: Text(
+                      _statusName(ride.status),
+                      style: TextStyle(
+                        color: statusColor,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 16),
+              _locationRow(
+                color: _green,
+                title: _placeText(
+                  ride.pickupLocation.placeName,
+                  ride.pickupLocation.address,
+                ),
+              ),
+              Container(
+                height: 21,
+                margin: const EdgeInsets.only(left: 6),
+                alignment: Alignment.centerLeft,
+                child: Container(width: 2, color: Colors.black12),
+              ),
+              _locationRow(
+                color: Colors.redAccent,
+                title: _placeText(
+                  ride.destinationLocation.placeName,
+                  ride.destinationLocation.address,
+                ),
+              ),
+              const Divider(height: 27),
+              Row(
+                children: <Widget>[
+                  Icon(
+                    _paymentIcon(ride.paymentMethod),
+                    size: 20,
+                    color: Colors.black54,
+                  ),
+                  const SizedBox(width: 7),
+                  Text(
+                    _titleCase(ride.paymentMethod),
+                    style: const TextStyle(color: Colors.black54),
+                  ),
+                  const Spacer(),
+                  Text(
+                    'Rs ${ride.estimatedFare.toStringAsFixed(0)}',
+                    style: const TextStyle(
+                      color: _green,
+                      fontSize: 18,
+                      fontWeight: FontWeight.w900,
+                    ),
+                  ),
+                  if (canOpen) ...<Widget>[
+                    const SizedBox(width: 5),
+                    const Icon(Icons.chevron_right_rounded),
+                  ],
+                ],
+              ),
+              if (ride.status == RideModel.cancelled &&
+                  (ride.cancellationReason ?? '').isNotEmpty) ...<Widget>[
+                const SizedBox(height: 11),
+                Text(
+                  'Reason: ${_readableReason(ride.cancellationReason!)}',
+                  style: const TextStyle(
+                    color: Colors.redAccent,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _locationRow({
+    required Color color,
+    required String title,
+  }) {
+    return Row(
+      children: <Widget>[
+        Container(
+          width: 13,
+          height: 13,
+          decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+        ),
+        const SizedBox(width: 12),
+        Expanded(
+          child: Text(
+            title,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(fontWeight: FontWeight.w700),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _emptyState(bool hasNoRidesAtAll) {
+    return _HistoryMessage(
+      icon: hasNoRidesAtAll
+          ? Icons.local_taxi_outlined
+          : Icons.filter_alt_off_rounded,
+      title: hasNoRidesAtAll ? 'No rides yet' : 'No rides in this section',
+      message: hasNoRidesAtAll
+          ? 'Your SWAT RIDE trips will appear here.'
+          : 'Choose another filter to see your rides.',
+      color: _green,
+    );
+  }
+
+  List<RideModel> _applyFilter(
+    List<RideModel> rides,
+    _RideHistoryFilter filter,
+  ) {
+    switch (filter) {
+      case _RideHistoryFilter.active:
+        return rides.where((RideModel ride) => ride.isActive).toList();
+      case _RideHistoryFilter.completed:
+        return rides
+            .where((RideModel ride) => ride.status == RideModel.completed)
+            .toList();
+      case _RideHistoryFilter.cancelled:
+        return rides
+            .where((RideModel ride) => ride.status == RideModel.cancelled)
+            .toList();
+      case _RideHistoryFilter.all:
+        return rides;
+    }
+  }
+
+  Future<void> _openRide(RideModel ride) async {
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => RideSearchingScreen(rideId: ride.rideId),
+      ),
+    );
+  }
+
+  String _filterName(_RideHistoryFilter filter) {
+    switch (filter) {
+      case _RideHistoryFilter.all:
+        return 'All';
+      case _RideHistoryFilter.active:
+        return 'Active';
+      case _RideHistoryFilter.completed:
+        return 'Completed';
+      case _RideHistoryFilter.cancelled:
+        return 'Cancelled';
+    }
+  }
+
+  String _statusName(String status) {
+    switch (status) {
+      case RideModel.searching:
+        return 'SEARCHING';
+      case RideModel.driverAssigned:
+        return 'ACCEPTED';
+      case RideModel.driverArriving:
+        return 'ARRIVING';
+      case RideModel.driverArrived:
+        return 'ARRIVED';
+      case RideModel.rideStarted:
+        return 'IN RIDE';
+      case RideModel.completed:
+        return 'COMPLETED';
+      case RideModel.cancelled:
+        return 'CANCELLED';
+      default:
+        return 'UPDATED';
+    }
+  }
+
+  Color _statusColor(String status) {
+    switch (status) {
+      case RideModel.completed:
+        return _green;
+      case RideModel.cancelled:
+        return Colors.redAccent;
+      case RideModel.driverArrived:
+        return Colors.deepOrange;
+      default:
+        return Colors.blueAccent;
+    }
+  }
+
+  IconData _statusIcon(String status) {
+    switch (status) {
+      case RideModel.completed:
+        return Icons.check_rounded;
+      case RideModel.cancelled:
+        return Icons.close_rounded;
+      case RideModel.searching:
+        return Icons.search_rounded;
+      default:
+        return Icons.local_taxi_rounded;
+    }
+  }
+
+  IconData _paymentIcon(String paymentMethod) {
+    return paymentMethod.toLowerCase() == RideModel.cash
+        ? Icons.payments_outlined
+        : Icons.account_balance_wallet_outlined;
+  }
+
+  String _placeText(String placeName, String address) {
+    if (placeName.trim().isNotEmpty) return placeName.trim();
+    if (address.trim().isNotEmpty) return address.trim();
+    return 'Location unavailable';
+  }
+
+  String _formatDate(DateTime date) {
+    const List<String> months = <String>[
+      'Jan',
+      'Feb',
+      'Mar',
+      'Apr',
+      'May',
+      'Jun',
+      'Jul',
+      'Aug',
+      'Sep',
+      'Oct',
+      'Nov',
+      'Dec',
+    ];
+    final int hour = date.hour == 0
+        ? 12
+        : date.hour > 12
+            ? date.hour - 12
+            : date.hour;
+    final String minute = date.minute.toString().padLeft(2, '0');
+    final String period = date.hour >= 12 ? 'PM' : 'AM';
+    return '${date.day} ${months[date.month - 1]} ${date.year} â€¢ '
+        '$hour:$minute $period';
+  }
+
+  String _readableReason(String reason) {
+    return reason.split('_').map(_titleCase).join(' ');
+  }
+
+  String _titleCase(String text) {
+    final String value = text.trim();
+    if (value.isEmpty) return value;
+    return '${value[0].toUpperCase()}${value.substring(1).toLowerCase()}';
+  }
+
+  String _cleanError(Object? error) {
+    return (error ?? 'Unknown error')
+        .toString()
+        .replaceFirst('Exception: ', '')
+        .replaceFirst('FirebaseException: ', '');
+  }
+}
+
+enum _RideHistoryFilter {
+  all,
+  active,
+  completed,
+  cancelled,
+}
+
+class _HistoryMessage extends StatelessWidget {
+  const _HistoryMessage({
+    required this.icon,
+    required this.title,
+    required this.message,
+    required this.color,
+  });
+
+  final IconData icon;
+  final String title;
+  final String message;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.all(30),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            Container(
+              width: 92,
+              height: 92,
+              decoration: BoxDecoration(
+                color: color.withValues(alpha: 0.1),
+                shape: BoxShape.circle,
+              ),
+              child: Icon(icon, color: color, size: 48),
+            ),
+            const SizedBox(height: 19),
+            Text(
+              title,
+              textAlign: TextAlign.center,
+              style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w900),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              message,
+              textAlign: TextAlign.center,
+              style: const TextStyle(color: Colors.black54, height: 1.5),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+

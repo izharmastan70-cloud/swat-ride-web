@@ -1,0 +1,1668 @@
+// =============================================================
+// SWAT RIDE - GLOBAL LOYALTY, REWARDS & PROMO ENGINE
+// File: lib/rewards/services/loyalty_service.dart
+//
+// Global loyalty-level service for every SWAT RIDE module.
+//
+// Supports:
+// - Bronze, Silver, Gold, Diamond, VIP and custom levels
+// - Admin global ON/OFF
+// - Admin editable qualification and benefits
+// - Automatic upgrade
+// - Admin-controlled automatic downgrade
+// - Manual level assignment
+// - Completed booking and lifetime points tracking
+// - Level discount, points multiplier and cashback bonus
+// - Firestore production code and testing bypass
+//
+// IMPORTANT:
+// Benefits are calculated/recommended here.
+// Discount, payment or wallet action still requires confirmation.
+// =============================================================
+
+import 'dart:convert';
+
+import 'package:cloud_firestore/cloud_firestore.dart';
+import '../config/reward_production_gate.dart';
+
+import '../models/loyalty_level_model.dart';
+import '../models/reward_point_model.dart';
+
+class LoyaltyEvaluationResult {
+  final bool success;
+  final String message;
+
+  final String userId;
+  final LoyaltyLevelModel? previousLevel;
+  final LoyaltyLevelModel? currentLevel;
+
+  final int lifetimePoints;
+  final int completedBookings;
+
+  final bool levelChanged;
+  final bool upgraded;
+  final bool downgraded;
+  final bool duplicate;
+
+  const LoyaltyEvaluationResult({
+    required this.success,
+    required this.message,
+    required this.userId,
+    this.previousLevel,
+    this.currentLevel,
+    this.lifetimePoints = 0,
+    this.completedBookings = 0,
+    this.levelChanged = false,
+    this.upgraded = false,
+    this.downgraded = false,
+    this.duplicate = false,
+  });
+
+  factory LoyaltyEvaluationResult.failed({
+    required String userId,
+    required String message,
+  }) {
+    return LoyaltyEvaluationResult(
+      success: false,
+      message: message,
+      userId: userId,
+    );
+  }
+}
+
+class LoyaltyBenefitResult {
+  final bool isAvailable;
+  final String message;
+  final LoyaltyLevelModel? level;
+
+  final int basePoints;
+  final int finalPoints;
+  final int bonusPoints;
+
+  final double eligibleAmount;
+  final double levelDiscount;
+  final double cashbackBonusPercentage;
+  final double cashbackBonusAmount;
+
+  final bool prioritySupportEnabled;
+  final bool freeDeliveryEnabled;
+  final bool exclusiveOffersEnabled;
+
+  final List<String> benefits;
+
+  const LoyaltyBenefitResult({
+    required this.isAvailable,
+    required this.message,
+    this.level,
+    this.basePoints = 0,
+    this.finalPoints = 0,
+    this.bonusPoints = 0,
+    this.eligibleAmount = 0,
+    this.levelDiscount = 0,
+    this.cashbackBonusPercentage = 0,
+    this.cashbackBonusAmount = 0,
+    this.prioritySupportEnabled = false,
+    this.freeDeliveryEnabled = false,
+    this.exclusiveOffersEnabled = false,
+    this.benefits = const [],
+  });
+
+  factory LoyaltyBenefitResult.unavailable(
+    String message,
+  ) {
+    return LoyaltyBenefitResult(
+      isAvailable: false,
+      message: message,
+    );
+  }
+}
+
+class LoyaltyLevelProgress {
+  final LoyaltyLevelModel? currentLevel;
+  final LoyaltyLevelModel? nextLevel;
+
+  final int lifetimePoints;
+  final int completedBookings;
+
+  final int pointsNeeded;
+  final int bookingsNeeded;
+
+  final double progressPercentage;
+  final bool highestLevelReached;
+
+  const LoyaltyLevelProgress({
+    this.currentLevel,
+    this.nextLevel,
+    required this.lifetimePoints,
+    required this.completedBookings,
+    required this.pointsNeeded,
+    required this.bookingsNeeded,
+    required this.progressPercentage,
+    required this.highestLevelReached,
+  });
+}
+
+class LoyaltyService {
+  final FirebaseFirestore _firestore;
+
+  /// Keep true during testing/local development.
+  ///
+  /// Change to false when real Firebase connection starts.
+  final bool useTestingBypass;
+
+  bool _testingLoyaltyEnabled = true;
+  bool _testingAutomaticUpgradeEnabled = true;
+  bool _testingAutomaticDowngradeEnabled = false;
+
+  final Map<String, LoyaltyLevelModel> _testingLevels = {};
+  final Map<String, Map<String, dynamic>> _testingUsers = {};
+  final Set<String> _testingProcessedEvents = {};
+  final List<Map<String, dynamic>> _testingHistory = [];
+
+  LoyaltyService({
+    FirebaseFirestore? firestore,
+    this.useTestingBypass = false,
+  }) : _firestore = firestore ?? FirebaseFirestore.instance;
+
+  CollectionReference<Map<String, dynamic>> get _levelsCollection {
+    return _firestore.collection('reward_loyalty_levels');
+  }
+
+  CollectionReference<Map<String, dynamic>> get _usersCollection {
+    return _firestore.collection('reward_loyalty_users');
+  }
+
+  CollectionReference<Map<String, dynamic>> get _eventsCollection {
+    return _firestore.collection('reward_loyalty_events');
+  }
+
+  CollectionReference<Map<String, dynamic>>
+      get _historyCollection {
+    return _firestore.collection('reward_loyalty_history');
+  }
+
+  DocumentReference<Map<String, dynamic>> get _settingsDocument {
+    return _firestore
+        .collection('reward_engine_settings')
+        .doc('loyalty');
+  }
+
+  // =============================================================
+  // GLOBAL ADMIN SETTINGS
+  // =============================================================
+
+  Future<void> updateLoyaltySettings({
+    required bool isEnabled,
+    required bool automaticUpgradeEnabled,
+    required bool automaticDowngradeEnabled,
+    required String updatedBy,
+  }) async {
+    if (useTestingBypass) {
+      _testingLoyaltyEnabled = isEnabled;
+      _testingAutomaticUpgradeEnabled =
+          automaticUpgradeEnabled;
+      _testingAutomaticDowngradeEnabled =
+          automaticDowngradeEnabled;
+      return;
+    }
+
+    await _settingsDocument.set({
+      'isEnabled': isEnabled,
+      'automaticUpgradeEnabled':
+          automaticUpgradeEnabled,
+      'automaticDowngradeEnabled':
+          automaticDowngradeEnabled,
+      'updatedBy': updatedBy,
+      'updatedAt': DateTime.now().millisecondsSinceEpoch,
+    }, SetOptions(merge: true));
+  }
+
+  Future<Map<String, bool>> getLoyaltySettings() async {
+    if (useTestingBypass) {
+      return {
+        'isEnabled': _testingLoyaltyEnabled,
+        'automaticUpgradeEnabled':
+            _testingAutomaticUpgradeEnabled,
+        'automaticDowngradeEnabled':
+            _testingAutomaticDowngradeEnabled,
+      };
+    }
+
+    final document = await _settingsDocument.get();
+    final data = document.data();
+
+    return {
+      'isEnabled': data?['isEnabled'] as bool? ?? true,
+      'automaticUpgradeEnabled':
+          data?['automaticUpgradeEnabled'] as bool? ?? true,
+      'automaticDowngradeEnabled':
+          data?['automaticDowngradeEnabled'] as bool? ??
+              false,
+    };
+  }
+
+  Future<bool> isLoyaltyEnabled() async {
+    final settings = await getLoyaltySettings();
+    return settings['isEnabled'] ?? true;
+  }
+
+  Stream<Map<String, bool>> watchLoyaltySettings() {
+    if (useTestingBypass) {
+      return Stream<Map<String, bool>>.value({
+        'isEnabled': _testingLoyaltyEnabled,
+        'automaticUpgradeEnabled':
+            _testingAutomaticUpgradeEnabled,
+        'automaticDowngradeEnabled':
+            _testingAutomaticDowngradeEnabled,
+      });
+    }
+
+    return _settingsDocument.snapshots().map((document) {
+      final data = document.data();
+
+      return {
+        'isEnabled': data?['isEnabled'] as bool? ?? true,
+        'automaticUpgradeEnabled':
+            data?['automaticUpgradeEnabled'] as bool? ??
+                true,
+        'automaticDowngradeEnabled':
+            data?['automaticDowngradeEnabled'] as bool? ??
+                false,
+      };
+    });
+  }
+
+  // =============================================================
+  // ADMIN LEVEL MANAGEMENT
+  // =============================================================
+
+  Future<void> createLevel(
+    LoyaltyLevelModel level,
+  ) async {
+    _validateLevel(level);
+
+    final levels = await getAllLevels();
+
+    final duplicateName = levels.any(
+      (existing) =>
+          existing.name.trim().toLowerCase() ==
+              level.name.trim().toLowerCase() &&
+          existing.id != level.id,
+    );
+
+    if (duplicateName) {
+      throw StateError(
+        'A loyalty level with this name already exists.',
+      );
+    }
+
+    final duplicateOrder = levels.any(
+      (existing) =>
+          existing.displayOrder == level.displayOrder &&
+          existing.id != level.id,
+    );
+
+    if (duplicateOrder) {
+      throw StateError(
+        'Another loyalty level already uses this display order.',
+      );
+    }
+
+    if (level.isDefaultLevel) {
+      await _removeExistingDefaultLevel(
+        exceptLevelId: level.id,
+      );
+    }
+
+    if (useTestingBypass) {
+      if (_testingLevels.containsKey(level.id)) {
+        throw StateError('Loyalty level already exists.');
+      }
+
+      _testingLevels[level.id] = level;
+      return;
+    }
+
+    final reference = _levelsCollection.doc(level.id);
+    final existing = await reference.get();
+
+    if (existing.exists) {
+      throw StateError('Loyalty level already exists.');
+    }
+
+    await reference.set(level.toMap());
+  }
+
+  Future<void> updateLevel(
+    LoyaltyLevelModel level,
+  ) async {
+    _validateLevel(level);
+
+    final levels = await getAllLevels();
+
+    final duplicateName = levels.any(
+      (existing) =>
+          existing.id != level.id &&
+          existing.name.trim().toLowerCase() ==
+              level.name.trim().toLowerCase(),
+    );
+
+    if (duplicateName) {
+      throw StateError(
+        'A loyalty level with this name already exists.',
+      );
+    }
+
+    final duplicateOrder = levels.any(
+      (existing) =>
+          existing.id != level.id &&
+          existing.displayOrder == level.displayOrder,
+    );
+
+    if (duplicateOrder) {
+      throw StateError(
+        'Another loyalty level already uses this display order.',
+      );
+    }
+
+    if (level.isDefaultLevel) {
+      await _removeExistingDefaultLevel(
+        exceptLevelId: level.id,
+      );
+    }
+
+    final updatedLevel = level.copyWith(
+      updatedAt: DateTime.now(),
+    );
+
+    if (useTestingBypass) {
+      if (!_testingLevels.containsKey(level.id)) {
+        throw StateError('Loyalty level not found.');
+      }
+
+      _testingLevels[level.id] = updatedLevel;
+      return;
+    }
+
+    final reference = _levelsCollection.doc(level.id);
+    final existing = await reference.get();
+
+    if (!existing.exists) {
+      throw StateError('Loyalty level not found.');
+    }
+
+    await reference.update(updatedLevel.toMap());
+  }
+
+  Future<void> saveLevel(
+    LoyaltyLevelModel level,
+  ) async {
+    _validateLevel(level);
+
+    if (level.isDefaultLevel) {
+      await _removeExistingDefaultLevel(
+        exceptLevelId: level.id,
+      );
+    }
+
+    if (useTestingBypass) {
+      _testingLevels[level.id] = level;
+      return;
+    }
+
+    await _levelsCollection.doc(level.id).set(
+          level.toMap(),
+          SetOptions(merge: true),
+        );
+  }
+
+  Future<void> setLevelActive({
+    required String levelId,
+    required bool isActive,
+  }) async {
+    final level = await getLevelById(levelId);
+
+    if (level == null) {
+      throw StateError('Loyalty level not found.');
+    }
+
+    final updatedLevel = level.copyWith(
+      isActive: isActive,
+      updatedAt: DateTime.now(),
+    );
+
+    if (useTestingBypass) {
+      _testingLevels[levelId] = updatedLevel;
+      return;
+    }
+
+    await _levelsCollection.doc(levelId).update({
+      'isActive': isActive,
+      'updatedAt': DateTime.now().millisecondsSinceEpoch,
+    });
+  }
+
+  Future<void> setDefaultLevel(String levelId) async {
+    final level = await getLevelById(levelId);
+
+    if (level == null) {
+      throw StateError('Loyalty level not found.');
+    }
+
+    if (!level.isActive) {
+      throw StateError(
+        'An inactive level cannot be the default level.',
+      );
+    }
+
+    await _removeExistingDefaultLevel(
+      exceptLevelId: levelId,
+    );
+
+    final updatedLevel = level.copyWith(
+      isDefaultLevel: true,
+      updatedAt: DateTime.now(),
+    );
+
+    if (useTestingBypass) {
+      _testingLevels[levelId] = updatedLevel;
+      return;
+    }
+
+    await _levelsCollection.doc(levelId).update({
+      'isDefaultLevel': true,
+      'updatedAt': DateTime.now().millisecondsSinceEpoch,
+    });
+  }
+
+  Future<void> deleteLevel(String levelId) async {
+    if (levelId.trim().isEmpty) {
+      throw ArgumentError('Loyalty level ID is required.');
+    }
+
+    final level = await getLevelById(levelId);
+
+    if (level == null) {
+      return;
+    }
+
+    if (level.isDefaultLevel) {
+      throw StateError(
+        'Default loyalty level cannot be deleted.',
+      );
+    }
+
+    if (useTestingBypass) {
+      _testingLevels.remove(levelId);
+      return;
+    }
+
+    await _levelsCollection.doc(levelId).delete();
+  }
+
+  void _validateLevel(LoyaltyLevelModel level) {
+    if (!level.hasValidConfiguration) {
+      throw ArgumentError(
+        'Loyalty level configuration is invalid.',
+      );
+    }
+
+    if (level.supportedModules.isEmpty) {
+      throw ArgumentError(
+        'At least one supported module is required.',
+      );
+    }
+
+    if (!_isValidColorHex(level.colorHex)) {
+      throw ArgumentError(
+        'Loyalty level color must use #RRGGBB format.',
+      );
+    }
+  }
+
+  bool _isValidColorHex(String value) {
+    return RegExp(
+      r'^#[0-9A-Fa-f]{6}$',
+    ).hasMatch(value.trim());
+  }
+
+  Future<void> _removeExistingDefaultLevel({
+    required String exceptLevelId,
+  }) async {
+    final levels = await getAllLevels();
+
+    for (final level in levels) {
+      if (!level.isDefaultLevel ||
+          level.id == exceptLevelId) {
+        continue;
+      }
+
+      final updatedLevel = level.copyWith(
+        isDefaultLevel: false,
+        updatedAt: DateTime.now(),
+      );
+
+      if (useTestingBypass) {
+        _testingLevels[level.id] = updatedLevel;
+      } else {
+        await _levelsCollection.doc(level.id).update({
+          'isDefaultLevel': false,
+          'updatedAt':
+              DateTime.now().millisecondsSinceEpoch,
+        });
+      }
+    }
+  }
+
+  // =============================================================
+  // FETCH LEVELS
+  // =============================================================
+
+  Future<LoyaltyLevelModel?> getLevelById(
+    String levelId,
+  ) async {
+    if (useTestingBypass) {
+      return _testingLevels[levelId];
+    }
+
+    final document =
+        await _levelsCollection.doc(levelId).get();
+
+    if (!document.exists || document.data() == null) {
+      return null;
+    }
+
+    return LoyaltyLevelModel.fromMap(document.data()!);
+  }
+
+  Future<List<LoyaltyLevelModel>> getAllLevels() async {
+    if (useTestingBypass) {
+      final levels = _testingLevels.values.toList();
+
+      levels.sort(
+        (first, second) =>
+            first.displayOrder.compareTo(second.displayOrder),
+      );
+
+      return levels;
+    }
+
+    final query = await _levelsCollection.get();
+
+    final levels = query.docs
+        .map(
+          (document) =>
+              LoyaltyLevelModel.fromMap(document.data()),
+        )
+        .toList();
+
+    levels.sort(
+      (first, second) =>
+          first.displayOrder.compareTo(second.displayOrder),
+    );
+
+    return levels;
+  }
+
+  Future<List<LoyaltyLevelModel>> getActiveLevels({
+    RewardModule? module,
+  }) async {
+    final levels = await getAllLevels();
+
+    return levels.where((level) {
+      if (!level.isActive || !level.hasValidConfiguration) {
+        return false;
+      }
+
+      if (module != null && !level.supportsModule(module)) {
+        return false;
+      }
+
+      return true;
+    }).toList();
+  }
+
+  Stream<List<LoyaltyLevelModel>> watchLevels() {
+    if (useTestingBypass) {
+      final levels = _testingLevels.values.toList()
+        ..sort(
+          (first, second) => first.displayOrder
+              .compareTo(second.displayOrder),
+        );
+
+      return Stream<List<LoyaltyLevelModel>>.value(levels);
+    }
+
+    return _levelsCollection.snapshots().map((query) {
+      final levels = query.docs
+          .map(
+            (document) =>
+                LoyaltyLevelModel.fromMap(document.data()),
+          )
+          .toList();
+
+      levels.sort(
+        (first, second) =>
+            first.displayOrder.compareTo(second.displayOrder),
+      );
+
+      return levels;
+    });
+  }
+
+  Future<LoyaltyLevelModel?> getDefaultLevel() async {
+    final levels = await getActiveLevels();
+
+    for (final level in levels) {
+      if (level.isDefaultLevel) {
+        return level;
+      }
+    }
+
+    if (levels.isEmpty) {
+      return null;
+    }
+
+    return levels.first;
+  }
+
+  // =============================================================
+  // USER LOYALTY PROFILE
+  // =============================================================
+
+  Future<Map<String, dynamic>?> getUserLoyaltyProfile(
+    String userId,
+  ) async {
+    if (useTestingBypass) {
+      final data = _testingUsers[userId];
+
+      return data == null
+          ? null
+          : Map<String, dynamic>.from(data);
+    }
+
+    final document = await _usersCollection.doc(userId).get();
+
+    if (!document.exists || document.data() == null) {
+      return null;
+    }
+
+    return Map<String, dynamic>.from(document.data()!);
+  }
+
+  Future<Map<String, dynamic>> createUserLoyaltyProfile({
+    required String userId,
+  }) async {
+    if (!RewardProductionGate.financialMutationsEnabled) {
+      throw StateError(
+        'Loyalty user-profile mutations are disabled until the trusted backend is ready.',
+      );
+    }
+
+    if (userId.trim().isEmpty) {
+      throw ArgumentError('User ID is required.');
+    }
+
+    final existing = await getUserLoyaltyProfile(userId);
+
+    if (existing != null) {
+      return existing;
+    }
+
+    final defaultLevel = await getDefaultLevel();
+    final now = DateTime.now();
+
+    final data = <String, dynamic>{
+      'userId': userId,
+      'currentLevelId': defaultLevel?.id,
+      'currentLevelName': defaultLevel?.name,
+      'lifetimePoints': 0,
+      'completedBookings': 0,
+      'levelAssignedAt': now.millisecondsSinceEpoch,
+      'lastEvaluatedAt': now.millisecondsSinceEpoch,
+      'createdAt': now.millisecondsSinceEpoch,
+      'updatedAt': now.millisecondsSinceEpoch,
+      'isManualLevel': false,
+      'manualLevelExpiresAt': null,
+      'metadata': <String, dynamic>{},
+    };
+
+    if (useTestingBypass) {
+      _testingUsers[userId] = data;
+      return Map<String, dynamic>.from(data);
+    }
+
+    await _usersCollection.doc(userId).set(data);
+
+    return data;
+  }
+
+  Future<LoyaltyLevelModel?> getUserCurrentLevel(
+    String userId,
+  ) async {
+    final profile = await getUserLoyaltyProfile(userId);
+
+    if (profile == null) {
+      return getDefaultLevel();
+    }
+
+    final levelId = profile['currentLevelId']?.toString();
+
+    if (levelId == null || levelId.isEmpty) {
+      return getDefaultLevel();
+    }
+
+    return getLevelById(levelId);
+  }
+
+  // =============================================================
+  // RECORD COMPLETED BOOKING / ORDER
+  // =============================================================
+
+  Future<LoyaltyEvaluationResult> recordCompletedBooking({
+    required String userId,
+    required String bookingId,
+    required RewardModule module,
+    required int earnedPoints,
+
+    /// Must only be true after final booking/order completion.
+    required bool bookingCompleted,
+
+    /// Must be true for online payment or confirmed cash payment.
+    required bool paymentConfirmed,
+
+    Map<String, dynamic> metadata = const {},
+  }) async {
+    if (!RewardProductionGate.financialMutationsEnabled) {
+      return LoyaltyEvaluationResult(
+        success: false,
+        message: 'Loyalty booking-value mutations are disabled until the trusted backend is ready.',
+        userId: userId,
+      );
+    }
+
+    if (!await isLoyaltyEnabled()) {
+      return LoyaltyEvaluationResult.failed(
+        userId: userId,
+        message: 'Loyalty system is disabled by Admin.',
+      );
+    }
+
+    if (userId.trim().isEmpty) {
+      return LoyaltyEvaluationResult.failed(
+        userId: userId,
+        message: 'User ID is required.',
+      );
+    }
+
+    if (bookingId.trim().isEmpty) {
+      return LoyaltyEvaluationResult.failed(
+        userId: userId,
+        message: 'Booking ID is required.',
+      );
+    }
+
+    if (!bookingCompleted || !paymentConfirmed) {
+      return LoyaltyEvaluationResult.failed(
+        userId: userId,
+        message:
+            'Completed booking and payment confirmation are required.',
+      );
+    }
+
+    if (earnedPoints < 0) {
+      return LoyaltyEvaluationResult.failed(
+        userId: userId,
+        message: 'Earned points cannot be negative.',
+      );
+    }
+
+    final eventId = _safeDocumentId(
+      '$userId:${module.name}:$bookingId',
+    );
+
+    final levels = await getActiveLevels();
+    final settings = await getLoyaltySettings();
+
+    if (useTestingBypass) {
+      if (_testingProcessedEvents.contains(eventId)) {
+        final profile =
+            await createUserLoyaltyProfile(userId: userId);
+
+        final currentLevel =
+            await getUserCurrentLevel(userId);
+
+        return LoyaltyEvaluationResult(
+          success: true,
+          message: 'Booking was already processed.',
+          userId: userId,
+          currentLevel: currentLevel,
+          lifetimePoints:
+              (profile['lifetimePoints'] as num?)?.toInt() ?? 0,
+          completedBookings:
+              (profile['completedBookings'] as num?)
+                      ?.toInt() ??
+                  0,
+          duplicate: true,
+        );
+      }
+
+      final profile =
+          await createUserLoyaltyProfile(userId: userId);
+
+      final previousLevel =
+          await getUserCurrentLevel(userId);
+
+      final newLifetimePoints =
+          ((profile['lifetimePoints'] as num?)?.toInt() ?? 0) +
+              earnedPoints;
+
+      final newCompletedBookings =
+          ((profile['completedBookings'] as num?)?.toInt() ??
+                  0) +
+              1;
+
+      final selectedLevel = _selectLevel(
+        levels: levels,
+        lifetimePoints: newLifetimePoints,
+        completedBookings: newCompletedBookings,
+        currentLevel: previousLevel,
+        automaticUpgradeEnabled:
+            settings['automaticUpgradeEnabled'] ?? true,
+        automaticDowngradeEnabled:
+            settings['automaticDowngradeEnabled'] ?? false,
+        isManualLevel:
+            profile['isManualLevel'] as bool? ?? false,
+        manualLevelExpiresAt: _dateFromValue(
+          profile['manualLevelExpiresAt'],
+        ),
+      );
+
+      final now = DateTime.now();
+
+      final updatedProfile = <String, dynamic>{
+        ...profile,
+        'currentLevelId': selectedLevel?.id,
+        'currentLevelName': selectedLevel?.name,
+        'lifetimePoints': newLifetimePoints,
+        'completedBookings': newCompletedBookings,
+        'lastModule': module.name,
+        'lastBookingId': bookingId,
+        'lastEvaluatedAt': now.millisecondsSinceEpoch,
+        'updatedAt': now.millisecondsSinceEpoch,
+      };
+
+      if (selectedLevel?.id != previousLevel?.id) {
+        updatedProfile['previousLevelId'] =
+            previousLevel?.id;
+        updatedProfile['previousLevelName'] =
+            previousLevel?.name;
+        updatedProfile['levelAssignedAt'] =
+            now.millisecondsSinceEpoch;
+      }
+
+      _testingUsers[userId] = updatedProfile;
+      _testingProcessedEvents.add(eventId);
+
+      final result = _buildEvaluationResult(
+        userId: userId,
+        previousLevel: previousLevel,
+        currentLevel: selectedLevel,
+        lifetimePoints: newLifetimePoints,
+        completedBookings: newCompletedBookings,
+      );
+
+      _testingHistory.add({
+        'id': eventId,
+        'userId': userId,
+        'bookingId': bookingId,
+        'module': module.name,
+        'earnedPoints': earnedPoints,
+        'previousLevelId': previousLevel?.id,
+        'newLevelId': selectedLevel?.id,
+        'levelChanged': result.levelChanged,
+        'createdAt': now.millisecondsSinceEpoch,
+        'metadata': metadata,
+      });
+
+      return result;
+    }
+
+    final userReference = _usersCollection.doc(userId);
+    final eventReference = _eventsCollection.doc(eventId);
+    final historyReference = _historyCollection.doc(eventId);
+
+    LoyaltyEvaluationResult? finalResult;
+    var duplicate = false;
+
+    try {
+      await _firestore.runTransaction((transaction) async {
+        final eventDocument =
+            await transaction.get(eventReference);
+
+        if (eventDocument.exists) {
+          duplicate = true;
+          return;
+        }
+
+        final userDocument =
+            await transaction.get(userReference);
+
+        final now = DateTime.now();
+        final userData = userDocument.data() ??
+            <String, dynamic>{
+              'userId': userId,
+              'lifetimePoints': 0,
+              'completedBookings': 0,
+              'createdAt': now.millisecondsSinceEpoch,
+              'isManualLevel': false,
+            };
+
+        final previousLevelId =
+            userData['currentLevelId']?.toString();
+
+        LoyaltyLevelModel? previousLevel;
+
+        if (previousLevelId != null) {
+          for (final level in levels) {
+            if (level.id == previousLevelId) {
+              previousLevel = level;
+              break;
+            }
+          }
+        }
+
+        final newLifetimePoints =
+            ((userData['lifetimePoints'] as num?)?.toInt() ??
+                    0) +
+                earnedPoints;
+
+        final newCompletedBookings =
+            ((userData['completedBookings'] as num?)
+                        ?.toInt() ??
+                    0) +
+                1;
+
+        final selectedLevel = _selectLevel(
+          levels: levels,
+          lifetimePoints: newLifetimePoints,
+          completedBookings: newCompletedBookings,
+          currentLevel: previousLevel,
+          automaticUpgradeEnabled:
+              settings['automaticUpgradeEnabled'] ?? true,
+          automaticDowngradeEnabled:
+              settings['automaticDowngradeEnabled'] ?? false,
+          isManualLevel:
+              userData['isManualLevel'] as bool? ?? false,
+          manualLevelExpiresAt: _dateFromValue(
+            userData['manualLevelExpiresAt'],
+          ),
+        );
+
+        final result = _buildEvaluationResult(
+          userId: userId,
+          previousLevel: previousLevel,
+          currentLevel: selectedLevel,
+          lifetimePoints: newLifetimePoints,
+          completedBookings: newCompletedBookings,
+        );
+
+        final updatedData = <String, dynamic>{
+          ...userData,
+          'userId': userId,
+          'currentLevelId': selectedLevel?.id,
+          'currentLevelName': selectedLevel?.name,
+          'lifetimePoints': newLifetimePoints,
+          'completedBookings': newCompletedBookings,
+          'lastModule': module.name,
+          'lastBookingId': bookingId,
+          'lastEvaluatedAt': now.millisecondsSinceEpoch,
+          'updatedAt': now.millisecondsSinceEpoch,
+        };
+
+        if (result.levelChanged) {
+          updatedData['previousLevelId'] =
+              previousLevel?.id;
+          updatedData['previousLevelName'] =
+              previousLevel?.name;
+          updatedData['levelAssignedAt'] =
+              now.millisecondsSinceEpoch;
+        }
+
+        transaction.set(userReference, updatedData);
+
+        transaction.set(eventReference, {
+          'id': eventId,
+          'userId': userId,
+          'bookingId': bookingId,
+          'module': module.name,
+          'earnedPoints': earnedPoints,
+          'createdAt': now.millisecondsSinceEpoch,
+        });
+
+        transaction.set(historyReference, {
+          'id': eventId,
+          'userId': userId,
+          'bookingId': bookingId,
+          'module': module.name,
+          'earnedPoints': earnedPoints,
+          'previousLevelId': previousLevel?.id,
+          'previousLevelName': previousLevel?.name,
+          'newLevelId': selectedLevel?.id,
+          'newLevelName': selectedLevel?.name,
+          'levelChanged': result.levelChanged,
+          'upgraded': result.upgraded,
+          'downgraded': result.downgraded,
+          'createdAt': now.millisecondsSinceEpoch,
+          'metadata': metadata,
+        });
+
+        finalResult = result;
+      });
+
+      if (duplicate) {
+        final profile =
+            await getUserLoyaltyProfile(userId);
+
+        final currentLevel =
+            await getUserCurrentLevel(userId);
+
+        return LoyaltyEvaluationResult(
+          success: true,
+          message: 'Booking was already processed.',
+          userId: userId,
+          currentLevel: currentLevel,
+          lifetimePoints:
+              (profile?['lifetimePoints'] as num?)
+                      ?.toInt() ??
+                  0,
+          completedBookings:
+              (profile?['completedBookings'] as num?)
+                      ?.toInt() ??
+                  0,
+          duplicate: true,
+        );
+      }
+
+      return finalResult ??
+          LoyaltyEvaluationResult.failed(
+            userId: userId,
+            message: 'Loyalty evaluation failed.',
+          );
+    } catch (error) {
+      return LoyaltyEvaluationResult.failed(
+        userId: userId,
+        message:
+            error.toString().replaceFirst('Bad state: ', ''),
+      );
+    }
+  }
+
+  // =============================================================
+  // EVALUATE USER LEVEL
+  // =============================================================
+
+  Future<LoyaltyEvaluationResult> evaluateUserLevel({
+    required String userId,
+  }) async {
+    if (!RewardProductionGate.financialMutationsEnabled) {
+      return LoyaltyEvaluationResult(
+        success: false,
+        message: 'Automatic loyalty-level mutations are disabled until the trusted backend is ready.',
+        userId: userId,
+      );
+    }
+
+    if (!await isLoyaltyEnabled()) {
+      return LoyaltyEvaluationResult.failed(
+        userId: userId,
+        message: 'Loyalty system is disabled by Admin.',
+      );
+    }
+
+    final profile =
+        await createUserLoyaltyProfile(userId: userId);
+
+    final levels = await getActiveLevels();
+    final settings = await getLoyaltySettings();
+
+    final previousLevel =
+        await getUserCurrentLevel(userId);
+
+    final lifetimePoints =
+        (profile['lifetimePoints'] as num?)?.toInt() ?? 0;
+
+    final completedBookings =
+        (profile['completedBookings'] as num?)?.toInt() ?? 0;
+
+    final selectedLevel = _selectLevel(
+      levels: levels,
+      lifetimePoints: lifetimePoints,
+      completedBookings: completedBookings,
+      currentLevel: previousLevel,
+      automaticUpgradeEnabled:
+          settings['automaticUpgradeEnabled'] ?? true,
+      automaticDowngradeEnabled:
+          settings['automaticDowngradeEnabled'] ?? false,
+      isManualLevel:
+          profile['isManualLevel'] as bool? ?? false,
+      manualLevelExpiresAt: _dateFromValue(
+        profile['manualLevelExpiresAt'],
+      ),
+    );
+
+    final now = DateTime.now();
+
+    final updatedProfile = <String, dynamic>{
+      ...profile,
+      'currentLevelId': selectedLevel?.id,
+      'currentLevelName': selectedLevel?.name,
+      'lastEvaluatedAt': now.millisecondsSinceEpoch,
+      'updatedAt': now.millisecondsSinceEpoch,
+    };
+
+    if (selectedLevel?.id != previousLevel?.id) {
+      updatedProfile['previousLevelId'] =
+          previousLevel?.id;
+      updatedProfile['previousLevelName'] =
+          previousLevel?.name;
+      updatedProfile['levelAssignedAt'] =
+          now.millisecondsSinceEpoch;
+    }
+
+    if (useTestingBypass) {
+      _testingUsers[userId] = updatedProfile;
+    } else {
+      await _usersCollection.doc(userId).set(
+            updatedProfile,
+            SetOptions(merge: true),
+          );
+    }
+
+    return _buildEvaluationResult(
+      userId: userId,
+      previousLevel: previousLevel,
+      currentLevel: selectedLevel,
+      lifetimePoints: lifetimePoints,
+      completedBookings: completedBookings,
+    );
+  }
+
+  LoyaltyLevelModel? _selectLevel({
+    required List<LoyaltyLevelModel> levels,
+    required int lifetimePoints,
+    required int completedBookings,
+    required LoyaltyLevelModel? currentLevel,
+    required bool automaticUpgradeEnabled,
+    required bool automaticDowngradeEnabled,
+    required bool isManualLevel,
+    required DateTime? manualLevelExpiresAt,
+  }) {
+    if (levels.isEmpty) {
+      return currentLevel;
+    }
+
+    final manualLevelStillValid = isManualLevel &&
+        (manualLevelExpiresAt == null ||
+            DateTime.now().isBefore(manualLevelExpiresAt));
+
+    if (manualLevelStillValid && currentLevel != null) {
+      return currentLevel;
+    }
+
+    final qualified = levels
+        .where(
+          (level) => level.qualifiesUser(
+            lifetimePoints: lifetimePoints,
+            completedBookings: completedBookings,
+          ),
+        )
+        .toList();
+
+    qualified.sort((first, second) {
+      final pointsComparison = first.minimumLifetimePoints
+          .compareTo(second.minimumLifetimePoints);
+
+      if (pointsComparison != 0) {
+        return pointsComparison;
+      }
+
+      return first.displayOrder.compareTo(
+        second.displayOrder,
+      );
+    });
+
+    LoyaltyLevelModel? selectedLevel;
+
+    if (qualified.isNotEmpty) {
+      selectedLevel = qualified.last;
+    } else {
+      for (final level in levels) {
+        if (level.isDefaultLevel) {
+          selectedLevel = level;
+          break;
+        }
+      }
+
+      selectedLevel ??= levels.first;
+    }
+
+    if (currentLevel == null) {
+      return selectedLevel;
+    }
+
+    if (selectedLevel.id == currentLevel.id) {
+      return currentLevel;
+    }
+
+    final isUpgrade =
+        selectedLevel.displayOrder > currentLevel.displayOrder;
+
+    final isDowngrade =
+        selectedLevel.displayOrder < currentLevel.displayOrder;
+
+    if (isUpgrade && !automaticUpgradeEnabled) {
+      return currentLevel;
+    }
+
+    if (isDowngrade && !automaticDowngradeEnabled) {
+      return currentLevel;
+    }
+
+    return selectedLevel;
+  }
+
+  LoyaltyEvaluationResult _buildEvaluationResult({
+    required String userId,
+    required LoyaltyLevelModel? previousLevel,
+    required LoyaltyLevelModel? currentLevel,
+    required int lifetimePoints,
+    required int completedBookings,
+  }) {
+    final changed =
+        previousLevel?.id != currentLevel?.id;
+
+    final upgraded = changed &&
+        previousLevel != null &&
+        currentLevel != null &&
+        currentLevel.displayOrder >
+            previousLevel.displayOrder;
+
+    final downgraded = changed &&
+        previousLevel != null &&
+        currentLevel != null &&
+        currentLevel.displayOrder <
+            previousLevel.displayOrder;
+
+    return LoyaltyEvaluationResult(
+      success: true,
+      message: upgraded
+          ? 'Loyalty level upgraded successfully.'
+          : downgraded
+              ? 'Loyalty level updated.'
+              : 'Loyalty progress updated.',
+      userId: userId,
+      previousLevel: previousLevel,
+      currentLevel: currentLevel,
+      lifetimePoints: lifetimePoints,
+      completedBookings: completedBookings,
+      levelChanged: changed,
+      upgraded: upgraded,
+      downgraded: downgraded,
+    );
+  }
+
+  // =============================================================
+  // MANUAL ADMIN LEVEL ASSIGNMENT
+  // =============================================================
+
+  Future<LoyaltyEvaluationResult> assignLevelManually({
+    required String userId,
+    required String levelId,
+    required String assignedBy,
+    DateTime? expiresAt,
+    String reason = '',
+  }) async {
+    final level = await getLevelById(levelId);
+
+    if (level == null || !level.isActive) {
+      return LoyaltyEvaluationResult.failed(
+        userId: userId,
+        message: 'Active loyalty level not found.',
+      );
+    }
+
+    final profile =
+        await createUserLoyaltyProfile(userId: userId);
+
+    final previousLevel =
+        await getUserCurrentLevel(userId);
+
+    final now = DateTime.now();
+
+    final updatedProfile = <String, dynamic>{
+      ...profile,
+      'currentLevelId': level.id,
+      'currentLevelName': level.name,
+      'previousLevelId': previousLevel?.id,
+      'previousLevelName': previousLevel?.name,
+      'isManualLevel': true,
+      'manualLevelAssignedBy': assignedBy,
+      'manualLevelReason': reason,
+      'manualLevelExpiresAt':
+          expiresAt?.millisecondsSinceEpoch,
+      'levelAssignedAt': now.millisecondsSinceEpoch,
+      'lastEvaluatedAt': now.millisecondsSinceEpoch,
+      'updatedAt': now.millisecondsSinceEpoch,
+    };
+
+    if (useTestingBypass) {
+      _testingUsers[userId] = updatedProfile;
+    } else {
+      await _usersCollection.doc(userId).set(
+            updatedProfile,
+            SetOptions(merge: true),
+          );
+    }
+
+    return _buildEvaluationResult(
+      userId: userId,
+      previousLevel: previousLevel,
+      currentLevel: level,
+      lifetimePoints:
+          (profile['lifetimePoints'] as num?)?.toInt() ?? 0,
+      completedBookings:
+          (profile['completedBookings'] as num?)?.toInt() ??
+              0,
+    );
+  }
+
+  Future<void> removeManualLevel({
+    required String userId,
+    required String removedBy,
+  }) async {
+    final profile = await getUserLoyaltyProfile(userId);
+
+    if (profile == null) {
+      throw StateError('User loyalty profile not found.');
+    }
+
+    final now = DateTime.now();
+
+    final updatedProfile = <String, dynamic>{
+      ...profile,
+      'isManualLevel': false,
+      'manualLevelRemovedBy': removedBy,
+      'manualLevelRemovedAt': now.millisecondsSinceEpoch,
+      'manualLevelExpiresAt': null,
+      'updatedAt': now.millisecondsSinceEpoch,
+    };
+
+    if (useTestingBypass) {
+      _testingUsers[userId] = updatedProfile;
+    } else {
+      await _usersCollection.doc(userId).set(
+            updatedProfile,
+            SetOptions(merge: true),
+          );
+    }
+
+    await evaluateUserLevel(userId: userId);
+  }
+
+  // =============================================================
+  // BENEFIT CALCULATION
+  // =============================================================
+
+  Future<LoyaltyBenefitResult> calculateUserBenefits({
+    required String userId,
+    required RewardModule module,
+    required int basePoints,
+    required double eligibleAmount,
+  }) async {
+    if (!await isLoyaltyEnabled()) {
+      return LoyaltyBenefitResult.unavailable(
+        'Loyalty system is disabled by Admin.',
+      );
+    }
+
+    final level = await getUserCurrentLevel(userId);
+
+    if (level == null || !level.isActive) {
+      return LoyaltyBenefitResult.unavailable(
+        'No active loyalty level found.',
+      );
+    }
+
+    if (!level.supportsModule(module)) {
+      return LoyaltyBenefitResult.unavailable(
+        'Loyalty benefits are not available for this module.',
+      );
+    }
+
+    if (basePoints < 0 || eligibleAmount < 0) {
+      return LoyaltyBenefitResult.unavailable(
+        'Invalid points or eligible amount.',
+      );
+    }
+
+    final finalPoints = level.calculateLevelPoints(
+      basePoints,
+    );
+
+    final levelDiscount = level.calculateLevelDiscount(
+      eligibleAmount,
+    );
+
+    final cashbackBonusAmount =
+        eligibleAmount *
+        (level.cashbackBonusPercentage / 100);
+
+    return LoyaltyBenefitResult(
+      isAvailable: true,
+      message:
+          'Loyalty benefits calculated. User confirmation is required.',
+      level: level,
+      basePoints: basePoints,
+      finalPoints: finalPoints,
+      bonusPoints:
+          finalPoints > basePoints ? finalPoints - basePoints : 0,
+      eligibleAmount: eligibleAmount,
+      levelDiscount: levelDiscount,
+      cashbackBonusPercentage:
+          level.cashbackBonusPercentage,
+      cashbackBonusAmount:
+          cashbackBonusAmount < 0 ? 0 : cashbackBonusAmount,
+      prioritySupportEnabled:
+          level.prioritySupportEnabled,
+      freeDeliveryEnabled:
+          level.freeDeliveryEnabled,
+      exclusiveOffersEnabled:
+          level.exclusiveOffersEnabled,
+      benefits: List<String>.from(level.benefits),
+    );
+  }
+
+  // =============================================================
+  // NEXT LEVEL PROGRESS
+  // =============================================================
+
+  Future<LoyaltyLevelProgress> getLevelProgress(
+    String userId,
+  ) async {
+    final profile =
+        await createUserLoyaltyProfile(userId: userId);
+
+    final levels = await getActiveLevels();
+
+    final lifetimePoints =
+        (profile['lifetimePoints'] as num?)?.toInt() ?? 0;
+
+    final completedBookings =
+        (profile['completedBookings'] as num?)?.toInt() ?? 0;
+
+    final currentLevel =
+        await getUserCurrentLevel(userId);
+
+    LoyaltyLevelModel? nextLevel;
+
+    for (final level in levels) {
+      if (currentLevel == null ||
+          level.displayOrder > currentLevel.displayOrder) {
+        nextLevel = level;
+        break;
+      }
+    }
+
+    if (nextLevel == null) {
+      return LoyaltyLevelProgress(
+        currentLevel: currentLevel,
+        lifetimePoints: lifetimePoints,
+        completedBookings: completedBookings,
+        pointsNeeded: 0,
+        bookingsNeeded: 0,
+        progressPercentage: 100,
+        highestLevelReached: true,
+      );
+    }
+
+    final pointsNeeded =
+        nextLevel.minimumLifetimePoints - lifetimePoints;
+
+    final bookingsNeeded =
+        nextLevel.minimumCompletedBookings -
+            completedBookings;
+
+    final pointsTarget = nextLevel.minimumLifetimePoints;
+    final bookingTarget =
+        nextLevel.minimumCompletedBookings;
+
+    final pointsProgress = pointsTarget <= 0
+        ? 1.0
+        : lifetimePoints / pointsTarget;
+
+    final bookingProgress = bookingTarget <= 0
+        ? 1.0
+        : completedBookings / bookingTarget;
+
+    final progress = pointsProgress < bookingProgress
+        ? pointsProgress
+        : bookingProgress;
+
+    return LoyaltyLevelProgress(
+      currentLevel: currentLevel,
+      nextLevel: nextLevel,
+      lifetimePoints: lifetimePoints,
+      completedBookings: completedBookings,
+      pointsNeeded: pointsNeeded < 0 ? 0 : pointsNeeded,
+      bookingsNeeded:
+          bookingsNeeded < 0 ? 0 : bookingsNeeded,
+      progressPercentage:
+          (progress.clamp(0.0, 1.0) * 100).toDouble(),
+      highestLevelReached: false,
+    );
+  }
+
+  // =============================================================
+  // USER HISTORY
+  // =============================================================
+
+  Future<List<Map<String, dynamic>>> getUserLoyaltyHistory(
+    String userId,
+  ) async {
+    if (useTestingBypass) {
+      final records = _testingHistory
+          .where((record) => record['userId'] == userId)
+          .map(
+            (record) => Map<String, dynamic>.from(record),
+          )
+          .toList();
+
+      records.sort(
+        (first, second) =>
+            ((second['createdAt'] as num?)?.toInt() ?? 0)
+                .compareTo(
+          (first['createdAt'] as num?)?.toInt() ?? 0,
+        ),
+      );
+
+      return records;
+    }
+
+    final query = await _historyCollection
+        .where('userId', isEqualTo: userId)
+        .get();
+
+    final records = query.docs
+        .map(
+          (document) =>
+              Map<String, dynamic>.from(document.data()),
+        )
+        .toList();
+
+    records.sort(
+      (first, second) =>
+          ((second['createdAt'] as num?)?.toInt() ?? 0)
+              .compareTo(
+        (first['createdAt'] as num?)?.toInt() ?? 0,
+      ),
+    );
+
+    return records;
+  }
+
+  // =============================================================
+  // INTERNAL HELPERS
+  // =============================================================
+
+  String _safeDocumentId(String value) {
+    return base64Url
+        .encode(utf8.encode(value))
+        .replaceAll('=', '');
+  }
+
+  static DateTime? _dateFromValue(dynamic value) {
+    if (value == null) {
+      return null;
+    }
+
+    if (value is DateTime) {
+      return value;
+    }
+
+    if (value is Timestamp) {
+      return value.toDate();
+    }
+
+    if (value is int) {
+      return DateTime.fromMillisecondsSinceEpoch(value);
+    }
+
+    if (value is num) {
+      return DateTime.fromMillisecondsSinceEpoch(
+        value.toInt(),
+      );
+    }
+
+    return DateTime.tryParse(value.toString());
+  }
+
+  // =============================================================
+  // TESTING HELPERS
+  // =============================================================
+
+  void addTestingLevel(LoyaltyLevelModel level) {
+    _testingLevels[level.id] = level;
+  }
+
+  void clearTestingData() {
+    _testingLevels.clear();
+    _testingUsers.clear();
+    _testingProcessedEvents.clear();
+    _testingHistory.clear();
+
+    _testingLoyaltyEnabled = true;
+    _testingAutomaticUpgradeEnabled = true;
+    _testingAutomaticDowngradeEnabled = false;
+  }
+}

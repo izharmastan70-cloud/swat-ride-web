@@ -1,0 +1,159 @@
+import '../models/agent_email_draft.dart';
+import '../models/agent_email_draft_policy_decision.dart';
+
+class AgentEmailDraftPolicy {
+  const AgentEmailDraftPolicy();
+
+  static const int humanReviewRecipientThreshold = 6;
+  static const int blockedRecipientThreshold = 11;
+
+  bool get providerExecutionAllowed => false;
+  bool get smtpExecutionAllowed => false;
+  bool get firestoreReadAllowed => false;
+  bool get firestoreWriteAllowed => false;
+  bool get runtimeActionAllowed => false;
+  bool get permissionGrantAllowed => false;
+  bool get approvalConsumptionAllowed => false;
+  bool get mailboxReadAllowed => false;
+  bool get mailboxWriteAllowed => false;
+  bool get promptMutationAllowed => false;
+  bool get modelTrainingAllowed => false;
+  bool get deploymentAllowed => false;
+
+  AgentEmailDraftPolicyDecision assess(AgentEmailDraft draft) {
+    draft.validate();
+
+    final int recipientCount = draft.allRecipients.length;
+    final bool hasBcc = draft.bcc.isNotEmpty;
+    final bool hasAttachments = draft.attachments.isNotEmpty;
+
+    final String scanText = '${draft.subject}\n${draft.bodyText}'.toLowerCase();
+
+    final bool containsSensitiveCredentialPattern = _sensitiveCredentialPatterns
+        .any((RegExp pattern) => pattern.hasMatch(scanText));
+
+    final bool containsSuspiciousRequestPattern =
+        _containsSuspiciousCredentialRequest(scanText);
+
+    final bool blockedBulk = recipientCount >= blockedRecipientThreshold;
+
+    final bool reviewBulk = recipientCount >= humanReviewRecipientThreshold;
+
+    final List<String> reasons = <String>[];
+
+    if (containsSensitiveCredentialPattern) {
+      reasons.add('SENSITIVE_CREDENTIAL_PATTERN');
+    }
+
+    if (containsSuspiciousRequestPattern) {
+      reasons.add('SUSPICIOUS_CREDENTIAL_REQUEST');
+    }
+
+    if (blockedBulk) {
+      reasons.add('BULK_RECIPIENT_LIMIT_EXCEEDED');
+    } else if (reviewBulk) {
+      reasons.add('MULTI_RECIPIENT_HUMAN_REVIEW');
+    }
+
+    if (hasBcc) {
+      reasons.add('BCC_REQUIRES_HUMAN_REVIEW');
+    }
+
+    if (hasAttachments) {
+      reasons.add('ATTACHMENT_REVIEW_REQUIRED');
+    }
+
+    final bool blocked =
+        containsSensitiveCredentialPattern ||
+        containsSuspiciousRequestPattern ||
+        blockedBulk;
+
+    final bool needsReview =
+        !blocked && (reviewBulk || hasBcc || hasAttachments);
+
+    final String classification = blocked
+        ? AgentEmailDraftPolicyClassification.blocked
+        : needsReview
+        ? AgentEmailDraftPolicyClassification.needsHumanReview
+        : AgentEmailDraftPolicyClassification.draftReadyForReview;
+
+    if (reasons.isEmpty) {
+      reasons.add('STRUCTURED_DRAFT_READY_FOR_REVIEW');
+    }
+
+    final AgentEmailDraftPolicyDecision decision =
+        AgentEmailDraftPolicyDecision(
+          classification: classification,
+          reasonCodes: reasons,
+          recipientCount: recipientCount,
+          hasBcc: hasBcc,
+          hasAttachments: hasAttachments,
+          containsSensitiveCredentialPattern:
+              containsSensitiveCredentialPattern,
+          containsSuspiciousRequestPattern: containsSuspiciousRequestPattern,
+          bulkRecipientRisk: reviewBulk,
+          requiresHumanReview: blocked || needsReview,
+          requiresAttachmentReview: hasAttachments,
+          requiresSendApproval: true,
+          mayRemainAsDraft: !blocked,
+        );
+
+    decision.validate();
+    return decision;
+  }
+
+  bool _containsSuspiciousCredentialRequest(String text) {
+    String remaining = text;
+
+    for (final RegExp safePattern in _protectiveSecurityAdvicePatterns) {
+      remaining = remaining.replaceAll(safePattern, ' ');
+    }
+
+    return _suspiciousRequestPatterns.any(
+      (RegExp pattern) => pattern.hasMatch(remaining),
+    );
+  }
+
+  static final List<RegExp> _sensitiveCredentialPatterns = <RegExp>[
+    RegExp(r'\bpassword\s*[:=]\s*\S+', caseSensitive: false),
+    RegExp(r'\botp\s*[:=]\s*\d{4,8}\b', caseSensitive: false),
+    RegExp(r'\b(api[_\s-]?key)\s*[:=]\s*\S+', caseSensitive: false),
+    RegExp(r'\b(access[_\s-]?token)\s*[:=]\s*\S+', caseSensitive: false),
+    RegExp(r'\b(secret)\s*[:=]\s*\S+', caseSensitive: false),
+    RegExp(r'\b(cvv|cvc)\s*[:=]\s*\d{3,4}\b', caseSensitive: false),
+    RegExp(
+      r'\b(card\s*number)\s*[:=]\s*(?:\d[\s-]*){12,19}\b',
+      caseSensitive: false,
+    ),
+  ];
+
+  static final List<RegExp> _protectiveSecurityAdvicePatterns = <RegExp>[
+    RegExp(
+      r"\b(do\s+not|don't|never)\s+(share|send|provide|reply\s+with)\s+(your\s+)?(password|otp|cvv|cvc)\b",
+      caseSensitive: false,
+    ),
+    RegExp(
+      r"\b(do\s+not|don't|never)\s+(share|send|provide|reply\s+with)\s+(your\s+)?(api[_\s-]?key|access[_\s-]?token)\b",
+      caseSensitive: false,
+    ),
+    RegExp(
+      r'\bwe\s+will\s+never\s+ask\s+for\s+(your\s+)?(password|otp|cvv|cvc|api[_\s-]?key|access[_\s-]?token)\b',
+      caseSensitive: false,
+    ),
+  ];
+
+  static final List<RegExp> _suspiciousRequestPatterns = <RegExp>[
+    RegExp(
+      r'\b(send|share|provide|reply\s+with)\b.{0,40}\b(password|otp|cvv|cvc)\b',
+      caseSensitive: false,
+    ),
+    RegExp(
+      r'\b(send|share|provide|reply\s+with)\b.{0,40}\b(api[_\s-]?key|access[_\s-]?token)\b',
+      caseSensitive: false,
+    ),
+    RegExp(
+      r'\bverify\s+your\s+account\b.{0,80}\b(password|otp|cvv|cvc)\b',
+      caseSensitive: false,
+    ),
+  ];
+}

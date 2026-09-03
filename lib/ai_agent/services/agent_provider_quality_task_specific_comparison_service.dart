@@ -1,0 +1,243 @@
+import '../constants/agent_provider_quality_comparison_constants.dart';
+import '../constants/agent_provider_quality_signal_constants.dart';
+import '../models/agent_provider_quality_comparison_candidate.dart';
+import '../models/agent_provider_quality_comparison_decision.dart';
+import '../models/agent_provider_quality_comparison_input.dart';
+import 'agent_provider_quality_cost_tradeoff_policy.dart';
+
+class AgentProviderQualityTaskSpecificComparisonService {
+  const AgentProviderQualityTaskSpecificComparisonService({
+    this.tradeoffPolicy = const AgentProviderQualityCostTradeoffPolicy(),
+  });
+
+  final AgentProviderQualityCostTradeoffPolicy tradeoffPolicy;
+
+  AgentProviderQualityComparisonDecision compare(
+    AgentProviderQualityComparisonInput input,
+  ) {
+    try {
+      input.validateStructure();
+    } catch (_) {
+      return _decision(
+        status: AgentProviderQualityComparisonStatus.blockedInvalidComparison,
+        taskType: input.candidates.isEmpty
+            ? 'unknown_task'
+            : input.candidates.first.taskType,
+        providerTier: input.candidates.isEmpty
+            ? 'unknown_tier'
+            : input.candidates.first.providerTier,
+        reasons: const <String>[
+          'invalid_task_specific_comparison_metadata',
+          'fail_closed',
+        ],
+      );
+    }
+
+    if (!input.sameTier) {
+      return _decision(
+        status: AgentProviderQualityComparisonStatus.blockedCrossTierComparison,
+        taskType: input.taskType,
+        providerTier: input.providerTier,
+        reasons: const <String>[
+          'cross_tier_quality_comparison_forbidden',
+          'free_local_paid_order_remains_authoritative',
+          'fail_closed',
+        ],
+      );
+    }
+
+    final List<AgentProviderQualityComparisonCandidate> eligible = input
+        .candidates
+        .where(tradeoffPolicy.qualityCanWin)
+        .toList(growable: false);
+
+    if (eligible.isEmpty) {
+      final bool hasInsufficientEvidence = input.candidates.any(
+        (AgentProviderQualityComparisonCandidate candidate) =>
+            candidate.recommendation.recommendation ==
+            AgentProviderQualityRecommendation.insufficientEvidence,
+      );
+
+      return _decision(
+        status: hasInsufficientEvidence
+            ? AgentProviderQualityComparisonStatus.insufficientEvidence
+            : AgentProviderQualityComparisonStatus.noEligibleCandidate,
+        taskType: input.taskType,
+        providerTier: input.providerTier,
+        reasons: <String>[
+          if (hasInsufficientEvidence) 'eligible_quality_evidence_insufficient',
+          if (!hasInsufficientEvidence)
+            'no_candidate_passed_hard_and_quality_floors',
+          'no_provider_preference_change',
+        ],
+      );
+    }
+
+    if (eligible.length == 1) {
+      final AgentProviderQualityComparisonCandidate only = eligible.first;
+
+      return _decision(
+        status: AgentProviderQualityComparisonStatus.preferredWithinTier,
+        taskType: input.taskType,
+        providerTier: input.providerTier,
+        preferredProviderId: only.providerId,
+        preferredModelReference: only.modelReference,
+        reasons: const <String>[
+          'only_one_candidate_passed_all_comparison_gates',
+          'within_tier_preference_only',
+        ],
+      );
+    }
+
+    final List<AgentProviderQualityComparisonCandidate> sorted =
+        List<AgentProviderQualityComparisonCandidate>.from(eligible)..sort(
+          (
+            AgentProviderQualityComparisonCandidate a,
+            AgentProviderQualityComparisonCandidate b,
+          ) => b.recommendation.weightedScore.compareTo(
+            a.recommendation.weightedScore,
+          ),
+        );
+
+    final AgentProviderQualityComparisonCandidate bestQuality = sorted.first;
+
+    final AgentProviderQualityComparisonCandidate secondQuality = sorted[1];
+
+    AgentProviderQualityComparisonCandidate preferred = bestQuality;
+
+    bool costBrokeTie = false;
+
+    if (tradeoffPolicy.nearQualityTie(
+      a: bestQuality.recommendation.weightedScore,
+      b: secondQuality.recommendation.weightedScore,
+    )) {
+      final double highestCost = eligible
+          .map(
+            (AgentProviderQualityComparisonCandidate value) =>
+                value.estimatedProviderCostRs,
+          )
+          .reduce((double a, double b) => a > b ? a : b);
+
+      final List<AgentProviderQualityComparisonCandidate> byTradeoff =
+          List<AgentProviderQualityComparisonCandidate>.from(eligible)..sort(
+            (
+              AgentProviderQualityComparisonCandidate a,
+              AgentProviderQualityComparisonCandidate b,
+            ) => tradeoffPolicy
+                .comparisonScore(
+                  candidate: b,
+                  highestEligibleCostRs: highestCost,
+                )
+                .compareTo(
+                  tradeoffPolicy.comparisonScore(
+                    candidate: a,
+                    highestEligibleCostRs: highestCost,
+                  ),
+                ),
+          );
+
+      preferred = byTradeoff.first;
+
+      costBrokeTie =
+          preferred.providerId != bestQuality.providerId ||
+          preferred.modelReference != bestQuality.modelReference;
+    }
+
+    final double topScore = preferred.recommendation.weightedScore;
+
+    final List<AgentProviderQualityComparisonCandidate> peersAtTop = eligible
+        .where(
+          (AgentProviderQualityComparisonCandidate candidate) =>
+              candidate.providerId != preferred.providerId &&
+              tradeoffPolicy.nearQualityTie(
+                a: topScore,
+                b: candidate.recommendation.weightedScore,
+              ),
+        )
+        .toList(growable: false);
+
+    if (peersAtTop.isNotEmpty &&
+        !preferred.paidTier &&
+        preferred.estimatedProviderCostRs == 0) {
+      return _decision(
+        status: AgentProviderQualityComparisonStatus.neutralWithinTier,
+        taskType: input.taskType,
+        providerTier: input.providerTier,
+        reasons: const <String>[
+          'near_quality_tie_without_valid_cost_differentiator',
+          'no_aggressive_preference_change',
+        ],
+      );
+    }
+
+    return _decision(
+      status: AgentProviderQualityComparisonStatus.preferredWithinTier,
+      taskType: input.taskType,
+      providerTier: input.providerTier,
+      preferredProviderId: preferred.providerId,
+      preferredModelReference: preferred.modelReference,
+      reasons: <String>[
+        if (costBrokeTie)
+          'cheaper_candidate_won_capped_cost_tiebreak_within_same_tier',
+        if (!costBrokeTie) 'quality_score_selected_within_same_tier',
+        'quality_floor_applied_before_cost',
+        'free_local_paid_order_unchanged',
+        'phase58_gates_remain_authoritative',
+      ],
+    );
+  }
+
+  AgentProviderQualityComparisonDecision _decision({
+    required String status,
+    required String taskType,
+    required String providerTier,
+    String? preferredProviderId,
+    String? preferredModelReference,
+    required List<String> reasons,
+  }) {
+    final AgentProviderQualityComparisonDecision decision =
+        AgentProviderQualityComparisonDecision(
+          status: status,
+          taskType: taskType,
+          providerTier: providerTier,
+          preferredProviderId: preferredProviderId,
+          preferredModelReference: preferredModelReference,
+          reasonCodes: reasons,
+        );
+
+    decision.validateStructure();
+    return decision;
+  }
+
+  bool get sameTaskComparisonRequired => true;
+  bool get sameTierComparisonRequired => true;
+  bool get crossTierQualityRankingForbidden => true;
+  bool get tierOrderRemainsAuthoritative => true;
+  bool get phase58EligibilityRequiredBeforeComparison => true;
+  bool get paidControlsRequiredBeforePaidComparison => true;
+  bool get insufficientEvidenceCannotWin => true;
+  bool get ineligibleCandidateCannotWin => true;
+  bool get qualityFloorBeforeCost => true;
+  bool get costOnlyBreaksNearTie => true;
+  bool get cheaperEligiblePaidCandidateMayWinNearTie => true;
+  bool get largeQualityGapCannotBeOverturnedByCost => true;
+  bool get costCannotOverrideSafetyOrQualityFloor => true;
+
+  bool get providerInvocationImplementedHere => false;
+  bool get automaticRoutingMutationImplementedHere => false;
+  bool get providerEnableDisableImplementedHere => false;
+  bool get budgetMutationImplementedHere => false;
+  bool get secretMutationImplementedHere => false;
+  bool get deploymentImplementedHere => false;
+  bool get persistenceImplementedHere => false;
+
+  bool get grantsPermission => false;
+  bool get consumesApproval => false;
+  bool get expandsScope => false;
+  bool get executesBusinessAction => false;
+
+  bool get phase60CrossAgentSupervisorSeparate => true;
+  bool get phase61PerformanceDashboardSeparate => true;
+  bool get phase62VersioningDeploymentSeparate => true;
+  bool get phase63PrivacyRetentionSeparate => true;
+}

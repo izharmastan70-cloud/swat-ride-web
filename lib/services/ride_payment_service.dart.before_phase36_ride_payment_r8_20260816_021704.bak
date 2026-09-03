@@ -1,0 +1,239 @@
+﻿import 'package:cloud_firestore/cloud_firestore.dart';
+
+import '../models/payment_model.dart';
+
+class RidePaymentService {
+  RidePaymentService({FirebaseFirestore? firestore})
+      : _firestore = firestore ?? FirebaseFirestore.instance;
+
+  final FirebaseFirestore _firestore;
+
+  /// DEVELOPMENT ONLY. Set false after real provider credentials are ready.
+  static const bool testingPaidPaymentsBypassEnabled = true;
+
+  DocumentReference<Map<String, dynamic>> get _settingsDocument =>
+      _firestore.collection('app_config').doc('normal_ride_payments');
+
+  CollectionReference<Map<String, dynamic>> get _payments =>
+      _firestore.collection('ride_payments');
+
+  List<RidePaymentMethodConfig> get safeTestingDefaults =>
+      const <RidePaymentMethodConfig>[
+        RidePaymentMethodConfig(
+          method: RidePaymentMethod.cash,
+          title: 'Cash',
+          isEnabled: true,
+        ),
+        RidePaymentMethodConfig(
+          method: RidePaymentMethod.wallet,
+          title: 'Wallet',
+          isEnabled: true,
+          isTestingBypassEnabled: true,
+        ),
+        RidePaymentMethodConfig(
+          method: RidePaymentMethod.jazzCash,
+          title: 'JazzCash',
+          isEnabled: true,
+          isTestingBypassEnabled: true,
+        ),
+        RidePaymentMethodConfig(
+          method: RidePaymentMethod.easypaisa,
+          title: 'Easypaisa',
+          isEnabled: true,
+          isTestingBypassEnabled: true,
+        ),
+      ];
+
+  Stream<List<RidePaymentMethodConfig>> watchPaymentMethods() {
+    return _settingsDocument.snapshots().map(_configsFromDocument);
+  }
+
+  Future<List<RidePaymentMethodConfig>> getPaymentMethods() async {
+    try {
+      final DocumentSnapshot<Map<String, dynamic>> document =
+          await _settingsDocument.get();
+      return _configsFromDocument(document);
+    } on FirebaseException {
+      return safeTestingDefaults;
+    }
+  }
+
+  Future<List<RidePaymentMethodConfig>> getEnabledPaymentMethods({
+    required double amount,
+  }) async {
+    final List<RidePaymentMethodConfig> methods = await getPaymentMethods();
+    return methods
+        .where((RidePaymentMethodConfig item) => item.supportsAmount(amount))
+        .toList(growable: false);
+  }
+
+  Future<RidePaymentModel> createPayment({
+    required String rideId,
+    required String userId,
+    String? driverId,
+    required RidePaymentMethod method,
+    required double amount,
+  }) async {
+    if (rideId.trim().isEmpty || userId.trim().isEmpty) {
+      throw Exception('Ride and user information is required.');
+    }
+    if (amount <= 0) throw Exception('Payment amount must be greater than zero.');
+
+    final RidePaymentMethodConfig config =
+        await _requireEnabledMethod(method, amount);
+    final DocumentReference<Map<String, dynamic>> reference = _payments.doc();
+    final DateTime now = DateTime.now();
+
+    RidePaymentStatus initialStatus = RidePaymentStatus.pending;
+    bool isTestingPayment = false;
+
+    if (method != RidePaymentMethod.cash &&
+        (testingPaidPaymentsBypassEnabled ||
+            config.isTestingBypassEnabled)) {
+      initialStatus = RidePaymentStatus.paid;
+      isTestingPayment = true;
+    }
+
+    final RidePaymentModel payment = RidePaymentModel(
+      paymentId: reference.id,
+      rideId: rideId.trim(),
+      userId: userId.trim(),
+      driverId: driverId?.trim(),
+      method: method,
+      status: initialStatus,
+      amount: amount,
+      providerTransactionId:
+          isTestingPayment ? 'TEST-${reference.id}' : null,
+      isTestingPayment: isTestingPayment,
+      createdAt: now,
+      updatedAt: now,
+      paidAt: initialStatus == RidePaymentStatus.paid ? now : null,
+    );
+
+    await reference.set(payment.toMap());
+
+    if (method != RidePaymentMethod.cash && !isTestingPayment) {
+      await _startRealPaymentProvider(payment);
+    }
+
+    return payment;
+  }
+
+  Future<RidePaymentModel?> getPayment(String paymentId) async {
+    if (paymentId.trim().isEmpty) return null;
+    final DocumentSnapshot<Map<String, dynamic>> document =
+        await _payments.doc(paymentId.trim()).get();
+    if (!document.exists || document.data() == null) return null;
+    return RidePaymentModel.fromMap(document.data()!);
+  }
+
+  Stream<RidePaymentModel?> watchRidePayment(String rideId) {
+    return _payments
+        .where('rideId', isEqualTo: rideId.trim())
+        .limit(1)
+        .snapshots()
+        .map((QuerySnapshot<Map<String, dynamic>> snapshot) {
+      if (snapshot.docs.isEmpty) return null;
+      return RidePaymentModel.fromMap(snapshot.docs.first.data());
+    });
+  }
+
+  Future<void> updatePaymentStatus({
+    required String paymentId,
+    required RidePaymentStatus status,
+    String? providerTransactionId,
+    String? failureReason,
+  }) async {
+    await _payments.doc(paymentId.trim()).update(<String, dynamic>{
+      'status': status.firestoreValue,
+      'providerTransactionId': providerTransactionId,
+      'failureReason': failureReason,
+      'updatedAt': FieldValue.serverTimestamp(),
+      if (status == RidePaymentStatus.paid)
+        'paidAt': FieldValue.serverTimestamp(),
+    });
+  }
+
+  /// Admin-only. Firestore Security Rules must enforce the admin role.
+  Future<void> setPaymentMethodConfig(
+    RidePaymentMethodConfig config,
+  ) async {
+    await _settingsDocument.set(<String, dynamic>{
+      'methods': <String, dynamic>{
+        config.method.firestoreValue: config.toMap(),
+      },
+      'updatedAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
+  }
+
+  Future<RidePaymentMethodConfig> _requireEnabledMethod(
+    RidePaymentMethod method,
+    double amount,
+  ) async {
+    final List<RidePaymentMethodConfig> methods = await getPaymentMethods();
+    final RidePaymentMethodConfig config = methods.firstWhere(
+      (RidePaymentMethodConfig item) => item.method == method,
+      orElse: () => RidePaymentMethodConfig(
+        method: method,
+        title: method.title,
+        isEnabled: false,
+      ),
+    );
+
+    if (!config.isEnabled) {
+      throw Exception('${config.title} is disabled by Admin.');
+    }
+    if (!config.supportsAmount(amount)) {
+      throw Exception('This amount is not allowed for ${config.title}.');
+    }
+    return config;
+  }
+
+  List<RidePaymentMethodConfig> _configsFromDocument(
+    DocumentSnapshot<Map<String, dynamic>> document,
+  ) {
+    final dynamic rawMethods = document.data()?['methods'];
+    if (rawMethods is! Map) return safeTestingDefaults;
+
+    final Map<String, dynamic> methods =
+        Map<String, dynamic>.from(rawMethods);
+    final List<RidePaymentMethodConfig> result = <RidePaymentMethodConfig>[];
+
+    for (final RidePaymentMethod method in RidePaymentMethod.values) {
+      final dynamic rawConfig = methods[method.firestoreValue];
+      if (rawConfig is Map) {
+        final Map<String, dynamic> config =
+            Map<String, dynamic>.from(rawConfig);
+        config['method'] = method.firestoreValue;
+        result.add(RidePaymentMethodConfig.fromMap(config));
+      } else {
+        result.add(
+          safeTestingDefaults.firstWhere(
+            (RidePaymentMethodConfig item) => item.method == method,
+          ),
+        );
+      }
+    }
+    return result;
+  }
+
+  Future<void> _startRealPaymentProvider(RidePaymentModel payment) async {
+    // REAL BILLING PROVIDER CONNECTION (PAUSED)
+    //
+    // JazzCash/Easypaisa production SDK or secure backend API must be called
+    // here only after merchant credentials, callback verification and billing
+    // setup are ready. Never place merchant secrets inside the Flutter app.
+    // After the verified backend callback, call updatePaymentStatus().
+    //
+    // Example production flow:
+    // 1. App requests a payment session from the secure backend.
+    // 2. Provider checkout opens with the returned session/token.
+    // 3. Backend verifies the signed provider callback.
+    // 4. Backend marks ride_payments/{paymentId} paid or failed.
+    throw StateError(
+      '${payment.method.title} real provider is not enabled yet. '
+      'Keep testingPaidPaymentsBypassEnabled true until billing is ready.',
+    );
+  }
+}
+

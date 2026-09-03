@@ -1,0 +1,1070 @@
+import 'dart:convert';
+
+import 'package:cloud_firestore/cloud_firestore.dart';
+
+import '../models/feedback_model.dart';
+import '../models/feedback_summary_model.dart';
+
+class FeedbackRuntimeSettings {
+  final bool feedbackEnabled;
+  final bool publicReviewsEnabled;
+  final bool partnerRepliesEnabled;
+  final bool reviewEditingEnabled;
+  final bool reviewDeletionEnabled;
+  final bool anonymousReviewsEnabled;
+  final bool requireModeration;
+  final bool verifiedServicesOnly;
+  final int editWindowHours;
+  final int lowRatingThreshold;
+  final Map<String, bool> serviceRatingsEnabled;
+
+  const FeedbackRuntimeSettings({
+    this.feedbackEnabled = true,
+    this.publicReviewsEnabled = true,
+    this.partnerRepliesEnabled = true,
+    this.reviewEditingEnabled = true,
+    this.reviewDeletionEnabled = false,
+    this.anonymousReviewsEnabled = true,
+    this.requireModeration = false,
+    this.verifiedServicesOnly = true,
+    this.editWindowHours = 24,
+    this.lowRatingThreshold = 2,
+    this.serviceRatingsEnabled = const <String, bool>{},
+  });
+
+  bool isServiceEnabled(FeedbackServiceType serviceType) {
+    return serviceRatingsEnabled[serviceType.value] ?? true;
+  }
+
+  factory FeedbackRuntimeSettings.fromMap(Map<String, dynamic> map) {
+    return FeedbackRuntimeSettings(
+      feedbackEnabled: _boolValue(map['feedbackEnabled'], fallback: true),
+      publicReviewsEnabled: _boolValue(
+        map['publicReviewsEnabled'],
+        fallback: true,
+      ),
+      partnerRepliesEnabled: _boolValue(
+        map['partnerRepliesEnabled'],
+        fallback: true,
+      ),
+      reviewEditingEnabled: _boolValue(
+        map['reviewEditingEnabled'],
+        fallback: true,
+      ),
+      reviewDeletionEnabled: _boolValue(map['reviewDeletionEnabled']),
+      anonymousReviewsEnabled: _boolValue(
+        map['anonymousReviewsEnabled'],
+        fallback: true,
+      ),
+      requireModeration: _boolValue(map['requireModeration']),
+      verifiedServicesOnly: _boolValue(
+        map['verifiedServicesOnly'],
+        fallback: true,
+      ),
+      editWindowHours: _boundedInt(
+        map['editWindowHours'],
+        fallback: 24,
+        minimum: 0,
+        maximum: 720,
+      ),
+      lowRatingThreshold: _boundedInt(
+        map['lowRatingThreshold'],
+        fallback: 2,
+        minimum: 1,
+        maximum: 5,
+      ),
+      serviceRatingsEnabled: _boolMap(map['serviceRatingsEnabled']),
+    );
+  }
+
+  Map<String, dynamic> toMap() {
+    return <String, dynamic>{
+      'feedbackEnabled': feedbackEnabled,
+      'publicReviewsEnabled': publicReviewsEnabled,
+      'partnerRepliesEnabled': partnerRepliesEnabled,
+      'reviewEditingEnabled': reviewEditingEnabled,
+      'reviewDeletionEnabled': reviewDeletionEnabled,
+      'anonymousReviewsEnabled': anonymousReviewsEnabled,
+      'requireModeration': requireModeration,
+      'verifiedServicesOnly': verifiedServicesOnly,
+      'editWindowHours': editWindowHours,
+      'lowRatingThreshold': lowRatingThreshold,
+      'serviceRatingsEnabled': serviceRatingsEnabled,
+    };
+  }
+
+  static bool _boolValue(Object? value, {bool fallback = false}) {
+    return value is bool ? value : fallback;
+  }
+
+  static int _boundedInt(
+    Object? value, {
+    required int fallback,
+    required int minimum,
+    required int maximum,
+  }) {
+    final parsed = value is num
+        ? value.toInt()
+        : int.tryParse(value?.toString() ?? '') ?? fallback;
+
+    return parsed.clamp(minimum, maximum);
+  }
+
+  static Map<String, bool> _boolMap(Object? value) {
+    if (value is! Map) {
+      return const <String, bool>{};
+    }
+
+    return value.map(
+      (key, item) => MapEntry(key.toString(), item is bool ? item : true),
+    );
+  }
+}
+
+class FeedbackOperationException implements Exception {
+  final String code;
+  final String message;
+
+  const FeedbackOperationException(this.code, this.message);
+
+  @override
+  String toString() => 'FeedbackOperationException($code): $message';
+}
+
+class FeedbackService {
+  static const String reviewsCollectionName = 'feedback_reviews';
+  static const String reviewKeysCollectionName = 'feedback_review_keys';
+  static const String summariesCollectionName = 'feedback_summaries';
+  static const String settingsCollectionName = 'feedback_settings';
+  static const String settingsDocumentId = 'global';
+
+  final FirebaseFirestore _firestore;
+
+  FeedbackService({FirebaseFirestore? firestore})
+    : _firestore = firestore ?? FirebaseFirestore.instance;
+
+  CollectionReference<Map<String, dynamic>> get _reviews =>
+      _firestore.collection(reviewsCollectionName);
+
+  CollectionReference<Map<String, dynamic>> get _reviewKeys =>
+      _firestore.collection(reviewKeysCollectionName);
+
+  CollectionReference<Map<String, dynamic>> get _summaries =>
+      _firestore.collection(summariesCollectionName);
+
+  DocumentReference<Map<String, dynamic>> get _settingsDocument =>
+      _firestore.collection(settingsCollectionName).doc(settingsDocumentId);
+
+  Future<FeedbackRuntimeSettings> getSettings() async {
+    final snapshot = await _settingsDocument.get();
+
+    if (!snapshot.exists || snapshot.data() == null) {
+      return const FeedbackRuntimeSettings();
+    }
+
+    return FeedbackRuntimeSettings.fromMap(snapshot.data()!);
+  }
+
+  Stream<FeedbackRuntimeSettings> watchSettings() {
+    return _settingsDocument.snapshots().map((snapshot) {
+      final data = snapshot.data();
+
+      if (!snapshot.exists || data == null) {
+        return const FeedbackRuntimeSettings();
+      }
+
+      return FeedbackRuntimeSettings.fromMap(data);
+    });
+  }
+
+  Future<bool> canSubmitFeedback({
+    required FeedbackServiceType serviceType,
+    required String sourceId,
+    required String reviewerId,
+    required bool serviceCompleted,
+    FeedbackTargetType? targetType,
+    String targetId = '',
+  }) async {
+    final cleanSourceId = sourceId.trim();
+    final cleanReviewerId = reviewerId.trim();
+
+    if (cleanSourceId.isEmpty || cleanReviewerId.isEmpty) {
+      return false;
+    }
+
+    final settings = await getSettings();
+
+    if (!settings.feedbackEnabled ||
+        !settings.isServiceEnabled(serviceType)) {
+      return false;
+    }
+
+    final bool verifiedService =
+        serviceType == FeedbackServiceType.food
+            ? await _isVerifiedFoodOrderReview(
+                sourceId: cleanSourceId,
+                reviewerId: cleanReviewerId,
+                targetType: targetType,
+                targetId: targetId,
+              )
+            : serviceCompleted;
+
+    if (serviceType == FeedbackServiceType.food &&
+        !verifiedService) {
+      return false;
+    }
+
+    if (settings.verifiedServicesOnly &&
+        !verifiedService) {
+      return false;
+    }
+
+    return !(await hasSubmittedFeedback(
+      serviceType: serviceType,
+      sourceId: cleanSourceId,
+      reviewerId: cleanReviewerId,
+      targetType: targetType,
+      targetId: targetId,
+    ));
+  }
+
+  Future<bool> hasSubmittedFeedback({
+    required FeedbackServiceType serviceType,
+    required String sourceId,
+    required String reviewerId,
+    FeedbackTargetType? targetType,
+    String targetId = '',
+  }) async {
+    final String uniqueKey = _buildUniqueReviewKey(
+      serviceType: serviceType,
+      sourceId: sourceId,
+      reviewerId: reviewerId,
+      targetType: targetType,
+      targetId: targetId,
+    );
+
+    final DocumentSnapshot<Map<String, dynamic>>
+        keySnapshot = await _reviewKeys
+            .doc(_documentSafeKey(uniqueKey))
+            .get();
+
+    if (keySnapshot.exists) {
+      return true;
+    }
+
+    if (serviceType != FeedbackServiceType.food) {
+      return false;
+    }
+
+    final String legacyKey = _buildLegacyUniqueReviewKey(
+      serviceType: serviceType,
+      sourceId: sourceId,
+      reviewerId: reviewerId,
+    );
+
+    if (legacyKey == uniqueKey) {
+      return false;
+    }
+
+    final DocumentSnapshot<Map<String, dynamic>>
+        legacyKeySnapshot = await _reviewKeys
+            .doc(_documentSafeKey(legacyKey))
+            .get();
+
+    final Map<String, dynamic>? legacyKeyData =
+        legacyKeySnapshot.data();
+
+    if (!legacyKeySnapshot.exists ||
+        legacyKeyData == null) {
+      return false;
+    }
+
+    final String cleanTargetId = targetId.trim();
+
+    // A target-less legacy caller keeps the old broad duplicate behaviour.
+    if (targetType == null || cleanTargetId.isEmpty) {
+      return true;
+    }
+
+    final String legacyFeedbackId =
+        legacyKeyData['feedbackId']
+                ?.toString()
+                .trim() ??
+            '';
+
+    // Be conservative if an old key exists but its linked review is missing.
+    if (legacyFeedbackId.isEmpty) {
+      return true;
+    }
+
+    final DocumentSnapshot<Map<String, dynamic>>
+        legacyReviewSnapshot =
+            await _reviews.doc(legacyFeedbackId).get();
+
+    final Map<String, dynamic>? legacyReviewData =
+        legacyReviewSnapshot.data();
+
+    if (!legacyReviewSnapshot.exists ||
+        legacyReviewData == null) {
+      return true;
+    }
+
+    final FeedbackModel legacyReview =
+        FeedbackModel.fromMap(
+          legacyReviewData,
+          documentId: legacyReviewSnapshot.id,
+        ).normalized();
+
+    return legacyReview.targetType == targetType &&
+        legacyReview.targetId.trim() == cleanTargetId;
+  }
+  Future<String> submitFeedback({
+    required FeedbackModel feedback,
+    required bool serviceCompleted,
+  }) async {
+    final settings = await getSettings();
+    final bool verifiedService =
+        feedback.serviceType == FeedbackServiceType.food
+        ? await _isVerifiedFoodOrderReview(
+            sourceId: feedback.sourceId,
+            reviewerId: feedback.reviewerId,
+            targetType: feedback.targetType,
+            targetId: feedback.targetId,
+          )
+        : serviceCompleted;
+
+    if (feedback.serviceType == FeedbackServiceType.food && !verifiedService) {
+      throw const FeedbackOperationException(
+        'unverified-food-order',
+        'Food reviews require the reviewer'
+            's delivered order and matching restaurant or rider.',
+      );
+    }
+
+    _ensureSubmissionAllowed(
+      feedback: feedback,
+      settings: settings,
+      serviceCompleted: verifiedService,
+    );
+
+    final now = DateTime.now();
+    final reviewReference = feedback.id.trim().isEmpty
+        ? _reviews.doc()
+        : _reviews.doc(feedback.id.trim());
+
+    final visibility = _resolveVisibility(
+      requested: feedback.visibility,
+      settings: settings,
+    );
+
+    final status = settings.requireModeration
+        ? FeedbackStatus.pendingModeration
+        : FeedbackStatus.published;
+
+    final editDeadline = settings.reviewEditingEnabled
+        ? now.add(Duration(hours: settings.editWindowHours))
+        : now;
+
+    final preparedFeedback = feedback
+        .copyWith(
+          id: reviewReference.id,
+          isVerified: verifiedService,
+          visibility: visibility,
+          status: status,
+          createdAt: now,
+          updatedAt: now,
+          editDeadline: editDeadline,
+        )
+        .normalized();
+
+    if (preparedFeedback.serviceType == FeedbackServiceType.food &&
+        await hasSubmittedFeedback(
+          serviceType: preparedFeedback.serviceType,
+          sourceId: preparedFeedback.sourceId,
+          reviewerId: preparedFeedback.reviewerId,
+          targetType: preparedFeedback.targetType,
+          targetId: preparedFeedback.targetId,
+        )) {
+      throw const FeedbackOperationException(
+        'duplicate-review',
+        'A review has already been submitted for this Food order target.',
+      );
+    }
+
+    final uniqueKey = preparedFeedback.duplicateReviewKey;
+    final keyReference = _reviewKeys.doc(_documentSafeKey(uniqueKey));
+
+    final summaryReference = _summaries.doc(
+      FeedbackSummaryModel.buildSummaryId(
+        serviceType: preparedFeedback.serviceType,
+        targetType: preparedFeedback.targetType,
+        targetId: preparedFeedback.targetId,
+      ),
+    );
+
+    await _firestore.runTransaction((transaction) async {
+      final existingKey = await transaction.get(keyReference);
+
+      if (existingKey.exists) {
+        throw const FeedbackOperationException(
+          'duplicate-review',
+          'A review has already been submitted for this completed service.',
+        );
+      }
+
+      final existingReview = await transaction.get(reviewReference);
+
+      if (existingReview.exists) {
+        throw const FeedbackOperationException(
+          'review-id-exists',
+          'This review identifier is already in use.',
+        );
+      }
+
+      final summarySnapshot = await transaction.get(summaryReference);
+
+      final currentSummary =
+          summarySnapshot.exists && summarySnapshot.data() != null
+          ? FeedbackSummaryModel.fromMap(
+              summarySnapshot.data()!,
+              documentId: summarySnapshot.id,
+            ).normalized()
+          : FeedbackSummaryModel.empty(
+              serviceType: preparedFeedback.serviceType,
+              targetType: preparedFeedback.targetType,
+              targetId: preparedFeedback.targetId,
+              targetName: preparedFeedback.targetName,
+              updatedAt: now,
+            );
+
+      final nextSummary = currentSummary.addReview(
+        rating: preparedFeedback.rating,
+        isVerified: preparedFeedback.isVerified,
+        isPublic: preparedFeedback.isPublic,
+        hasReply: preparedFeedback.hasPartnerReply,
+        isFlagged: preparedFeedback.isFlagged,
+        lowRatingThreshold: settings.lowRatingThreshold,
+        reviewCreatedAt: now,
+        updateTime: now,
+      );
+
+      transaction.set(reviewReference, preparedFeedback.toMap());
+
+      transaction.set(keyReference, <String, dynamic>{
+        'uniqueReviewKey': uniqueKey,
+        'feedbackId': reviewReference.id,
+        'serviceType': preparedFeedback.serviceType.value,
+        'sourceId': preparedFeedback.sourceId,
+        'targetType': preparedFeedback.targetType.value,
+        'targetId': preparedFeedback.targetId,
+        'reviewerId': preparedFeedback.reviewerId,
+        'keyVersion': preparedFeedback.serviceType == FeedbackServiceType.food
+            ? 2
+            : 1,
+        'createdAt': Timestamp.fromDate(now),
+        'active': true,
+      });
+
+      transaction.set(summaryReference, nextSummary.toMap());
+    });
+
+    return reviewReference.id;
+  }
+
+  Future<FeedbackModel?> getFeedbackById(String feedbackId) async {
+    final cleanFeedbackId = feedbackId.trim();
+
+    if (cleanFeedbackId.isEmpty) {
+      return null;
+    }
+
+    final snapshot = await _reviews.doc(cleanFeedbackId).get();
+    final data = snapshot.data();
+
+    if (!snapshot.exists || data == null) {
+      return null;
+    }
+
+    return FeedbackModel.fromMap(data, documentId: snapshot.id);
+  }
+
+  Stream<FeedbackModel?> watchFeedbackById(String feedbackId) {
+    final cleanFeedbackId = feedbackId.trim();
+
+    if (cleanFeedbackId.isEmpty) {
+      return Stream<FeedbackModel?>.value(null);
+    }
+
+    return _reviews.doc(cleanFeedbackId).snapshots().map((snapshot) {
+      final data = snapshot.data();
+
+      if (!snapshot.exists || data == null) {
+        return null;
+      }
+
+      return FeedbackModel.fromMap(data, documentId: snapshot.id);
+    });
+  }
+
+  Stream<List<FeedbackModel>> watchMyReviews({
+    required String reviewerId,
+    FeedbackServiceType? serviceType,
+    int limit = 50,
+  }) {
+    final cleanReviewerId = reviewerId.trim();
+
+    if (cleanReviewerId.isEmpty) {
+      return Stream<List<FeedbackModel>>.value(const <FeedbackModel>[]);
+    }
+
+    Query<Map<String, dynamic>> query = _reviews.where(
+      'reviewerId',
+      isEqualTo: cleanReviewerId,
+    );
+
+    if (serviceType != null) {
+      query = query.where('serviceType', isEqualTo: serviceType.value);
+    }
+
+    return query
+        .orderBy('createdAt', descending: true)
+        .limit(_safeLimit(limit))
+        .snapshots()
+        .map(_feedbackListFromSnapshot);
+  }
+
+  Stream<List<FeedbackModel>> watchTargetReviews({
+    required FeedbackServiceType serviceType,
+    required String targetId,
+    bool publicOnly = true,
+    int limit = 50,
+  }) {
+    final cleanTargetId = targetId.trim();
+
+    if (cleanTargetId.isEmpty) {
+      return Stream<List<FeedbackModel>>.value(const <FeedbackModel>[]);
+    }
+
+    Query<Map<String, dynamic>> query = _reviews
+        .where('serviceType', isEqualTo: serviceType.value)
+        .where('targetId', isEqualTo: cleanTargetId);
+
+    if (publicOnly) {
+      query = query
+          .where('status', isEqualTo: FeedbackStatus.published.value)
+          .where(
+            'visibility',
+            whereIn: <String>[
+              FeedbackVisibility.public.value,
+              FeedbackVisibility.anonymous.value,
+            ],
+          );
+    }
+
+    return query
+        .orderBy('createdAt', descending: true)
+        .limit(_safeLimit(limit))
+        .snapshots()
+        .map(_feedbackListFromSnapshot);
+  }
+
+  Future<List<FeedbackModel>> getReviewsForSource({
+    required FeedbackServiceType serviceType,
+    required String sourceId,
+  }) async {
+    final cleanSourceId = sourceId.trim();
+
+    if (cleanSourceId.isEmpty) {
+      return const <FeedbackModel>[];
+    }
+
+    final snapshot = await _reviews
+        .where('serviceType', isEqualTo: serviceType.value)
+        .where('sourceId', isEqualTo: cleanSourceId)
+        .orderBy('createdAt', descending: true)
+        .get();
+
+    return _feedbackListFromSnapshot(snapshot);
+  }
+
+  Future<void> editFeedback({
+    required String feedbackId,
+    required String reviewerId,
+    required int rating,
+    required List<String> tags,
+    required String comment,
+    FeedbackVisibility? visibility,
+  }) async {
+    if (rating < FeedbackModel.minimumRating ||
+        rating > FeedbackModel.maximumRating) {
+      throw const FeedbackOperationException(
+        'invalid-rating',
+        'Rating must be between 1 and 5.',
+      );
+    }
+
+    final cleanFeedbackId = feedbackId.trim();
+    final cleanReviewerId = reviewerId.trim();
+
+    if (cleanFeedbackId.isEmpty || cleanReviewerId.isEmpty) {
+      throw const FeedbackOperationException(
+        'invalid-request',
+        'Feedback ID and reviewer ID are required.',
+      );
+    }
+
+    final settings = await getSettings();
+
+    if (!settings.feedbackEnabled || !settings.reviewEditingEnabled) {
+      throw const FeedbackOperationException(
+        'editing-disabled',
+        'Review editing is currently disabled.',
+      );
+    }
+
+    final reviewReference = _reviews.doc(cleanFeedbackId);
+
+    await _firestore.runTransaction((transaction) async {
+      final reviewSnapshot = await transaction.get(reviewReference);
+      final data = reviewSnapshot.data();
+
+      if (!reviewSnapshot.exists || data == null) {
+        throw const FeedbackOperationException(
+          'not-found',
+          'Feedback was not found.',
+        );
+      }
+
+      final current = FeedbackModel.fromMap(
+        data,
+        documentId: reviewSnapshot.id,
+      ).normalized();
+
+      if (current.reviewerId != cleanReviewerId) {
+        throw const FeedbackOperationException(
+          'permission-denied',
+          'Only the original reviewer can edit this review.',
+        );
+      }
+
+      if (current.isDeleted) {
+        throw const FeedbackOperationException(
+          'review-deleted',
+          'A deleted review cannot be edited.',
+        );
+      }
+
+      if (!current.canCurrentlyEdit) {
+        throw const FeedbackOperationException(
+          'edit-window-expired',
+          'The admin-controlled review editing window has expired.',
+        );
+      }
+
+      final nextVisibility = _resolveVisibility(
+        requested: visibility ?? current.visibility,
+        settings: settings,
+      );
+
+      final updated = current
+          .copyWith(
+            rating: rating,
+            tags: tags,
+            comment: comment,
+            visibility: nextVisibility,
+            updatedAt: DateTime.now(),
+            status: settings.requireModeration
+                ? FeedbackStatus.pendingModeration
+                : FeedbackStatus.published,
+          )
+          .normalized();
+
+      final summaryReference = _summaries.doc(
+        FeedbackSummaryModel.buildSummaryId(
+          serviceType: current.serviceType,
+          targetType: current.targetType,
+          targetId: current.targetId,
+        ),
+      );
+
+      final summarySnapshot = await transaction.get(summaryReference);
+      final summaryData = summarySnapshot.data();
+
+      if (summarySnapshot.exists && summaryData != null) {
+        final currentSummary = FeedbackSummaryModel.fromMap(
+          summaryData,
+          documentId: summarySnapshot.id,
+        ).normalized();
+
+        final withoutOld = currentSummary.removeReview(
+          rating: current.rating,
+          isVerified: current.isVerified,
+          isPublic: current.isPublic,
+          hasReply: current.hasPartnerReply,
+          isFlagged: current.isFlagged,
+          lowRatingThreshold: settings.lowRatingThreshold,
+        );
+
+        final withUpdated = withoutOld.addReview(
+          rating: updated.rating,
+          isVerified: updated.isVerified,
+          isPublic: updated.isPublic,
+          hasReply: updated.hasPartnerReply,
+          isFlagged: updated.isFlagged,
+          lowRatingThreshold: settings.lowRatingThreshold,
+          reviewCreatedAt: updated.createdAt,
+        );
+
+        transaction.set(summaryReference, withUpdated.toMap());
+      }
+
+      transaction.set(reviewReference, updated.toMap());
+    });
+  }
+
+  Future<void> deleteMyFeedback({
+    required String feedbackId,
+    required String reviewerId,
+    required String reason,
+  }) async {
+    final cleanFeedbackId = feedbackId.trim();
+    final cleanReviewerId = reviewerId.trim();
+    final cleanReason = reason.trim();
+
+    if (cleanFeedbackId.isEmpty ||
+        cleanReviewerId.isEmpty ||
+        cleanReason.isEmpty) {
+      throw const FeedbackOperationException(
+        'invalid-request',
+        'Feedback ID, reviewer ID and deletion reason are required.',
+      );
+    }
+
+    final settings = await getSettings();
+
+    if (!settings.reviewDeletionEnabled) {
+      throw const FeedbackOperationException(
+        'deletion-disabled',
+        'Customer review deletion is currently disabled.',
+      );
+    }
+
+    final reviewReference = _reviews.doc(cleanFeedbackId);
+
+    await _firestore.runTransaction((transaction) async {
+      final reviewSnapshot = await transaction.get(reviewReference);
+      final data = reviewSnapshot.data();
+
+      if (!reviewSnapshot.exists || data == null) {
+        throw const FeedbackOperationException(
+          'not-found',
+          'Feedback was not found.',
+        );
+      }
+
+      final current = FeedbackModel.fromMap(
+        data,
+        documentId: reviewSnapshot.id,
+      ).normalized();
+
+      if (current.reviewerId != cleanReviewerId) {
+        throw const FeedbackOperationException(
+          'permission-denied',
+          'Only the original reviewer can delete this review.',
+        );
+      }
+
+      if (current.isDeleted) {
+        return;
+      }
+
+      final now = DateTime.now();
+      final deleted = current
+          .copyWith(
+            status: FeedbackStatus.removed,
+            deletedAt: now,
+            deletedBy: cleanReviewerId,
+            deletionReason: cleanReason,
+            updatedAt: now,
+          )
+          .normalized();
+
+      final summaryReference = _summaries.doc(
+        FeedbackSummaryModel.buildSummaryId(
+          serviceType: current.serviceType,
+          targetType: current.targetType,
+          targetId: current.targetId,
+        ),
+      );
+
+      final summarySnapshot = await transaction.get(summaryReference);
+      final summaryData = summarySnapshot.data();
+
+      if (summarySnapshot.exists && summaryData != null) {
+        final currentSummary = FeedbackSummaryModel.fromMap(
+          summaryData,
+          documentId: summarySnapshot.id,
+        ).normalized();
+
+        final updatedSummary = currentSummary.removeReview(
+          rating: current.rating,
+          isVerified: current.isVerified,
+          isPublic: current.isPublic,
+          hasReply: current.hasPartnerReply,
+          isFlagged: current.isFlagged,
+          lowRatingThreshold: settings.lowRatingThreshold,
+          updateTime: now,
+        );
+
+        transaction.set(summaryReference, updatedSummary.toMap());
+      }
+
+      transaction.set(reviewReference, deleted.toMap());
+
+      final keyReference = _reviewKeys.doc(
+        _documentSafeKey(current.duplicateReviewKey),
+      );
+
+      transaction.set(keyReference, <String, dynamic>{
+        'uniqueReviewKey': current.duplicateReviewKey,
+        'feedbackId': current.id,
+        'serviceType': current.serviceType.value,
+        'sourceId': current.sourceId,
+        'reviewerId': current.reviewerId,
+        'active': false,
+        'deletedAt': Timestamp.fromDate(now),
+        'deletionReason': cleanReason,
+      }, SetOptions(merge: true));
+    });
+  }
+
+  Future<FeedbackSummaryModel?> getSummary({
+    required FeedbackServiceType serviceType,
+    required FeedbackTargetType targetType,
+    required String targetId,
+  }) async {
+    final cleanTargetId = targetId.trim();
+
+    if (cleanTargetId.isEmpty) {
+      return null;
+    }
+
+    final summaryId = FeedbackSummaryModel.buildSummaryId(
+      serviceType: serviceType,
+      targetType: targetType,
+      targetId: cleanTargetId,
+    );
+
+    final snapshot = await _summaries.doc(summaryId).get();
+    final data = snapshot.data();
+
+    if (!snapshot.exists || data == null) {
+      return null;
+    }
+
+    return FeedbackSummaryModel.fromMap(data, documentId: snapshot.id);
+  }
+
+  Stream<FeedbackSummaryModel?> watchSummary({
+    required FeedbackServiceType serviceType,
+    required FeedbackTargetType targetType,
+    required String targetId,
+  }) {
+    final cleanTargetId = targetId.trim();
+
+    if (cleanTargetId.isEmpty) {
+      return Stream<FeedbackSummaryModel?>.value(null);
+    }
+
+    final summaryId = FeedbackSummaryModel.buildSummaryId(
+      serviceType: serviceType,
+      targetType: targetType,
+      targetId: cleanTargetId,
+    );
+
+    return _summaries.doc(summaryId).snapshots().map((snapshot) {
+      final data = snapshot.data();
+
+      if (!snapshot.exists || data == null) {
+        return null;
+      }
+
+      return FeedbackSummaryModel.fromMap(data, documentId: snapshot.id);
+    });
+  }
+
+  void _ensureSubmissionAllowed({
+    required FeedbackModel feedback,
+    required FeedbackRuntimeSettings settings,
+    required bool serviceCompleted,
+  }) {
+    feedback.normalized();
+
+    if (!settings.feedbackEnabled) {
+      throw const FeedbackOperationException(
+        'feedback-disabled',
+        'The feedback system is currently disabled.',
+      );
+    }
+
+    if (!settings.isServiceEnabled(feedback.serviceType)) {
+      throw FeedbackOperationException(
+        'service-rating-disabled',
+        '${feedback.serviceType.displayName} ratings are disabled.',
+      );
+    }
+
+    if (settings.verifiedServicesOnly && !serviceCompleted) {
+      throw const FeedbackOperationException(
+        'service-not-completed',
+        'Only a completed service can receive a verified review.',
+      );
+    }
+
+    if (feedback.visibility == FeedbackVisibility.anonymous &&
+        !settings.anonymousReviewsEnabled) {
+      throw const FeedbackOperationException(
+        'anonymous-disabled',
+        'Anonymous reviews are currently disabled.',
+      );
+    }
+  }
+
+  FeedbackVisibility _resolveVisibility({
+    required FeedbackVisibility requested,
+    required FeedbackRuntimeSettings settings,
+  }) {
+    if (!settings.publicReviewsEnabled) {
+      return FeedbackVisibility.private;
+    }
+
+    if (requested == FeedbackVisibility.anonymous &&
+        !settings.anonymousReviewsEnabled) {
+      return FeedbackVisibility.public;
+    }
+
+    return requested;
+  }
+
+  List<FeedbackModel> _feedbackListFromSnapshot(
+    QuerySnapshot<Map<String, dynamic>> snapshot,
+  ) {
+    return snapshot.docs
+        .map(
+          (document) =>
+              FeedbackModel.fromMap(document.data(), documentId: document.id),
+        )
+        .where((feedback) => !feedback.isDeleted)
+        .toList(growable: false);
+  }
+
+  Future<bool> _isVerifiedFoodOrderReview({
+    required String sourceId,
+    required String reviewerId,
+    FeedbackTargetType? targetType,
+    String targetId = '',
+  }) async {
+    final String cleanSourceId = sourceId.trim();
+    final String cleanReviewerId = reviewerId.trim();
+    final String cleanTargetId = targetId.trim();
+
+    if (cleanSourceId.isEmpty || cleanReviewerId.isEmpty) {
+      return false;
+    }
+
+    final DocumentSnapshot<Map<String, dynamic>> orderSnapshot =
+        await _firestore.collection('food_orders').doc(cleanSourceId).get();
+
+    final Map<String, dynamic>? orderData = orderSnapshot.data();
+
+    if (!orderSnapshot.exists || orderData == null) {
+      return false;
+    }
+
+    final String orderCustomerId =
+        orderData['customerId']?.toString().trim() ?? '';
+
+    final String orderStatus = orderData['status']?.toString().trim() ?? '';
+
+    if (orderCustomerId != cleanReviewerId || orderStatus != 'delivered') {
+      return false;
+    }
+
+    // canSubmitFeedback does not know the target yet.
+    // Ownership + delivered state are enough for that pre-check.
+    if (targetType == null) {
+      return true;
+    }
+
+    switch (targetType) {
+      case FeedbackTargetType.restaurant:
+        final String restaurantId =
+            orderData['restaurantId']?.toString().trim() ?? '';
+
+        return cleanTargetId.isNotEmpty && restaurantId == cleanTargetId;
+
+      case FeedbackTargetType.foodRider:
+        final String riderId = orderData['riderId']?.toString().trim() ?? '';
+
+        return cleanTargetId.isNotEmpty &&
+            riderId.isNotEmpty &&
+            riderId == cleanTargetId;
+
+      default:
+        return false;
+    }
+  }
+
+  String _buildUniqueReviewKey({
+    required FeedbackServiceType serviceType,
+    required String sourceId,
+    required String reviewerId,
+    FeedbackTargetType? targetType,
+    String targetId = '',
+  }) {
+    final String legacyKey = _buildLegacyUniqueReviewKey(
+      serviceType: serviceType,
+      sourceId: sourceId,
+      reviewerId: reviewerId,
+    );
+
+    if (serviceType != FeedbackServiceType.food) {
+      return legacyKey;
+    }
+
+    final String cleanTargetId = targetId.trim();
+
+    // Target-less callers retain the original key for compatibility.
+    if (targetType == null || cleanTargetId.isEmpty) {
+      return legacyKey;
+    }
+
+    return '${legacyKey}_${targetType.value}_$cleanTargetId';
+  }
+
+  String _buildLegacyUniqueReviewKey({
+    required FeedbackServiceType serviceType,
+    required String sourceId,
+    required String reviewerId,
+  }) {
+    final cleanSourceId = sourceId.trim();
+    final cleanReviewerId = reviewerId.trim();
+
+    if (cleanSourceId.isEmpty ||
+        cleanReviewerId.isEmpty) {
+      throw const FeedbackOperationException(
+        'invalid-review-key',
+        'Source ID and reviewer ID are required.',
+      );
+    }
+
+    return '${serviceType.value}_${cleanSourceId}_$cleanReviewerId';
+  }
+  String _documentSafeKey(String value) {
+    return base64Url.encode(utf8.encode(value)).replaceAll('=', '');
+  }
+
+  int _safeLimit(int value) {
+    return value.clamp(1, 100);
+  }
+}

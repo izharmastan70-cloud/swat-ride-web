@@ -1,0 +1,597 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
+
+/// Firestore service for the Normal Ride + Driver Admin module only.
+///
+/// Firebase Security Rules must allow these writes only for authenticated
+/// Admin users. Flutter never stores payment-provider or bank secret keys.
+class RideAdminService {
+  RideAdminService({FirebaseFirestore? firestore})
+      : _firestore = firestore ?? FirebaseFirestore.instance;
+
+  final FirebaseFirestore _firestore;
+
+  /// Development switch. Approval and payout status can be tested, but no
+  /// real bank, JazzCash or Easypaisa transfer is executed from Flutter.
+  static const bool testingPayoutBypassEnabled = true;
+
+  CollectionReference<Map<String, dynamic>> get _applications =>
+      _firestore.collection('driver_applications');
+
+  CollectionReference<Map<String, dynamic>> get _drivers =>
+      _firestore.collection('drivers');
+
+  CollectionReference<Map<String, dynamic>> get _rides =>
+      _firestore.collection('rides');
+
+  CollectionReference<Map<String, dynamic>> get _withdrawals =>
+      _firestore.collection('driver_withdrawal_requests');
+
+  DocumentReference<Map<String, dynamic>> get _paymentSettings =>
+      _firestore.collection('app_config').doc('normal_ride_payments');
+
+  CollectionReference<Map<String, dynamic>> get _pricing =>
+      _firestore.collection('normal_ride_pricing');
+
+  // =========================================================
+  // DRIVER APPLICATIONS
+  // =========================================================
+
+  Stream<List<RideAdminRecord>> watchDriverApplications({
+    String? status,
+  }) {
+    Query<Map<String, dynamic>> query = _applications;
+    final String normalizedStatus = (status ?? '').trim().toLowerCase();
+    if (normalizedStatus.isNotEmpty && normalizedStatus != 'all') {
+      query = query.where('status', isEqualTo: normalizedStatus);
+    }
+
+    return query.snapshots().map((snapshot) {
+      final List<RideAdminRecord> records = snapshot.docs
+          .map(RideAdminRecord.fromDocument)
+          .toList(growable: false);
+      return _latestFirst(records);
+    });
+  }
+
+  Stream<RideAdminRecord?> watchDriverApplication(String applicationId) {
+    final String id = applicationId.trim();
+    if (id.isEmpty) return Stream<RideAdminRecord?>.value(null);
+    return _applications.doc(id).snapshots().map((document) {
+      if (!document.exists || document.data() == null) return null;
+      return RideAdminRecord.fromDocument(document);
+    });
+  }
+
+  Future<void> approveDriverApplication({
+    required String applicationId,
+    required String reviewedBy,
+    String? adminNote,
+  }) async {
+    final String id = _required(applicationId, 'Application ID');
+    final String adminId = _required(reviewedBy, 'Admin ID');
+    final DocumentReference<Map<String, dynamic>> applicationRef =
+        _applications.doc(id);
+
+    await _firestore.runTransaction((transaction) async {
+      final DocumentSnapshot<Map<String, dynamic>> applicationSnapshot =
+          await transaction.get(applicationRef);
+      if (!applicationSnapshot.exists || applicationSnapshot.data() == null) {
+        throw Exception('Driver application was not found.');
+      }
+
+      final Map<String, dynamic> application = applicationSnapshot.data()!;
+      final String currentStatus = _text(
+        application['status'],
+        fallback: RideAdminStatus.pending,
+      ).toLowerCase();
+      if (currentStatus == RideAdminStatus.approved) {
+        throw Exception('This application is already approved.');
+      }
+
+      final Map<String, dynamic> driverAccount = _map(
+        application['driverAccount'],
+      );
+      final String driverId = _firstText(<dynamic>[
+        application['driverId'],
+        application['userId'],
+        driverAccount['driverId'],
+        driverAccount['uid'],
+        applicationSnapshot.id,
+      ]);
+      final String fullName = _firstText(<dynamic>[
+        application['fullName'],
+        application['name'],
+        'SWAT RIDE Driver',
+      ]);
+      final String phone = _firstText(<dynamic>[
+        application['phoneNumber'],
+        application['phone'],
+      ]);
+      final String cnic = _firstText(<dynamic>[
+        application['cnicNumber'],
+        application['cnic'],
+      ]);
+      final String vehicleType = _text(application['vehicleType']);
+      final String vehicleNumber = _text(application['vehicleNumber']);
+      final DocumentReference<Map<String, dynamic>> driverRef =
+          _drivers.doc(driverId);
+
+      transaction.set(
+        driverRef,
+        <String, dynamic>{
+          'driverId': driverId,
+          'applicationId': id,
+          'fullName': fullName,
+          'name': fullName,
+          'phoneNumber': phone,
+          'phone': phone,
+          'cnicNumber': cnic,
+          'vehicleType': vehicleType,
+          'vehicleNumber': vehicleNumber,
+          'address': _text(application['address']),
+          'documents': _map(application['documents']),
+          'status': RideAdminStatus.approved,
+          'isOnline': false,
+          'isAvailable': false,
+          'isSuspended': false,
+          'walletBalance': _number(driverAccount['walletBalance']),
+          'outstandingCommission':
+              _number(driverAccount['outstandingCommission']),
+          'pendingWithdrawalAmount':
+              _number(driverAccount['pendingWithdrawalAmount']),
+          'approvedBy': adminId,
+          'approvedAt': FieldValue.serverTimestamp(),
+          'updatedAt': FieldValue.serverTimestamp(),
+          'createdAt': application['createdAt'] ?? FieldValue.serverTimestamp(),
+        },
+        SetOptions(merge: true),
+      );
+
+      transaction.update(applicationRef, <String, dynamic>{
+        'driverId': driverId,
+        'status': RideAdminStatus.approved,
+        'adminReviewed': true,
+        'adminReview': <String, dynamic>{
+          'reviewed': true,
+          'reviewedBy': adminId,
+          'reviewedAt': FieldValue.serverTimestamp(),
+          'decision': RideAdminStatus.approved,
+          'note': _nullableText(adminNote),
+          'rejectionReason': null,
+        },
+        'rejectionReason': null,
+        'approvedAt': FieldValue.serverTimestamp(),
+        'rejectedAt': null,
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+    });
+  }
+
+  Future<void> rejectDriverApplication({
+    required String applicationId,
+    required String reviewedBy,
+    required String rejectionReason,
+  }) async {
+    final String id = _required(applicationId, 'Application ID');
+    final String adminId = _required(reviewedBy, 'Admin ID');
+    final String reason = _required(rejectionReason, 'Rejection reason');
+    if (reason.length < 5) {
+      throw Exception('Please enter a clear rejection reason.');
+    }
+
+    await _applications.doc(id).update(<String, dynamic>{
+      'status': RideAdminStatus.rejected,
+      'adminReviewed': true,
+      'adminReview': <String, dynamic>{
+        'reviewed': true,
+        'reviewedBy': adminId,
+        'reviewedAt': FieldValue.serverTimestamp(),
+        'decision': RideAdminStatus.rejected,
+        'rejectionReason': reason,
+      },
+      'rejectionReason': reason,
+      'approvedAt': null,
+      'rejectedAt': FieldValue.serverTimestamp(),
+      'updatedAt': FieldValue.serverTimestamp(),
+    });
+  }
+
+  Future<void> resetDriverApplication({
+    required String applicationId,
+    required String reviewedBy,
+  }) async {
+    final String id = _required(applicationId, 'Application ID');
+    final String adminId = _required(reviewedBy, 'Admin ID');
+    await _applications.doc(id).update(<String, dynamic>{
+      'status': RideAdminStatus.pending,
+      'adminReviewed': false,
+      'adminReview': <String, dynamic>{
+        'reviewed': false,
+        'reviewedBy': adminId,
+        'reviewedAt': FieldValue.serverTimestamp(),
+        'decision': RideAdminStatus.pending,
+        'rejectionReason': null,
+      },
+      'rejectionReason': null,
+      'approvedAt': null,
+      'rejectedAt': null,
+      'updatedAt': FieldValue.serverTimestamp(),
+    });
+  }
+
+  // =========================================================
+  // DRIVERS
+  // =========================================================
+
+  Stream<List<RideAdminRecord>> watchDrivers({String? status}) {
+    Query<Map<String, dynamic>> query = _drivers;
+    final String normalizedStatus = (status ?? '').trim().toLowerCase();
+    if (normalizedStatus.isNotEmpty && normalizedStatus != 'all') {
+      query = query.where('status', isEqualTo: normalizedStatus);
+    }
+    return query.snapshots().map((snapshot) {
+      final List<RideAdminRecord> records = snapshot.docs
+          .map(RideAdminRecord.fromDocument)
+          .toList(growable: false);
+      return _latestFirst(records);
+    });
+  }
+
+  Future<void> setDriverSuspended({
+    required String driverId,
+    required bool isSuspended,
+    required String updatedBy,
+    String? reason,
+  }) async {
+    final String id = _required(driverId, 'Driver ID');
+    final String adminId = _required(updatedBy, 'Admin ID');
+    if (isSuspended && (_nullableText(reason)?.length ?? 0) < 5) {
+      throw Exception('Please enter a clear suspension reason.');
+    }
+    await _drivers.doc(id).update(<String, dynamic>{
+      'status': isSuspended
+          ? RideAdminStatus.suspended
+          : RideAdminStatus.approved,
+      'isSuspended': isSuspended,
+      'isOnline': false,
+      'isAvailable': false,
+      'suspensionReason': isSuspended ? reason!.trim() : null,
+      'statusUpdatedBy': adminId,
+      'statusUpdatedAt': FieldValue.serverTimestamp(),
+      'updatedAt': FieldValue.serverTimestamp(),
+    });
+  }
+
+  // =========================================================
+  // NORMAL RIDES
+  // =========================================================
+
+  Stream<List<RideAdminRecord>> watchRides({String? status}) {
+    Query<Map<String, dynamic>> query = _rides;
+    final String normalizedStatus = (status ?? '').trim().toLowerCase();
+    if (normalizedStatus.isNotEmpty && normalizedStatus != 'all') {
+      query = query.where('status', isEqualTo: normalizedStatus);
+    }
+    return query.snapshots().map((snapshot) {
+      final List<RideAdminRecord> records = snapshot.docs
+          .map(RideAdminRecord.fromDocument)
+          .toList(growable: false);
+      return _latestFirst(records);
+    });
+  }
+
+  Future<void> cancelRideByAdmin({
+    required String rideId,
+    required String cancelledBy,
+    required String reason,
+  }) async {
+    final String id = _required(rideId, 'Ride ID');
+    final String adminId = _required(cancelledBy, 'Admin ID');
+    final String cancellationReason = _required(reason, 'Cancellation reason');
+    if (cancellationReason.length < 5) {
+      throw Exception('Please enter a clear cancellation reason.');
+    }
+    await _rides.doc(id).update(<String, dynamic>{
+      'status': 'cancelled',
+      'cancelledBy': 'admin',
+      'cancelledByAdminId': adminId,
+      'cancellationReason': cancellationReason,
+      'cancelledAt': FieldValue.serverTimestamp(),
+      'updatedAt': FieldValue.serverTimestamp(),
+    });
+  }
+
+  // =========================================================
+  // PAYMENT METHODS AND PRICING
+  // =========================================================
+
+  Stream<RideAdminRecord?> watchPaymentSettings() {
+    return _paymentSettings.snapshots().map((document) {
+      if (!document.exists || document.data() == null) return null;
+      return RideAdminRecord.fromDocument(document);
+    });
+  }
+
+  Future<void> setPaymentMethodEnabled({
+    required String method,
+    required bool isEnabled,
+    required String updatedBy,
+    bool testingBypassEnabled = true,
+  }) async {
+    final String paymentMethod = _required(method, 'Payment method')
+        .toLowerCase();
+    final String adminId = _required(updatedBy, 'Admin ID');
+    await _paymentSettings.set(<String, dynamic>{
+      'methods': <String, dynamic>{
+        paymentMethod: <String, dynamic>{
+          'method': paymentMethod,
+          'isEnabled': isEnabled,
+          'isTestingBypassEnabled':
+              paymentMethod == 'cash' ? false : testingBypassEnabled,
+          'updatedBy': adminId,
+          'updatedAt': FieldValue.serverTimestamp(),
+        },
+      },
+      'updatedAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
+  }
+
+  Stream<List<RideAdminRecord>> watchPricing() {
+    return _pricing.snapshots().map((snapshot) {
+      final List<RideAdminRecord> records = snapshot.docs
+          .map(RideAdminRecord.fromDocument)
+          .toList(growable: false);
+      return _latestFirst(records);
+    });
+  }
+
+  Future<void> updateVehiclePricing({
+    required String vehicleId,
+    required Map<String, dynamic> pricing,
+    required String updatedBy,
+  }) async {
+    final String id = _required(vehicleId, 'Vehicle ID');
+    final String adminId = _required(updatedBy, 'Admin ID');
+    _validatePricing(pricing);
+    await _pricing.doc(id).set(<String, dynamic>{
+      ...pricing,
+      'vehicleId': id,
+      'updatedBy': adminId,
+      'updatedAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
+  }
+
+  // =========================================================
+  // WITHDRAWALS - STATUS ONLY, NO REAL PAYOUT FROM FLUTTER
+  // =========================================================
+
+  Stream<List<RideAdminRecord>> watchWithdrawals({String? status}) {
+    Query<Map<String, dynamic>> query = _withdrawals;
+    final String normalizedStatus = (status ?? '').trim().toLowerCase();
+    if (normalizedStatus.isNotEmpty && normalizedStatus != 'all') {
+      query = query.where('status', isEqualTo: normalizedStatus);
+    }
+    return query.snapshots().map((snapshot) {
+      final List<RideAdminRecord> records = snapshot.docs
+          .map(RideAdminRecord.fromDocument)
+          .toList(growable: false);
+      return _latestFirst(records);
+    });
+  }
+
+  Future<void> reviewWithdrawal({
+    required String requestId,
+    required String reviewedBy,
+    required String nextStatus,
+    String? adminNote,
+  }) async {
+    final String id = _required(requestId, 'Withdrawal request ID');
+    final String adminId = _required(reviewedBy, 'Admin ID');
+    final String status = _required(nextStatus, 'Withdrawal status')
+        .toLowerCase();
+    const Set<String> allowed = <String>{
+      'approved',
+      'processing',
+      'paid',
+      'rejected',
+      'failed',
+    };
+    if (!allowed.contains(status)) {
+      throw Exception('Invalid withdrawal status.');
+    }
+    if (status == 'paid') {
+      throw StateError(
+        'Driver withdrawal cannot be marked paid from the Flutter client. '
+        'A verified payout provider/backend confirmation is required.',
+      );
+    }
+
+    final DocumentReference<Map<String, dynamic>> requestRef =
+        _withdrawals.doc(id);
+    await _firestore.runTransaction((transaction) async {
+      final DocumentSnapshot<Map<String, dynamic>> requestSnapshot =
+          await transaction.get(requestRef);
+      if (!requestSnapshot.exists || requestSnapshot.data() == null) {
+        throw Exception('Withdrawal request was not found.');
+      }
+      final Map<String, dynamic> request = requestSnapshot.data()!;
+      final String currentStatus = _text(request['status']).toLowerCase();
+      if (currentStatus == 'paid') {
+        throw Exception('This withdrawal is already paid.');
+      }
+      final String driverId = _text(request['driverId']);
+      if (driverId.isEmpty) {
+        throw Exception('Withdrawal Driver ID is missing.');
+      }
+      final double amount = _number(request['amount']);
+      final DocumentReference<Map<String, dynamic>> driverRef =
+          _drivers.doc(driverId);
+
+      transaction.update(requestRef, <String, dynamic>{
+        'status': status,
+        'adminNote': _nullableText(adminNote),
+        'reviewedBy': adminId,
+        'reviewedAt': FieldValue.serverTimestamp(),
+        'testingBypassActive': testingPayoutBypassEnabled,
+        if (status == 'paid') 'paidAt': FieldValue.serverTimestamp(),
+        if (status == 'rejected') 'rejectedAt': FieldValue.serverTimestamp(),
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+
+      if (status == 'paid') {
+        transaction.set(driverRef, <String, dynamic>{
+          'walletBalance': FieldValue.increment(-amount),
+          'totalWithdrawn': FieldValue.increment(amount),
+          'pendingWithdrawalAmount': 0,
+          'updatedAt': FieldValue.serverTimestamp(),
+        }, SetOptions(merge: true));
+      } else if (status == 'rejected' || status == 'failed') {
+        transaction.set(driverRef, <String, dynamic>{
+          'pendingWithdrawalAmount': 0,
+          'updatedAt': FieldValue.serverTimestamp(),
+        }, SetOptions(merge: true));
+      }
+    });
+
+    // PRODUCTION REAL PAYOUT (BILLING / PROVIDER SETUP PAUSED):
+    // A secure backend must call Bank/JazzCash/Easypaisa, verify its webhook,
+    // then mark this request paid. Never put provider secret keys in Flutter.
+  }
+
+  // =========================================================
+  // HELPERS
+  // =========================================================
+
+  void _validatePricing(Map<String, dynamic> pricing) {
+    const List<String> nonNegativeFields = <String>[
+      'baseFare',
+      'perKilometerRate',
+      'perMinuteRate',
+      'minimumFare',
+      'bookingFee',
+      'taxPercentage',
+    ];
+    for (final String field in nonNegativeFields) {
+      if (pricing.containsKey(field) && _number(pricing[field]) < 0) {
+        throw Exception('$field cannot be negative.');
+      }
+    }
+    final double commission = _number(pricing['adminCommissionPercentage']);
+    if (commission < 0 || commission > 100) {
+      throw Exception('Admin commission must be between 0 and 100.');
+    }
+    final double surge = pricing.containsKey('surgeMultiplier')
+        ? _number(pricing['surgeMultiplier'])
+        : 1;
+    if (surge < 1) throw Exception('Surge multiplier cannot be below 1.');
+  }
+
+  static List<RideAdminRecord> _latestFirst(
+    List<RideAdminRecord> source,
+  ) {
+    final List<RideAdminRecord> sorted = List<RideAdminRecord>.of(source);
+    sorted.sort((first, second) =>
+        second.updatedAt.compareTo(first.updatedAt));
+    return List<RideAdminRecord>.unmodifiable(sorted);
+  }
+
+  static String _required(String value, String label) {
+    final String normalized = value.trim();
+    if (normalized.isEmpty) throw Exception('$label is required.');
+    return normalized;
+  }
+
+  static String _text(dynamic value, {String fallback = ''}) {
+    final String normalized = value?.toString().trim() ?? '';
+    return normalized.isEmpty ? fallback : normalized;
+  }
+
+  static String _firstText(List<dynamic> values) {
+    for (final dynamic value in values) {
+      final String text = _text(value);
+      if (text.isNotEmpty) return text;
+    }
+    return '';
+  }
+
+  static String? _nullableText(String? value) {
+    final String normalized = value?.trim() ?? '';
+    return normalized.isEmpty ? null : normalized;
+  }
+
+  static Map<String, dynamic> _map(dynamic value) {
+    if (value is Map) return Map<String, dynamic>.from(value);
+    return <String, dynamic>{};
+  }
+
+  static double _number(dynamic value) {
+    if (value is num) return value.toDouble();
+    return double.tryParse(value?.toString() ?? '') ?? 0;
+  }
+}
+
+class RideAdminStatus {
+  const RideAdminStatus._();
+
+  static const String pending = 'pending';
+  static const String approved = 'approved';
+  static const String rejected = 'rejected';
+  static const String suspended = 'suspended';
+}
+
+class RideAdminRecord {
+  const RideAdminRecord({
+    required this.id,
+    required this.data,
+    required this.createdAt,
+    required this.updatedAt,
+  });
+
+  final String id;
+  final Map<String, dynamic> data;
+  final DateTime createdAt;
+  final DateTime updatedAt;
+
+  String text(String key, {String fallback = ''}) {
+    final String value = data[key]?.toString().trim() ?? '';
+    return value.isEmpty ? fallback : value;
+  }
+
+  double number(String key) {
+    final dynamic value = data[key];
+    if (value is num) return value.toDouble();
+    return double.tryParse(value?.toString() ?? '') ?? 0;
+  }
+
+  bool boolean(String key, {bool fallback = false}) {
+    final dynamic value = data[key];
+    return value is bool ? value : fallback;
+  }
+
+  Map<String, dynamic> map(String key) {
+    final dynamic value = data[key];
+    return value is Map
+        ? Map<String, dynamic>.from(value)
+        : <String, dynamic>{};
+  }
+
+  factory RideAdminRecord.fromDocument(
+    DocumentSnapshot<Map<String, dynamic>> document,
+  ) {
+    final Map<String, dynamic> data =
+        document.data() ?? <String, dynamic>{};
+    return RideAdminRecord(
+      id: document.id,
+      data: Map<String, dynamic>.unmodifiable(data),
+      createdAt: _date(data['createdAt']),
+      updatedAt: _date(data['updatedAt'] ?? data['createdAt']),
+    );
+  }
+
+  static DateTime _date(dynamic value) {
+    if (value is Timestamp) return value.toDate();
+    if (value is DateTime) return value;
+    if (value is String) return DateTime.tryParse(value) ?? DateTime(2000);
+    return DateTime(2000);
+  }
+}

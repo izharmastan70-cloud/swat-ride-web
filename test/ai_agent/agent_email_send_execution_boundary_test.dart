@@ -1,0 +1,371 @@
+import 'package:flutter_test/flutter_test.dart';
+import 'package:swat_ride/ai_agent/constants/agent_action_ids.dart';
+import 'package:swat_ride/ai_agent/constants/agent_conversation_quality_constants.dart';
+import 'package:swat_ride/ai_agent/constants/agent_email_constants.dart';
+import 'package:swat_ride/ai_agent/data/initial_agent_roles_seed.dart';
+import 'package:swat_ride/ai_agent/models/agent_approval_request.dart';
+import 'package:swat_ride/ai_agent/models/agent_email_draft.dart';
+import 'package:swat_ride/ai_agent/models/agent_email_send_authorization_request.dart';
+import 'package:swat_ride/ai_agent/models/agent_master_settings.dart';
+import 'package:swat_ride/ai_agent/models/agent_role.dart';
+import 'package:swat_ride/ai_agent/services/agent_email_approval_gateway.dart';
+import 'package:swat_ride/ai_agent/services/agent_email_send_execution_boundary.dart';
+
+void main() {
+  const AgentEmailSendAuthorizationFactory authorizationFactory =
+      AgentEmailSendAuthorizationFactory();
+
+  AgentRole emailRole() {
+    return buildInitialAgentRoles().firstWhere(
+      (AgentRole role) => role.roleId == 'email_agent',
+    );
+  }
+
+  AgentMasterSettings enabledSettings() {
+    return AgentMasterSettings.safeDefaults().copyWith(
+      masterEnabled: true,
+      emergencyReadOnly: false,
+      freeAiEnabled: true,
+      approvalEngineEnabled: true,
+      emailAgentEnabled: true,
+    );
+  }
+
+  AgentEmailDraft draft({
+    String body = 'Your verified booking update is ready.',
+  }) {
+    return AgentEmailDraft(
+      draftId: 'draft_e3',
+      purpose: AgentEmailPurpose.supportReply,
+      senderIdentityId: 'verified_sender_identity',
+      to: const <AgentEmailAddress>[
+        AgentEmailAddress(address: 'customer@example.com'),
+      ],
+      subject: 'Booking update',
+      bodyText: body,
+      status: AgentEmailDraftStatus.approvalRequired,
+      createdAt: DateTime.utc(2026, 8, 17, 6, 30),
+    );
+  }
+
+  AgentEmailSendAuthorizationRequest authorization(AgentEmailDraft value) {
+    return authorizationFactory.create(
+      authorizationRequestId: 'email_auth_e3',
+      roleId: 'email_agent',
+      actionId: AgentActionId.sendEmail,
+      module: 'email',
+      requestedBy: 'owner_test',
+      risk: AgentConversationRisk.medium,
+      draft: value,
+      createdAt: DateTime.utc(2026, 8, 17, 6, 31),
+    );
+  }
+
+  AgentApprovalRequest approval({
+    required AgentEmailSendAuthorizationRequest request,
+    String status = AgentApprovalStatus.approved,
+    DateTime? consumedAt,
+    Map<String, dynamic>? scope,
+  }) {
+    return AgentApprovalRequest(
+      approvalId: 'approval_e3',
+      roleId: request.roleId,
+      actionId: request.actionId,
+      module: request.module,
+      reason: 'Approve exact Email send.',
+      risk: request.risk,
+      requestedBy: request.requestedBy,
+      actionScope: scope ?? request.toApprovalActionScope(),
+      status: status,
+      createdAt: DateTime.now().subtract(const Duration(minutes: 1)),
+      expiresAt: DateTime.now().add(const Duration(minutes: 10)),
+      decidedAt: DateTime.now(),
+      consumedAt: consumedAt,
+      decidedBy: 'owner_test',
+      decisionNote: 'Synthetic test state.',
+    );
+  }
+
+  test(
+    'requestApproval sends exact scope to central gateway abstraction',
+    () async {
+      final AgentEmailDraft currentDraft = draft();
+      final AgentEmailSendAuthorizationRequest request = authorization(
+        currentDraft,
+      );
+
+      final FakeAgentEmailApprovalGateway gateway =
+          FakeAgentEmailApprovalGateway(
+            snapshot: approval(
+              request: request,
+              status: AgentApprovalStatus.pending,
+            ),
+          );
+
+      final AgentEmailSendExecutionBoundary boundary =
+          AgentEmailSendExecutionBoundary(approvalGateway: gateway);
+
+      final result = await boundary.requestApproval(
+        authorizationRequest: request,
+        reason: 'Owner review required.',
+      );
+
+      expect(result.approvalRequested, isTrue);
+      expect(gateway.createCount, 1);
+      expect(gateway.lastCreateRoleId, 'email_agent');
+      expect(gateway.lastCreateActionId, AgentActionId.sendEmail);
+      expect(gateway.lastCreateModule, 'email');
+      expect(gateway.lastCreateScope, equals(request.toApprovalActionScope()));
+      expect(result.emailSent, isFalse);
+    },
+  );
+
+  test('pure boundary preflight does not consume approval', () async {
+    final AgentEmailDraft currentDraft = draft();
+    final AgentEmailSendAuthorizationRequest request = authorization(
+      currentDraft,
+    );
+
+    final FakeAgentEmailApprovalGateway gateway = FakeAgentEmailApprovalGateway(
+      snapshot: approval(request: request),
+    );
+
+    final AgentEmailSendExecutionBoundary boundary =
+        AgentEmailSendExecutionBoundary(approvalGateway: gateway);
+
+    final result = await boundary.preflightApprovedRequest(
+      approvalId: 'approval_e3',
+      settings: enabledSettings(),
+      role: emailRole(),
+      authorizationRequest: request,
+      currentDraft: currentDraft,
+    );
+
+    expect(result.readyForConsumption, isTrue);
+    expect(gateway.getCount, 1);
+    expect(gateway.consumeCount, 0);
+    expect(result.emailSent, isFalse);
+  });
+
+  test(
+    'ready approval is consumed exactly once through gateway contract',
+    () async {
+      final AgentEmailDraft currentDraft = draft();
+      final AgentEmailSendAuthorizationRequest request = authorization(
+        currentDraft,
+      );
+
+      final FakeAgentEmailApprovalGateway gateway =
+          FakeAgentEmailApprovalGateway(snapshot: approval(request: request));
+
+      final AgentEmailSendExecutionBoundary boundary =
+          AgentEmailSendExecutionBoundary(approvalGateway: gateway);
+
+      final result = await boundary.consumeApprovedForTransportHandoff(
+        approvalId: 'approval_e3',
+        settings: enabledSettings(),
+        role: emailRole(),
+        authorizationRequest: request,
+        currentDraft: currentDraft,
+      );
+
+      expect(result.approvalConsumed, isTrue);
+      expect(gateway.consumeCount, 1);
+      expect(gateway.lastExpectedRoleId, 'email_agent');
+      expect(gateway.lastExpectedActionId, AgentActionId.sendEmail);
+      expect(gateway.lastExpectedModule, 'email');
+      expect(
+        gateway.lastExpectedScope,
+        equals(request.toApprovalActionScope()),
+      );
+      expect(result.transportPerformed, isFalse);
+      expect(result.providerExecutionPerformed, isFalse);
+      expect(result.emailSent, isFalse);
+    },
+  );
+
+  test('draft mutation blocks before central consume', () async {
+    final AgentEmailDraft original = draft();
+    final AgentEmailSendAuthorizationRequest request = authorization(original);
+
+    final FakeAgentEmailApprovalGateway gateway = FakeAgentEmailApprovalGateway(
+      snapshot: approval(request: request),
+    );
+
+    final AgentEmailSendExecutionBoundary boundary =
+        AgentEmailSendExecutionBoundary(approvalGateway: gateway);
+
+    final result = await boundary.consumeApprovedForTransportHandoff(
+      approvalId: 'approval_e3',
+      settings: enabledSettings(),
+      role: emailRole(),
+      authorizationRequest: request,
+      currentDraft: draft(body: 'Changed after approval.'),
+    );
+
+    expect(result.approvalConsumed, isFalse);
+    expect(gateway.consumeCount, 0);
+    expect(result.emailSent, isFalse);
+  });
+
+  test('runtime denial blocks before central consume', () async {
+    final AgentEmailDraft currentDraft = draft();
+    final AgentEmailSendAuthorizationRequest request = authorization(
+      currentDraft,
+    );
+
+    final FakeAgentEmailApprovalGateway gateway = FakeAgentEmailApprovalGateway(
+      snapshot: approval(request: request),
+    );
+
+    final AgentEmailSendExecutionBoundary boundary =
+        AgentEmailSendExecutionBoundary(approvalGateway: gateway);
+
+    final result = await boundary.consumeApprovedForTransportHandoff(
+      approvalId: 'approval_e3',
+      settings: enabledSettings().copyWith(masterEnabled: false),
+      role: emailRole(),
+      authorizationRequest: request,
+      currentDraft: currentDraft,
+    );
+
+    expect(result.approvalConsumed, isFalse);
+    expect(gateway.consumeCount, 0);
+  });
+
+  test('scope mismatch blocks before central consume', () async {
+    final AgentEmailDraft currentDraft = draft();
+    final AgentEmailSendAuthorizationRequest request = authorization(
+      currentDraft,
+    );
+
+    final Map<String, dynamic> changedScope = Map<String, dynamic>.from(
+      request.toApprovalActionScope(),
+    );
+    changedScope['draftId'] = 'different';
+
+    final FakeAgentEmailApprovalGateway gateway = FakeAgentEmailApprovalGateway(
+      snapshot: approval(request: request, scope: changedScope),
+    );
+
+    final AgentEmailSendExecutionBoundary boundary =
+        AgentEmailSendExecutionBoundary(approvalGateway: gateway);
+
+    final result = await boundary.consumeApprovedForTransportHandoff(
+      approvalId: 'approval_e3',
+      settings: enabledSettings(),
+      role: emailRole(),
+      authorizationRequest: request,
+      currentDraft: currentDraft,
+    );
+
+    expect(result.approvalConsumed, isFalse);
+    expect(gateway.consumeCount, 0);
+  });
+
+  test(
+    'boundary exposes approval integration but zero transport authority',
+    () {
+      final FakeAgentEmailApprovalGateway gateway =
+          FakeAgentEmailApprovalGateway(snapshot: null);
+
+      final AgentEmailSendExecutionBoundary boundary =
+          AgentEmailSendExecutionBoundary(approvalGateway: gateway);
+
+      expect(boundary.centralApprovalCreateIntegrated, isTrue);
+      expect(boundary.centralApprovalReadIntegrated, isTrue);
+      expect(boundary.centralApprovalConsumeIntegrated, isTrue);
+
+      expect(boundary.transportExecutionAllowed, isFalse);
+      expect(boundary.providerExecutionAllowed, isFalse);
+      expect(boundary.smtpExecutionAllowed, isFalse);
+      expect(boundary.mailboxReadAllowed, isFalse);
+      expect(boundary.mailboxWriteAllowed, isFalse);
+      expect(boundary.businessDataWriteAllowed, isFalse);
+      expect(boundary.deploymentAllowed, isFalse);
+    },
+  );
+}
+
+class FakeAgentEmailApprovalGateway implements AgentEmailApprovalGateway {
+  FakeAgentEmailApprovalGateway({required this.snapshot});
+
+  AgentApprovalRequest? snapshot;
+
+  int createCount = 0;
+  int getCount = 0;
+  int consumeCount = 0;
+
+  String? lastCreateRoleId;
+  String? lastCreateActionId;
+  String? lastCreateModule;
+  Map<String, dynamic>? lastCreateScope;
+
+  String? lastExpectedRoleId;
+  String? lastExpectedActionId;
+  String? lastExpectedModule;
+  Map<String, dynamic>? lastExpectedScope;
+
+  @override
+  Future<AgentApprovalRequest> createRequest({
+    required String roleId,
+    required String actionId,
+    required String module,
+    required String reason,
+    required String risk,
+    required String requestedBy,
+    required Map<String, dynamic> actionScope,
+    Duration validity = const Duration(minutes: 15),
+  }) async {
+    createCount++;
+    lastCreateRoleId = roleId;
+    lastCreateActionId = actionId;
+    lastCreateModule = module;
+    lastCreateScope = Map<String, dynamic>.from(actionScope);
+
+    final AgentApprovalRequest? current = snapshot;
+    if (current == null) {
+      throw StateError('Synthetic gateway has no approval request.');
+    }
+
+    return current;
+  }
+
+  @override
+  Future<AgentApprovalRequest?> getRequest(String approvalId) async {
+    getCount++;
+    return snapshot;
+  }
+
+  @override
+  Future<AgentApprovalRequest> consumeApprovedRequest({
+    required String approvalId,
+    required String expectedRoleId,
+    required String expectedActionId,
+    required String expectedModule,
+    required Map<String, dynamic> expectedActionScope,
+  }) async {
+    consumeCount++;
+    lastExpectedRoleId = expectedRoleId;
+    lastExpectedActionId = expectedActionId;
+    lastExpectedModule = expectedModule;
+    lastExpectedScope = Map<String, dynamic>.from(expectedActionScope);
+
+    final AgentApprovalRequest? current = snapshot;
+    if (current == null) {
+      throw StateError('Synthetic gateway approval missing.');
+    }
+
+    if (!current.canBeConsumed) {
+      throw StateError('Synthetic gateway approval cannot be consumed.');
+    }
+
+    final AgentApprovalRequest consumed = current.copyWith(
+      status: AgentApprovalStatus.consumed,
+      consumedAt: DateTime.now(),
+    );
+
+    snapshot = consumed;
+    return consumed;
+  }
+}

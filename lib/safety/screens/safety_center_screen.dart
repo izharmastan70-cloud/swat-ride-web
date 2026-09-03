@@ -1,0 +1,1349 @@
+// SWAT RIDE - UNIVERSAL YANGO-STYLE SAFETY CENTER
+//
+// Shared Safety Center for:
+// - Normal Ride customer and driver
+// - Student Ride parent, guardian and driver
+// - Food customer, delivery rider and restaurant partner
+// - Cargo / Parcel customer and driver
+// - Hotel guest, owner and staff
+// - Tour customer, guide and tourism driver
+// - Admin and safety agent
+//
+// Important:
+// This screen is shared by all modules.
+// Every module passes its own SafetyContext.
+//
+// Current phase:
+// - Yango-style Safety Center UI
+// - Dynamic service-specific emergency categories
+// - Firestore SOS incident creation
+// - Safe testing mode support
+//
+// Real phone calling, SMS, map and notifications will be connected later.
+
+import 'package:flutter/material.dart';
+
+import '../config/safety_config.dart';
+import '../models/safety_models.dart';
+import '../services/universal_safety_service.dart';
+import '../../help/widgets/contextual_video_guide_button.dart';
+import '../widgets/safety_widgets.dart';
+
+import 'active_emergency_screen.dart';
+import 'safety_report_screen.dart';
+import 'trusted_contacts_screen.dart';
+
+class SafetyCenterScreen extends StatefulWidget {
+  const SafetyCenterScreen({
+    super.key,
+    required this.contextData,
+    this.safetyService,
+    this.initialConfig,
+    this.onIncidentCreated,
+    this.onShareLiveService,
+    this.onTrustedContacts,
+    this.onCallEmergencyService,
+    this.onContactSafetySupport,
+    this.onReportSafetyIssue,
+  });
+
+  /// Ride, Food, Cargo, Student, Hotel or Tour context.
+  final SafetyContext contextData;
+
+  /// Optional injected service for testing or dependency control.
+  final UniversalSafetyService? safetyService;
+
+  /// Optional already-loaded configuration.
+  final UniversalSafetyConfig? initialConfig;
+
+  /// Called after a new SOS incident is successfully created.
+  final ValueChanged<String>? onIncidentCreated;
+
+  /// Optional actions connected later by individual modules.
+  final VoidCallback? onShareLiveService;
+  final VoidCallback? onTrustedContacts;
+  final VoidCallback? onCallEmergencyService;
+  final VoidCallback? onContactSafetySupport;
+  final VoidCallback? onReportSafetyIssue;
+
+  @override
+  State<SafetyCenterScreen> createState() => _SafetyCenterScreenState();
+}
+
+class _SafetyCenterScreenState extends State<SafetyCenterScreen> {
+  late final UniversalSafetyService _safetyService;
+
+  UniversalSafetyConfig? _config;
+
+  bool _isLoadingConfig = true;
+  bool _isCreatingIncident = false;
+
+  String _configError = '';
+
+  @override
+  void initState() {
+    super.initState();
+
+    _safetyService = widget.safetyService ?? UniversalSafetyService();
+
+    if (widget.initialConfig != null) {
+      _config = widget.initialConfig;
+      _isLoadingConfig = false;
+    } else {
+      _loadSafetyConfig();
+    }
+  }
+
+  Future<void> _loadSafetyConfig() async {
+    try {
+      final UniversalSafetyConfig config = await _safetyService
+          .getSafetyConfig();
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        _config = config;
+        _isLoadingConfig = false;
+        _configError = '';
+      });
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+
+      // Use safe local defaults when Firestore configuration
+      // is unavailable.
+      setState(() {
+        _config = defaultUniversalSafetyConfig();
+        _isLoadingConfig = false;
+        _configError =
+            'Online safety settings could not be loaded. '
+            'Safe default settings are being used.';
+      });
+    }
+  }
+
+  UniversalSafetyConfig get _resolvedConfig {
+    return _config ?? defaultUniversalSafetyConfig();
+  }
+
+  SafetyServiceSettings get _serviceSettings {
+    return _resolvedConfig.settingsFor(widget.contextData.serviceType);
+  }
+
+  bool get _isSafetyCenterEnabled {
+    return _resolvedConfig.isServiceEnabled(widget.contextData.serviceType);
+  }
+
+  bool get _canCreateSos {
+    final SafetyUserRole role = widget.contextData.initiatedByRole;
+
+    if (_isOwnerOrPartnerRole(role)) {
+      return _resolvedConfig.canUseOwnerOrPartnerSos(
+        widget.contextData.serviceType,
+      );
+    }
+
+    if (_isProviderRole(role)) {
+      return _resolvedConfig.canUseProviderSos(widget.contextData.serviceType);
+    }
+
+    return _resolvedConfig.canUseCustomerSos(widget.contextData.serviceType);
+  }
+
+  bool _isProviderRole(SafetyUserRole role) {
+    switch (role) {
+      case SafetyUserRole.normalDriver:
+      case SafetyUserRole.foodDeliveryRider:
+      case SafetyUserRole.cargoDriver:
+      case SafetyUserRole.parcelDriver:
+      case SafetyUserRole.studentDriver:
+      case SafetyUserRole.tourismDriver:
+      case SafetyUserRole.tourGuide:
+        return true;
+
+      default:
+        return false;
+    }
+  }
+
+  bool _isOwnerOrPartnerRole(SafetyUserRole role) {
+    switch (role) {
+      case SafetyUserRole.restaurantOwner:
+      case SafetyUserRole.restaurantStaff:
+      case SafetyUserRole.hotelOwner:
+      case SafetyUserRole.hotelStaff:
+      case SafetyUserRole.schoolCoordinator:
+      case SafetyUserRole.schoolStaff:
+        return true;
+
+      default:
+        return false;
+    }
+  }
+
+  Future<void> _startEmergencyFlow() async {
+    if (_isCreatingIncident || !_canCreateSos) {
+      return;
+    }
+
+    final bool immediateDangerConfirmed =
+        await _showImmediateDangerConfirmation();
+
+    if (!immediateDangerConfirmed || !mounted) {
+      return;
+    }
+
+    final SafetyEmergencyCategory? category = await _selectEmergencyCategory();
+
+    if (category == null || !mounted) {
+      return;
+    }
+
+    final String? description = await _requestEmergencyDescription(category);
+
+    if (description == null || !mounted) {
+      return;
+    }
+
+    final bool countdownCompleted = await _runEmergencyCountdown();
+
+    if (!countdownCompleted || !mounted) {
+      return;
+    }
+
+    await _createIncident(category: category, description: description);
+  }
+
+  Future<bool> _showImmediateDangerConfirmation() async {
+    final bool? result = await showModalBottomSheet<bool>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      backgroundColor: Colors.transparent,
+      builder: (BuildContext context) {
+        final ThemeData theme = Theme.of(context);
+
+        return Container(
+          padding: const EdgeInsets.fromLTRB(20, 12, 20, 24),
+          decoration: BoxDecoration(
+            color: theme.colorScheme.surface,
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              _buildSheetHandle(theme),
+              const SizedBox(height: 18),
+              Container(
+                width: 68,
+                height: 68,
+                decoration: BoxDecoration(
+                  color: theme.colorScheme.error.withValues(alpha: 0.10),
+                  shape: BoxShape.circle,
+                ),
+                alignment: Alignment.center,
+                child: Icon(
+                  Icons.sos,
+                  size: 36,
+                  color: theme.colorScheme.error,
+                ),
+              ),
+              const SizedBox(height: 17),
+              Text(
+                'Are you in immediate danger?',
+                textAlign: TextAlign.center,
+                style: theme.textTheme.headlineSmall?.copyWith(
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'Emergency SOS should only be used when you, '
+                'another person, a child, guest, passenger or '
+                'service provider needs urgent help.',
+                textAlign: TextAlign.center,
+                style: theme.textTheme.bodyMedium?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                  height: 1.4,
+                ),
+              ),
+              const SizedBox(height: 22),
+              EmergencySosButton(
+                label: 'Yes â€” Start Emergency SOS',
+                subtitle: 'Your service details will be recorded',
+                onPressed: () {
+                  Navigator.of(context).pop(true);
+                },
+              ),
+              const SizedBox(height: 10),
+              SizedBox(
+                width: double.infinity,
+                child: OutlinedButton(
+                  onPressed: () {
+                    Navigator.of(context).pop(false);
+
+                    WidgetsBinding.instance.addPostFrameCallback((_) {
+                      if (mounted) {
+                        _openSafetyReport();
+                      }
+                    });
+                  },
+                  style: OutlinedButton.styleFrom(
+                    minimumSize: const Size.fromHeight(52),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(16),
+                    ),
+                  ),
+                  child: const Text('No â€” Report a Safety Issue'),
+                ),
+              ),
+              const SizedBox(height: 5),
+              TextButton(
+                onPressed: () {
+                  Navigator.of(context).pop(false);
+                },
+                child: const Text('Cancel'),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+
+    return result ?? false;
+  }
+
+  Future<SafetyEmergencyCategory?> _selectEmergencyCategory() async {
+    final List<SafetyEmergencyCategory> categories =
+        _serviceSettings.availableCategories.isEmpty
+        ? defaultSafetyServiceSettings(
+            widget.contextData.serviceType,
+          ).availableCategories
+        : _serviceSettings.availableCategories;
+
+    SafetyEmergencyCategory? selectedCategory;
+
+    return showModalBottomSheet<SafetyEmergencyCategory>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      backgroundColor: Colors.transparent,
+      builder: (BuildContext bottomSheetContext) {
+        final ThemeData theme = Theme.of(bottomSheetContext);
+
+        return StatefulBuilder(
+          builder: (BuildContext context, StateSetter setSheetState) {
+            return Container(
+              constraints: BoxConstraints(
+                maxHeight: MediaQuery.sizeOf(context).height * 0.84,
+              ),
+              padding: const EdgeInsets.fromLTRB(18, 10, 18, 20),
+              decoration: BoxDecoration(
+                color: theme.colorScheme.surface,
+                borderRadius: const BorderRadius.vertical(
+                  top: Radius.circular(28),
+                ),
+              ),
+              child: Column(
+                children: <Widget>[
+                  _buildSheetHandle(theme),
+                  const SizedBox(height: 14),
+                  const SafetySectionTitle(
+                    title: 'What is the emergency?',
+                    subtitle:
+                        'Select the option that best describes '
+                        'the current situation.',
+                  ),
+                  const SizedBox(height: 14),
+                  Expanded(
+                    child: ListView.separated(
+                      itemCount: categories.length,
+                      separatorBuilder: (BuildContext context, int index) {
+                        return const SizedBox(height: 9);
+                      },
+                      itemBuilder: (BuildContext context, int index) {
+                        final SafetyEmergencyCategory category =
+                            categories[index];
+
+                        return SafetyEmergencyCategoryTile(
+                          category: category,
+                          selected: selectedCategory == category,
+                          onTap: () {
+                            setSheetState(() {
+                              selectedCategory = category;
+                            });
+                          },
+                        );
+                      },
+                    ),
+                  ),
+                  const SizedBox(height: 14),
+                  SizedBox(
+                    width: double.infinity,
+                    child: FilledButton(
+                      onPressed: selectedCategory == null
+                          ? null
+                          : () {
+                              Navigator.of(context).pop(selectedCategory);
+                            },
+                      style: FilledButton.styleFrom(
+                        minimumSize: const Size.fromHeight(54),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(17),
+                        ),
+                      ),
+                      child: const Text('Continue'),
+                    ),
+                  ),
+                ],
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Future<String?> _requestEmergencyDescription(
+    SafetyEmergencyCategory category,
+  ) async {
+    final TextEditingController controller = TextEditingController();
+
+    try {
+      return await showModalBottomSheet<String>(
+        context: context,
+        isScrollControlled: true,
+        useSafeArea: true,
+        backgroundColor: Colors.transparent,
+        builder: (BuildContext context) {
+          final ThemeData theme = Theme.of(context);
+          final EdgeInsets keyboardPadding = MediaQuery.viewInsetsOf(context);
+
+          return Padding(
+            padding: keyboardPadding,
+            child: Container(
+              padding: const EdgeInsets.fromLTRB(20, 10, 20, 22),
+              decoration: BoxDecoration(
+                color: theme.colorScheme.surface,
+                borderRadius: const BorderRadius.vertical(
+                  top: Radius.circular(28),
+                ),
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: <Widget>[
+                  _buildSheetHandle(theme),
+                  const SizedBox(height: 15),
+                  Row(
+                    children: <Widget>[
+                      Container(
+                        width: 46,
+                        height: 46,
+                        decoration: BoxDecoration(
+                          color: emergencyCategoryColor(
+                            context,
+                            category,
+                          ).withValues(alpha: 0.10),
+                          borderRadius: BorderRadius.circular(14),
+                        ),
+                        alignment: Alignment.center,
+                        child: Icon(
+                          emergencyCategoryIcon(category),
+                          color: emergencyCategoryColor(context, category),
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Text(
+                          emergencyCategoryLabel(category),
+                          style: theme.textTheme.titleMedium?.copyWith(
+                            fontWeight: FontWeight.w800,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 18),
+                  TextField(
+                    controller: controller,
+                    minLines: 3,
+                    maxLines: 5,
+                    maxLength: 500,
+                    autofocus: false,
+                    textCapitalization: TextCapitalization.sentences,
+                    decoration: InputDecoration(
+                      labelText: 'Emergency details (optional)',
+                      hintText: 'Briefly explain what is happening...',
+                      alignLabelWithHint: true,
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(16),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  SizedBox(
+                    width: double.infinity,
+                    child: FilledButton(
+                      onPressed: () {
+                        Navigator.of(context).pop(controller.text.trim());
+                      },
+                      style: FilledButton.styleFrom(
+                        minimumSize: const Size.fromHeight(53),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(16),
+                        ),
+                      ),
+                      child: const Text('Continue to SOS'),
+                    ),
+                  ),
+                  TextButton(
+                    onPressed: () {
+                      Navigator.of(context).pop();
+                    },
+                    child: const Text('Cancel'),
+                  ),
+                ],
+              ),
+            ),
+          );
+        },
+      );
+    } finally {
+      controller.dispose();
+    }
+  }
+
+  Future<bool> _runEmergencyCountdown() async {
+    final int configuredSeconds =
+        _resolvedConfig.escalation.sosCountdownSeconds;
+
+    final int countdownSeconds = configuredSeconds.clamp(1, 10);
+
+    final bool? completed = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (BuildContext dialogContext) {
+        return _EmergencyCountdownDialog(seconds: countdownSeconds);
+      },
+    );
+
+    return completed ?? false;
+  }
+
+  Future<void> _createIncident({
+    required SafetyEmergencyCategory category,
+    required String description,
+  }) async {
+    setState(() {
+      _isCreatingIncident = true;
+    });
+
+    try {
+      final SafetySeverity severity = _severityForCategory(category);
+
+      final String incidentId = await _safetyService.createIncident(
+        context: widget.contextData,
+        category: category,
+        severity: severity,
+        description: description,
+        currentLocation: widget.contextData.currentLocation,
+        lastKnownLocation: widget.contextData.currentLocation,
+        locationStatus: widget.contextData.currentLocation == null
+            ? SafetyLocationStatus.unavailable
+            : SafetyLocationStatus.available,
+        networkStatus: SafetyNetworkStatus.unknown,
+        isTestIncident: _resolvedConfig.features.testModeEnabled,
+        metadata: <String, dynamic>{
+          'createdFrom': widget.contextData.sourcePage.name,
+          'safetyCenterVersion': 1,
+          'testMode': _resolvedConfig.features.testModeEnabled,
+        },
+      );
+
+      if (!mounted) {
+        return;
+      }
+
+      widget.onIncidentCreated?.call(incidentId);
+
+      await _showIncidentCreatedDialog(
+        incidentId: incidentId,
+        category: category,
+      );
+
+      if (!mounted) {
+        return;
+      }
+
+      await Navigator.of(context).push(
+        MaterialPageRoute<void>(
+          builder: (BuildContext context) {
+            return ActiveEmergencyScreen(
+              incidentId: incidentId,
+              currentUserId: widget.contextData.initiatedByUserId,
+              currentUserRole: widget.contextData.initiatedByRole,
+              safetyService: _safetyService,
+              onCallEmergencyService: widget.onCallEmergencyService,
+              onContactSafetySupport: widget.onContactSafetySupport,
+              onOpenLiveLocation: (SafetyIncidentModel incident) {
+                if (widget.onShareLiveService != null) {
+                  widget.onShareLiveService!.call();
+                }
+              },
+            );
+          },
+        ),
+      );
+    } on UniversalSafetyServiceException catch (error) {
+      if (!mounted) {
+        return;
+      }
+
+      _showMessage(error.message, isError: true);
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+
+      _showMessage(
+        'Unable to create the emergency alert. '
+        'Please try again or call emergency services directly.',
+        isError: true,
+      );
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isCreatingIncident = false;
+        });
+      }
+    }
+  }
+
+  SafetySeverity _severityForCategory(SafetyEmergencyCategory category) {
+    switch (category) {
+      case SafetyEmergencyCategory.immediateDanger:
+      case SafetyEmergencyCategory.suspectedKidnapping:
+      case SafetyEmergencyCategory.childMissing:
+      case SafetyEmergencyCategory.childLeftInVehicle:
+      case SafetyEmergencyCategory.cargoVehicleHijacking:
+      case SafetyEmergencyCategory.fireOrSmoke:
+      case SafetyEmergencyCategory.evacuationRequired:
+      case SafetyEmergencyCategory.touristMissing:
+      case SafetyEmergencyCategory.groupEmergency:
+        return SafetySeverity.critical;
+
+      case SafetyEmergencyCategory.medicalEmergency:
+      case SafetyEmergencyCategory.childMedicalEmergency:
+      case SafetyEmergencyCategory.accident:
+      case SafetyEmergencyCategory.physicalThreat:
+      case SafetyEmergencyCategory.robbery:
+      case SafetyEmergencyCategory.passengerThreat:
+      case SafetyEmergencyCategory.unauthorizedGuardian:
+      case SafetyEmergencyCategory.unauthorizedHandover:
+      case SafetyEmergencyCategory.deliveryRiderAccident:
+      case SafetyEmergencyCategory.cargoTheftAttempt:
+      case SafetyEmergencyCategory.violentGuest:
+      case SafetyEmergencyCategory.mountainEmergency:
+        return SafetySeverity.high;
+
+      case SafetyEmergencyCategory.harassment:
+      case SafetyEmergencyCategory.theft:
+      case SafetyEmergencyCategory.dangerousDriving:
+      case SafetyEmergencyCategory.routeDeviation:
+      case SafetyEmergencyCategory.unsafeLocation:
+      case SafetyEmergencyCategory.unsafeDeliveryLocation:
+      case SafetyEmergencyCategory.customerThreatToRider:
+      case SafetyEmergencyCategory.riderThreatToCustomer:
+      case SafetyEmergencyCategory.unsafeCashCollection:
+      case SafetyEmergencyCategory.receiverLocationUnsafe:
+      case SafetyEmergencyCategory.unauthorizedRoomAccess:
+      case SafetyEmergencyCategory.hotelStaffThreat:
+      case SafetyEmergencyCategory.unsafeRoom:
+      case SafetyEmergencyCategory.groupSeparated:
+      case SafetyEmergencyCategory.unsafeWeather:
+      case SafetyEmergencyCategory.unsafeRoad:
+        return SafetySeverity.medium;
+
+      default:
+        return SafetySeverity.low;
+    }
+  }
+
+  Future<void> _showIncidentCreatedDialog({
+    required String incidentId,
+    required SafetyEmergencyCategory category,
+  }) async {
+    final bool testMode = _resolvedConfig.features.testModeEnabled;
+
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (BuildContext context) {
+        final ThemeData theme = Theme.of(context);
+
+        return AlertDialog(
+          icon: Container(
+            width: 66,
+            height: 66,
+            decoration: BoxDecoration(
+              color: theme.colorScheme.error.withValues(alpha: 0.10),
+              shape: BoxShape.circle,
+            ),
+            alignment: Alignment.center,
+            child: Icon(
+              Icons.emergency_share_outlined,
+              size: 35,
+              color: theme.colorScheme.error,
+            ),
+          ),
+          title: Text(
+            testMode ? 'Test SOS recorded' : 'Emergency alert active',
+            textAlign: TextAlign.center,
+          ),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              Text(
+                testMode
+                    ? 'This incident was safely recorded in '
+                          'testing mode. No real emergency call '
+                          'was placed automatically.'
+                    : 'Your emergency details have been '
+                          'recorded. Keep your phone available '
+                          'for the safety team.',
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 14),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: theme.colorScheme.surfaceContainerHighest,
+                  borderRadius: BorderRadius.circular(13),
+                ),
+                child: Column(
+                  children: <Widget>[
+                    _buildDialogInfoRow(
+                      context,
+                      'Emergency',
+                      emergencyCategoryLabel(category),
+                    ),
+                    const SizedBox(height: 7),
+                    _buildDialogInfoRow(context, 'Incident ID', incidentId),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          actionsAlignment: MainAxisAlignment.center,
+          actions: <Widget>[
+            FilledButton(
+              onPressed: () {
+                Navigator.of(context).pop();
+              },
+              child: const Text('Continue'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  Widget _buildDialogInfoRow(BuildContext context, String label, String value) {
+    final ThemeData theme = Theme.of(context);
+
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: <Widget>[
+        Text(
+          '$label:',
+          style: theme.textTheme.bodySmall?.copyWith(
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+        const SizedBox(width: 7),
+        Expanded(
+          child: Text(
+            value,
+            textAlign: TextAlign.end,
+            style: theme.textTheme.bodySmall,
+          ),
+        ),
+      ],
+    );
+  }
+
+  void _openShareLiveService() {
+    if (!_resolvedConfig.features.tripSharingEnabled) {
+      _showUnavailableMessage('Live sharing is currently disabled.');
+      return;
+    }
+
+    if (widget.onShareLiveService != null) {
+      widget.onShareLiveService!.call();
+      return;
+    }
+
+    _showUnavailableMessage(
+      'Live sharing will be connected during '
+      'module integration.',
+    );
+  }
+
+  void _openTrustedContacts() {
+    if (!_resolvedConfig.features.trustedContactsEnabled) {
+      _showUnavailableMessage('Trusted contacts are currently disabled.');
+      return;
+    }
+
+    // Individual modules can override the default navigation.
+    if (widget.onTrustedContacts != null) {
+      widget.onTrustedContacts!.call();
+      return;
+    }
+
+    final String userId = widget.contextData.initiatedByUserId.trim();
+
+    if (userId.isEmpty) {
+      _showMessage(
+        'Unable to open trusted contacts because '
+        'the current user could not be identified.',
+        isError: true,
+      );
+      return;
+    }
+
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (BuildContext context) {
+          return TrustedContactsScreen(
+            userId: userId,
+            maximumContacts: _resolvedConfig.escalation.maximumTrustedContacts,
+          );
+        },
+      ),
+    );
+  }
+
+  void _callEmergencyService() {
+    if (!_resolvedConfig.features.emergencyCallEnabled) {
+      _showUnavailableMessage('Emergency calling is currently disabled.');
+      return;
+    }
+
+    if (_resolvedConfig.features.testModeEnabled) {
+      _showUnavailableMessage(
+        'Emergency calling is blocked while '
+        'Safety Testing Mode is ON.',
+      );
+      return;
+    }
+
+    if (widget.onCallEmergencyService != null) {
+      widget.onCallEmergencyService!.call();
+      return;
+    }
+
+    _showUnavailableMessage(
+      'Verified emergency phone numbers have not '
+      'been connected yet.',
+    );
+  }
+
+  void _contactSafetySupport() {
+    if (!_resolvedConfig.features.safetySupportEnabled) {
+      _showUnavailableMessage('Safety support is currently disabled.');
+      return;
+    }
+
+    if (widget.onContactSafetySupport != null) {
+      widget.onContactSafetySupport!.call();
+      return;
+    }
+
+    _showUnavailableMessage(
+      'SWAT RIDE Safety Support will be connected '
+      'during the admin integration phase.',
+    );
+  }
+
+  void _openSafetyReport() {
+    if (!_resolvedConfig.features.safetyReportsEnabled) {
+      _showUnavailableMessage('Safety reports are currently disabled.');
+      return;
+    }
+
+    // Individual modules can override the default navigation.
+    if (widget.onReportSafetyIssue != null) {
+      widget.onReportSafetyIssue!.call();
+      return;
+    }
+
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (BuildContext context) {
+          return SafetyReportScreen(
+            contextData: widget.contextData,
+            safetyService: _safetyService,
+            onOpenEmergencySos: () {
+              _startEmergencyFlow();
+            },
+          );
+        },
+      ),
+    );
+  }
+
+  void _showUnavailableMessage(String message) {
+    _showMessage(message);
+  }
+
+  void _showMessage(String message, {bool isError = false}) {
+    final ThemeData theme = Theme.of(context);
+
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Text(message),
+          behavior: SnackBarBehavior.floating,
+          backgroundColor: isError ? theme.colorScheme.error : null,
+        ),
+      );
+  }
+
+  Widget _buildSheetHandle(ThemeData theme) {
+    return Container(
+      width: 44,
+      height: 5,
+      decoration: BoxDecoration(
+        color: theme.colorScheme.outlineVariant,
+        borderRadius: BorderRadius.circular(99),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final ThemeData theme = Theme.of(context);
+
+    if (_isLoadingConfig) {
+      return Scaffold(
+        appBar: AppBar(title: const Text('Safety Center')),
+        body: const Center(child: CircularProgressIndicator()),
+      );
+    }
+
+    if (!_isSafetyCenterEnabled) {
+      return Scaffold(
+        appBar: AppBar(title: const Text('Safety Center')),
+        body: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: <Widget>[
+                Icon(
+                  Icons.shield_outlined,
+                  size: 62,
+                  color: theme.disabledColor,
+                ),
+                const SizedBox(height: 16),
+                Text(
+                  'Safety Center unavailable',
+                  style: theme.textTheme.titleLarge?.copyWith(
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  'Safety Center is currently disabled '
+                  'for this service.',
+                  textAlign: TextAlign.center,
+                  style: theme.textTheme.bodyMedium?.copyWith(
+                    color: theme.colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
+    return Scaffold(
+      backgroundColor: theme.colorScheme.surface,
+      appBar: AppBar(title: const Text('Safety Center'), centerTitle: true),
+      body: SafeArea(
+        child: ListView(
+          padding: const EdgeInsets.fromLTRB(16, 10, 16, 26),
+          children: <Widget>[
+            _buildSafetyHeader(context),
+            const SizedBox(height: 16),
+            SafetyReferenceCard(contextData: widget.contextData),
+            if (_configError.isNotEmpty) ...<Widget>[
+              const SizedBox(height: 12),
+              SafetyStatusBanner(
+                status: SafetyIncidentStatus.alertSent,
+                message: _configError,
+                compact: true,
+              ),
+            ],
+            const SizedBox(height: 18),
+            EmergencySosButton(
+              onPressed: _canCreateSos ? _startEmergencyFlow : null,
+              enabled: _canCreateSos && !_isCreatingIncident,
+              isLoading: _isCreatingIncident,
+              label: 'Emergency SOS',
+              subtitle: _canCreateSos
+                  ? 'Use only when immediate help is needed'
+                  : 'SOS is disabled for this role or service',
+            ),
+            const SizedBox(height: 22),
+            ContextualVideoGuideButton(
+              module: 'safety',
+              feature: 'safety_center',
+              intents: const <String>[
+                'safety_help',
+                'sos_help',
+                'emergency_help',
+                'trusted_contacts',
+                'safety_report',
+              ],
+              label: 'Need Help? Watch Safety Guide',
+            ),
+            const SizedBox(height: 18),
+            const SafetySectionTitle(
+              title: 'Safety tools',
+              subtitle:
+                  'Get help, share your service or report '
+                  'a concern.',
+            ),
+            const SizedBox(height: 11),
+            SafetyActionTile(
+              title: _sharingActionTitle(),
+              subtitle: _sharingActionSubtitle(),
+              icon: Icons.share_location_outlined,
+              enabled: _resolvedConfig.features.tripSharingEnabled,
+              onTap: _openShareLiveService,
+            ),
+            const SizedBox(height: 9),
+            SafetyActionTile(
+              title: 'Trusted contacts',
+              subtitle: 'Alert family or people you trust',
+              icon: Icons.people_alt_outlined,
+              enabled: _resolvedConfig.features.trustedContactsEnabled,
+              onTap: _openTrustedContacts,
+            ),
+            const SizedBox(height: 9),
+            SafetyActionTile(
+              title: 'Call emergency service',
+              subtitle: _resolvedConfig.features.testModeEnabled
+                  ? 'Disabled while testing mode is ON'
+                  : 'Call verified local emergency help',
+              icon: Icons.local_police_outlined,
+              enabled:
+                  _resolvedConfig.features.emergencyCallEnabled &&
+                  !_resolvedConfig.features.testModeEnabled,
+              isDestructive: true,
+              onTap: _callEmergencyService,
+            ),
+            const SizedBox(height: 9),
+            SafetyActionTile(
+              title: 'Contact SWAT RIDE Safety',
+              subtitle: 'Get help from the safety support team',
+              icon: Icons.support_agent_outlined,
+              enabled: _resolvedConfig.features.safetySupportEnabled,
+              onTap: _contactSafetySupport,
+            ),
+            const SizedBox(height: 9),
+            SafetyActionTile(
+              title: 'Report a safety issue',
+              subtitle:
+                  'For concerns that are not an '
+                  'immediate emergency',
+              icon: Icons.report_problem_outlined,
+              enabled: _resolvedConfig.features.safetyReportsEnabled,
+              onTap: _openSafetyReport,
+            ),
+            const SizedBox(height: 21),
+            const SafetySectionTitle(title: 'System status'),
+            const SizedBox(height: 10),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: <Widget>[
+                SafetySystemStatusChip(
+                  label: 'Location',
+                  isAvailable: widget.contextData.currentLocation != null,
+                ),
+                SafetySystemStatusChip(
+                  label: 'SOS',
+                  isAvailable: _canCreateSos,
+                ),
+                SafetySystemStatusChip(
+                  label: 'Testing',
+                  isAvailable: _resolvedConfig.features.testModeEnabled,
+                  availableText: 'ON',
+                  unavailableText: 'OFF',
+                  availableIcon: Icons.science_outlined,
+                  unavailableIcon: Icons.verified_outlined,
+                ),
+              ],
+            ),
+            const SizedBox(height: 18),
+            _buildSafetyNotice(context),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSafetyHeader(BuildContext context) {
+    final ThemeData theme = Theme.of(context);
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          colors: <Color>[
+            theme.colorScheme.primary.withValues(alpha: 0.14),
+            theme.colorScheme.primary.withValues(alpha: 0.04),
+          ],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        borderRadius: BorderRadius.circular(22),
+      ),
+      child: Row(
+        children: <Widget>[
+          Container(
+            width: 58,
+            height: 58,
+            decoration: BoxDecoration(
+              color: theme.colorScheme.surface,
+              borderRadius: BorderRadius.circular(18),
+            ),
+            alignment: Alignment.center,
+            child: Icon(
+              Icons.shield_outlined,
+              size: 31,
+              color: theme.colorScheme.primary,
+            ),
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                Text(
+                  'Your safety matters',
+                  style: theme.textTheme.titleLarge?.copyWith(
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  'Emergency and safety tools for '
+                  '${safetyServiceLabel(widget.contextData.serviceType)}.',
+                  style: theme.textTheme.bodyMedium?.copyWith(
+                    color: theme.colorScheme.onSurfaceVariant,
+                    height: 1.35,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSafetyNotice(BuildContext context) {
+    final ThemeData theme = Theme.of(context);
+
+    return Container(
+      padding: const EdgeInsets.all(15),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surfaceContainerHighest.withValues(
+          alpha: 0.45,
+        ),
+        borderRadius: BorderRadius.circular(17),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Icon(
+            Icons.info_outline,
+            size: 21,
+            color: theme.colorScheme.onSurfaceVariant,
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              'Only use Emergency SOS for genuine danger. '
+              'Booking, driver, vehicle, order, hotel or tour '
+              'details may be recorded as part of the safety '
+              'incident.',
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+                height: 1.4,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  String _sharingActionTitle() {
+    switch (widget.contextData.serviceType) {
+      case SafetyServiceType.normalRide:
+      case SafetyServiceType.driver:
+      case SafetyServiceType.studentRide:
+      case SafetyServiceType.schoolTransport:
+        return 'Share live trip';
+
+      case SafetyServiceType.foodDelivery:
+      case SafetyServiceType.restaurantPartner:
+        return 'Share live delivery';
+
+      case SafetyServiceType.cargoDelivery:
+      case SafetyServiceType.parcelDelivery:
+        return 'Share live shipment';
+
+      case SafetyServiceType.hotelBooking:
+      case SafetyServiceType.hotelStay:
+        return 'Share hotel details';
+
+      case SafetyServiceType.tourBooking:
+      case SafetyServiceType.activeTour:
+      case SafetyServiceType.tourismDriver:
+      case SafetyServiceType.tourGuide:
+        return 'Share live tour';
+
+      case SafetyServiceType.general:
+        return 'Share current location';
+    }
+  }
+
+  String _sharingActionSubtitle() {
+    switch (widget.contextData.serviceType) {
+      case SafetyServiceType.hotelBooking:
+      case SafetyServiceType.hotelStay:
+        return 'Share booking and hotel information';
+
+      case SafetyServiceType.tourBooking:
+      case SafetyServiceType.activeTour:
+      case SafetyServiceType.tourismDriver:
+      case SafetyServiceType.tourGuide:
+        return 'Let trusted people follow the tour';
+
+      default:
+        return 'Let trusted people follow your progress';
+    }
+  }
+}
+
+class _EmergencyCountdownDialog extends StatefulWidget {
+  const _EmergencyCountdownDialog({required this.seconds});
+
+  final int seconds;
+
+  @override
+  State<_EmergencyCountdownDialog> createState() =>
+      _EmergencyCountdownDialogState();
+}
+
+class _EmergencyCountdownDialogState extends State<_EmergencyCountdownDialog> {
+  late int _remainingSeconds;
+
+  bool _cancelled = false;
+
+  @override
+  void initState() {
+    super.initState();
+
+    _remainingSeconds = widget.seconds;
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _startCountdown();
+    });
+  }
+
+  Future<void> _startCountdown() async {
+    while (_remainingSeconds > 0 && mounted && !_cancelled) {
+      await Future<void>.delayed(const Duration(seconds: 1));
+
+      if (!mounted || _cancelled) {
+        return;
+      }
+
+      setState(() {
+        _remainingSeconds--;
+      });
+    }
+
+    if (mounted && !_cancelled) {
+      Navigator.of(context).pop(true);
+    }
+  }
+
+  void _cancelCountdown() {
+    _cancelled = true;
+    Navigator.of(context).pop(false);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final ThemeData theme = Theme.of(context);
+
+    return PopScope(
+      canPop: false,
+      child: AlertDialog(
+        icon: Container(
+          width: 76,
+          height: 76,
+          decoration: BoxDecoration(
+            color: theme.colorScheme.error.withValues(alpha: 0.10),
+            shape: BoxShape.circle,
+          ),
+          alignment: Alignment.center,
+          child: Text(
+            '$_remainingSeconds',
+            style: theme.textTheme.headlineLarge?.copyWith(
+              color: theme.colorScheme.error,
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+        ),
+        title: const Text(
+          'Starting Emergency SOS',
+          textAlign: TextAlign.center,
+        ),
+        content: Text(
+          'Your emergency alert will be recorded '
+          'when the countdown finishes.',
+          textAlign: TextAlign.center,
+          style: theme.textTheme.bodyMedium?.copyWith(
+            color: theme.colorScheme.onSurfaceVariant,
+          ),
+        ),
+        actionsAlignment: MainAxisAlignment.center,
+        actions: <Widget>[
+          OutlinedButton(
+            onPressed: _cancelCountdown,
+            style: OutlinedButton.styleFrom(
+              foregroundColor: theme.colorScheme.error,
+            ),
+            child: const Text('Cancel SOS'),
+          ),
+        ],
+      ),
+    );
+  }
+}

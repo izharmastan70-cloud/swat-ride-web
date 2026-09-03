@@ -1,0 +1,1238 @@
+// =============================================================
+// SWAT RIDE - GLOBAL LOYALTY, REWARDS & PROMO ENGINE
+// File: lib/rewards/services/referral_service.dart
+//
+// Global referral service for all SWAT RIDE modules.
+//
+// Supports:
+// - Admin global ON/OFF
+// - Inviter only, invited user only, both users or no reward
+// - Reward points, wallet credit, coupon and voucher
+// - Booking qualification
+// - Fraud/manual review
+// - Duplicate reward protection
+// - Real Firestore and testing bypass
+//
+// IMPORTANT:
+// This service never credits money/points automatically.
+// Reward issuance is confirmed only after the relevant
+// Reward/Wallet/Coupon/Voucher service completes its action.
+// =============================================================
+
+import 'dart:convert';
+
+import 'package:cloud_firestore/cloud_firestore.dart';
+import '../config/reward_production_gate.dart';
+
+import '../models/referral_model.dart';
+import '../models/reward_point_model.dart';
+
+class ReferralActionResult {
+  final bool success;
+  final String message;
+  final ReferralModel? referral;
+  final bool duplicate;
+  final bool newlyQualified;
+
+  const ReferralActionResult({
+    required this.success,
+    required this.message,
+    this.referral,
+    this.duplicate = false,
+    this.newlyQualified = false,
+  });
+
+  factory ReferralActionResult.failed(String message) {
+    return ReferralActionResult(
+      success: false,
+      message: message,
+    );
+  }
+}
+
+class ReferralRewardInstruction {
+  final String userId;
+  final bool isInviter;
+  final ReferralRewardType rewardType;
+  final double rewardValue;
+  final String? benefitId;
+  final bool alreadyIssued;
+
+  const ReferralRewardInstruction({
+    required this.userId,
+    required this.isInviter,
+    required this.rewardType,
+    required this.rewardValue,
+    this.benefitId,
+    required this.alreadyIssued,
+  });
+
+  bool get requiresAction {
+    return rewardType != ReferralRewardType.none &&
+        rewardValue > 0 &&
+        !alreadyIssued;
+  }
+}
+
+class ReferralService {
+  final FirebaseFirestore _firestore;
+
+  /// Keep true during local/testing development.
+  ///
+  /// Change to false when real Firebase integration starts.
+  final bool useTestingBypass;
+
+  bool _testingReferralEnabled = true;
+
+  final Map<String, ReferralModel> _testingReferrals = {};
+  final Set<String> _testingProcessedBookingEvents = {};
+
+  ReferralService({
+    FirebaseFirestore? firestore,
+    this.useTestingBypass = false,
+  }) : _firestore = firestore ?? FirebaseFirestore.instance;
+
+  CollectionReference<Map<String, dynamic>>
+      get _referralsCollection {
+    return _firestore.collection('reward_referrals');
+  }
+
+  CollectionReference<Map<String, dynamic>> get _eventsCollection {
+    return _firestore.collection('reward_referral_events');
+  }
+
+  DocumentReference<Map<String, dynamic>> get _settingsDocument {
+    return _firestore
+        .collection('reward_engine_settings')
+        .doc('referral');
+  }
+
+  // =============================================================
+  // GLOBAL ADMIN ON/OFF
+  // =============================================================
+
+  Future<void> setReferralEnabled({
+    required bool enabled,
+    required String updatedBy,
+  }) async {
+    if (useTestingBypass) {
+      _testingReferralEnabled = enabled;
+      return;
+    }
+
+    await _settingsDocument.set({
+      'isEnabled': enabled,
+      'updatedBy': updatedBy,
+      'updatedAt': DateTime.now().millisecondsSinceEpoch,
+    }, SetOptions(merge: true));
+  }
+
+  Future<bool> isReferralEnabled() async {
+    if (useTestingBypass) {
+      return _testingReferralEnabled;
+    }
+
+    final document = await _settingsDocument.get();
+
+    if (!document.exists || document.data() == null) {
+      return true;
+    }
+
+    return document.data()!['isEnabled'] as bool? ?? true;
+  }
+
+  Stream<bool> watchReferralEnabled() {
+    if (useTestingBypass) {
+      return Stream<bool>.value(_testingReferralEnabled);
+    }
+
+    return _settingsDocument.snapshots().map((document) {
+      if (!document.exists || document.data() == null) {
+        return true;
+      }
+
+      return document.data()!['isEnabled'] as bool? ?? true;
+    });
+  }
+
+  // =============================================================
+  // ADMIN / REFERRAL CREATION
+  // =============================================================
+
+  Future<void> createReferral(ReferralModel referral) async {
+    _validateReferralConfiguration(referral);
+
+    if (!await isReferralEnabled()) {
+      throw StateError('Referral system is disabled by Admin.');
+    }
+
+    final normalizedCode = referral.normalizedReferralCode;
+
+    if (useTestingBypass) {
+      final duplicateCode = _testingReferrals.values.any(
+        (existing) =>
+            existing.normalizedReferralCode == normalizedCode &&
+            existing.id != referral.id,
+      );
+
+      if (duplicateCode) {
+        throw StateError('Referral code already exists.');
+      }
+
+      final duplicateKey = _testingReferrals.values.any(
+        (existing) =>
+            existing.idempotencyKey == referral.idempotencyKey &&
+            existing.id != referral.id,
+      );
+
+      if (duplicateKey) {
+        throw StateError('Referral was already created.');
+      }
+
+      _testingReferrals[referral.id] = referral;
+      return;
+    }
+
+    final codeQuery = await _referralsCollection
+        .where('referralCode', isEqualTo: normalizedCode)
+        .limit(1)
+        .get();
+
+    if (codeQuery.docs.isNotEmpty) {
+      throw StateError('Referral code already exists.');
+    }
+
+    final keyQuery = await _referralsCollection
+        .where(
+          'idempotencyKey',
+          isEqualTo: referral.idempotencyKey,
+        )
+        .limit(1)
+        .get();
+
+    if (keyQuery.docs.isNotEmpty) {
+      throw StateError('Referral was already created.');
+    }
+
+    await _referralsCollection.doc(referral.id).set(
+          referral.toMap(),
+        );
+  }
+
+  Future<void> updateReferral(ReferralModel referral) async {
+    _validateReferralConfiguration(referral);
+
+    final updatedReferral = referral.copyWith(
+      updatedAt: DateTime.now(),
+    );
+
+    if (useTestingBypass) {
+      if (!_testingReferrals.containsKey(referral.id)) {
+        throw StateError('Referral not found.');
+      }
+
+      _testingReferrals[referral.id] = updatedReferral;
+      return;
+    }
+
+    final reference = _referralsCollection.doc(referral.id);
+    final existing = await reference.get();
+
+    if (!existing.exists) {
+      throw StateError('Referral not found.');
+    }
+
+    await reference.update(updatedReferral.toMap());
+  }
+
+  Future<void> saveReferral(ReferralModel referral) async {
+    _validateReferralConfiguration(referral);
+
+    if (useTestingBypass) {
+      _testingReferrals[referral.id] = referral;
+      return;
+    }
+
+    await _referralsCollection.doc(referral.id).set(
+          referral.toMap(),
+          SetOptions(merge: true),
+        );
+  }
+
+  void _validateReferralConfiguration(
+    ReferralModel referral,
+  ) {
+    if (referral.id.trim().isEmpty) {
+      throw ArgumentError('Referral ID cannot be empty.');
+    }
+
+    if (referral.referralCode.trim().isEmpty) {
+      throw ArgumentError('Referral code cannot be empty.');
+    }
+
+    if (referral.inviterUserId.trim().isEmpty) {
+      throw ArgumentError('Inviter user ID cannot be empty.');
+    }
+
+    if (referral.idempotencyKey.trim().isEmpty) {
+      throw ArgumentError('Idempotency key cannot be empty.');
+    }
+
+    if (referral.requiredCompletedBookings <= 0) {
+      throw ArgumentError(
+        'Required completed bookings must be at least one.',
+      );
+    }
+
+    if (referral.minimumQualifyingAmount < 0) {
+      throw ArgumentError(
+        'Minimum qualifying amount cannot be negative.',
+      );
+    }
+
+    if (referral.inviterRewardValue < 0 ||
+        referral.invitedUserRewardValue < 0) {
+      throw ArgumentError(
+        'Referral reward value cannot be negative.',
+      );
+    }
+
+    if (referral.invitedUserId != null &&
+        referral.invitedUserId == referral.inviterUserId) {
+      throw ArgumentError(
+        'Inviter and invited user cannot be the same.',
+      );
+    }
+
+    if (referral.expiryDate != null &&
+        referral.expiryDate!.isBefore(referral.createdAt)) {
+      throw ArgumentError(
+        'Referral expiry cannot be before creation date.',
+      );
+    }
+  }
+
+  // =============================================================
+  // FETCH REFERRALS
+  // =============================================================
+
+  Future<ReferralModel?> getReferralById(
+    String referralId,
+  ) async {
+    if (useTestingBypass) {
+      return _testingReferrals[referralId];
+    }
+
+    final document =
+        await _referralsCollection.doc(referralId).get();
+
+    if (!document.exists || document.data() == null) {
+      return null;
+    }
+
+    return ReferralModel.fromMap(document.data()!);
+  }
+
+  Future<ReferralModel?> getReferralByCode(
+    String referralCode,
+  ) async {
+    final normalizedCode =
+        referralCode.trim().toUpperCase();
+
+    if (normalizedCode.isEmpty) {
+      return null;
+    }
+
+    if (useTestingBypass) {
+      for (final referral in _testingReferrals.values) {
+        if (referral.normalizedReferralCode ==
+            normalizedCode) {
+          return referral;
+        }
+      }
+
+      return null;
+    }
+
+    final query = await _referralsCollection
+        .where('referralCode', isEqualTo: normalizedCode)
+        .limit(1)
+        .get();
+
+    if (query.docs.isEmpty) {
+      return null;
+    }
+
+    return ReferralModel.fromMap(
+      query.docs.first.data(),
+    );
+  }
+
+  Future<List<ReferralModel>> getInviterReferrals(
+    String inviterUserId,
+  ) async {
+    if (useTestingBypass) {
+      final referrals = _testingReferrals.values
+          .where(
+            (referral) =>
+                referral.inviterUserId == inviterUserId,
+          )
+          .toList();
+
+      referrals.sort(
+        (first, second) =>
+            second.createdAt.compareTo(first.createdAt),
+      );
+
+      return referrals;
+    }
+
+    final query = await _referralsCollection
+        .where(
+          'inviterUserId',
+          isEqualTo: inviterUserId,
+        )
+        .get();
+
+    final referrals = query.docs
+        .map(
+          (document) =>
+              ReferralModel.fromMap(document.data()),
+        )
+        .toList();
+
+    referrals.sort(
+      (first, second) =>
+          second.createdAt.compareTo(first.createdAt),
+    );
+
+    return referrals;
+  }
+
+  Future<ReferralModel?> getInvitedUserReferral(
+    String invitedUserId,
+  ) async {
+    if (useTestingBypass) {
+      for (final referral in _testingReferrals.values) {
+        if (referral.invitedUserId == invitedUserId) {
+          return referral;
+        }
+      }
+
+      return null;
+    }
+
+    final query = await _referralsCollection
+        .where(
+          'invitedUserId',
+          isEqualTo: invitedUserId,
+        )
+        .limit(1)
+        .get();
+
+    if (query.docs.isEmpty) {
+      return null;
+    }
+
+    return ReferralModel.fromMap(
+      query.docs.first.data(),
+    );
+  }
+
+  // =============================================================
+  // INVITED USER REGISTRATION
+  // =============================================================
+
+  Future<ReferralActionResult> registerInvitedUser({
+    required String referralCode,
+    required String invitedUserId,
+    required bool phoneVerified,
+    bool identityVerified = false,
+  }) async {
+    if (!await isReferralEnabled()) {
+      return ReferralActionResult.failed(
+        'Referral system is disabled by Admin.',
+      );
+    }
+
+    if (invitedUserId.trim().isEmpty) {
+      return ReferralActionResult.failed(
+        'Invited user ID is required.',
+      );
+    }
+
+    final referral = await getReferralByCode(referralCode);
+
+    if (referral == null) {
+      return ReferralActionResult.failed(
+        'Referral code not found.',
+      );
+    }
+
+    if (referral.isExpired) {
+      return ReferralActionResult.failed(
+        'Referral code has expired.',
+      );
+    }
+
+    if (referral.inviterUserId == invitedUserId) {
+      return ReferralActionResult.failed(
+        'A user cannot use their own referral code.',
+      );
+    }
+
+    if (referral.status == ReferralStatus.rejected ||
+        referral.status == ReferralStatus.cancelled ||
+        referral.status == ReferralStatus.rewarded) {
+      return ReferralActionResult.failed(
+        'Referral code is no longer available.',
+      );
+    }
+
+    final previousReferral =
+        await getInvitedUserReferral(invitedUserId);
+
+    if (previousReferral != null &&
+        previousReferral.id != referral.id) {
+      return ReferralActionResult.failed(
+        'This user has already used a referral code.',
+      );
+    }
+
+    if (referral.invitedUserId != null &&
+        referral.invitedUserId!.isNotEmpty &&
+        referral.invitedUserId != invitedUserId) {
+      return ReferralActionResult.failed(
+        'Referral code has already been used.',
+      );
+    }
+
+    final now = DateTime.now();
+
+    final updatedReferral = referral.copyWith(
+      invitedUserId: invitedUserId,
+      status: ReferralStatus.registered,
+      phoneVerified: phoneVerified,
+      identityVerified: identityVerified,
+      registeredAt: referral.registeredAt ?? now,
+      updatedAt: now,
+    );
+
+    if (useTestingBypass) {
+      _testingReferrals[referral.id] = updatedReferral;
+
+      return ReferralActionResult(
+        success: true,
+        message: 'Referral registration completed.',
+        referral: updatedReferral,
+      );
+    }
+
+    await _referralsCollection.doc(referral.id).update({
+      'invitedUserId': invitedUserId,
+      'status': ReferralStatus.registered.name,
+      'phoneVerified': phoneVerified,
+      'identityVerified': identityVerified,
+      'registeredAt':
+          (referral.registeredAt ?? now)
+              .millisecondsSinceEpoch,
+      'updatedAt': now.millisecondsSinceEpoch,
+    });
+
+    return ReferralActionResult(
+      success: true,
+      message: 'Referral registration completed.',
+      referral: updatedReferral,
+    );
+  }
+
+  // =============================================================
+  // VERIFICATION AND FRAUD REVIEW
+  // =============================================================
+
+  Future<ReferralActionResult> updateVerification({
+    required String referralId,
+    required bool phoneVerified,
+    required bool identityVerified,
+  }) async {
+    final referral = await getReferralById(referralId);
+
+    if (referral == null) {
+      return ReferralActionResult.failed(
+        'Referral not found.',
+      );
+    }
+
+    final updatedReferral = referral.copyWith(
+      phoneVerified: phoneVerified,
+      identityVerified: identityVerified,
+      updatedAt: DateTime.now(),
+    );
+
+    await _storeUpdatedReferral(updatedReferral);
+
+    return ReferralActionResult(
+      success: true,
+      message: 'Referral verification updated.',
+      referral: updatedReferral,
+    );
+  }
+
+  Future<ReferralActionResult> sendForManualReview({
+    required String referralId,
+    required String reason,
+  }) async {
+    final referral = await getReferralById(referralId);
+
+    if (referral == null) {
+      return ReferralActionResult.failed(
+        'Referral not found.',
+      );
+    }
+
+    final updatedReferral = referral.copyWith(
+      requiresManualReview: true,
+      reviewReason: reason,
+      updatedAt: DateTime.now(),
+    );
+
+    await _storeUpdatedReferral(updatedReferral);
+
+    return ReferralActionResult(
+      success: true,
+      message: 'Referral sent for manual review.',
+      referral: updatedReferral,
+    );
+  }
+
+  Future<ReferralActionResult> markFraudSuspected({
+    required String referralId,
+    required String reason,
+    required String reviewedBy,
+  }) async {
+    final referral = await getReferralById(referralId);
+
+    if (referral == null) {
+      return ReferralActionResult.failed(
+        'Referral not found.',
+      );
+    }
+
+    final now = DateTime.now();
+
+    final updatedReferral = referral.copyWith(
+      isFraudSuspected: true,
+      requiresManualReview: true,
+      reviewReason: reason,
+      reviewedBy: reviewedBy,
+      reviewedAt: now,
+      updatedAt: now,
+    );
+
+    await _storeUpdatedReferral(updatedReferral);
+
+    return ReferralActionResult(
+      success: true,
+      message: 'Referral marked for fraud review.',
+      referral: updatedReferral,
+    );
+  }
+
+  Future<ReferralActionResult> approveManualReview({
+    required String referralId,
+    required String reviewedBy,
+  }) async {
+    final referral = await getReferralById(referralId);
+
+    if (referral == null) {
+      return ReferralActionResult.failed(
+        'Referral not found.',
+      );
+    }
+
+    final now = DateTime.now();
+
+    final updatedReferral = referral.copyWith(
+      requiresManualReview: false,
+      isFraudSuspected: false,
+      removeReviewReason: true,
+      reviewedBy: reviewedBy,
+      reviewedAt: now,
+      updatedAt: now,
+    );
+
+    await _storeUpdatedReferral(updatedReferral);
+
+    return ReferralActionResult(
+      success: true,
+      message: 'Referral review approved.',
+      referral: updatedReferral,
+    );
+  }
+
+  Future<ReferralActionResult> rejectReferral({
+    required String referralId,
+    required String reason,
+    required String reviewedBy,
+  }) async {
+    final referral = await getReferralById(referralId);
+
+    if (referral == null) {
+      return ReferralActionResult.failed(
+        'Referral not found.',
+      );
+    }
+
+    final now = DateTime.now();
+
+    final updatedReferral = referral.copyWith(
+      status: ReferralStatus.rejected,
+      requiresManualReview: false,
+      reviewReason: reason,
+      reviewedBy: reviewedBy,
+      reviewedAt: now,
+      updatedAt: now,
+    );
+
+    await _storeUpdatedReferral(updatedReferral);
+
+    return ReferralActionResult(
+      success: true,
+      message: 'Referral rejected.',
+      referral: updatedReferral,
+    );
+  }
+
+  // =============================================================
+  // QUALIFY AFTER COMPLETED BOOKING
+  // =============================================================
+
+  Future<ReferralActionResult> processCompletedBooking({
+    required String invitedUserId,
+    required String bookingId,
+    required RewardModule module,
+    required double completedAmount,
+
+    /// Must only be true after final successful completion.
+    required bool bookingCompleted,
+
+    /// Must be true when payment is complete or valid cash
+    /// completion is confirmed.
+    required bool paymentConfirmed,
+  }) async {
+    if (!await isReferralEnabled()) {
+      return ReferralActionResult.failed(
+        'Referral system is disabled by Admin.',
+      );
+    }
+
+    if (!bookingCompleted || !paymentConfirmed) {
+      return ReferralActionResult.failed(
+        'Referral qualification requires a completed booking '
+        'and confirmed payment.',
+      );
+    }
+
+    if (bookingId.trim().isEmpty) {
+      return ReferralActionResult.failed(
+        'Booking ID is required.',
+      );
+    }
+
+    final referral =
+        await getInvitedUserReferral(invitedUserId);
+
+    if (referral == null) {
+      return ReferralActionResult.failed(
+        'No referral found for this user.',
+      );
+    }
+
+    if (referral.isExpired) {
+      await _setReferralStatus(
+        referral,
+        ReferralStatus.expired,
+      );
+
+      return ReferralActionResult.failed(
+        'Referral has expired.',
+      );
+    }
+
+    if (referral.isFraudSuspected ||
+        referral.requiresManualReview) {
+      return ReferralActionResult.failed(
+        'Referral is waiting for Admin review.',
+      );
+    }
+
+    if (!referral.phoneVerified) {
+      return ReferralActionResult.failed(
+        'Phone verification is required.',
+      );
+    }
+
+    if (!referral.supportsQualifyingModule(module)) {
+      return ReferralActionResult.failed(
+        'This booking module does not qualify.',
+      );
+    }
+
+    if (completedAmount <
+        referral.minimumQualifyingAmount) {
+      return ReferralActionResult.failed(
+        'Booking amount is below the referral minimum.',
+      );
+    }
+
+    final eventId = _safeDocumentId(
+      '${referral.id}:$bookingId',
+    );
+
+    if (useTestingBypass) {
+      if (_testingProcessedBookingEvents.contains(eventId)) {
+        return ReferralActionResult(
+          success: true,
+          message: 'Booking was already processed.',
+          referral: referral,
+          duplicate: true,
+        );
+      }
+
+      _testingProcessedBookingEvents.add(eventId);
+
+      final newCount =
+          referral.completedQualifyingBookings + 1;
+
+      final qualified = referral.qualifiesAfterBooking(
+        module: module,
+        completedAmount: completedAmount,
+        newCompletedBookingCount: newCount,
+      );
+
+      final now = DateTime.now();
+
+      final updatedReferral = referral.copyWith(
+        completedQualifyingBookings: newCount,
+        status: qualified
+            ? ReferralStatus.qualified
+            : ReferralStatus.registered,
+        qualifiedAt:
+            qualified ? referral.qualifiedAt ?? now : null,
+        updatedAt: now,
+      );
+
+      _testingReferrals[referral.id] = updatedReferral;
+
+      return ReferralActionResult(
+        success: true,
+        message: qualified
+            ? 'Referral qualified successfully.'
+            : 'Qualifying booking recorded.',
+        referral: updatedReferral,
+        newlyQualified: qualified,
+      );
+    }
+
+    final referralReference =
+        _referralsCollection.doc(referral.id);
+    final eventReference = _eventsCollection.doc(eventId);
+
+    try {
+      ReferralModel? finalReferral;
+      var newlyQualified = false;
+      var duplicate = false;
+
+      await _firestore.runTransaction((transaction) async {
+        final eventDocument =
+            await transaction.get(eventReference);
+
+        if (eventDocument.exists) {
+          duplicate = true;
+          return;
+        }
+
+        final referralDocument =
+            await transaction.get(referralReference);
+
+        if (!referralDocument.exists ||
+            referralDocument.data() == null) {
+          throw StateError('Referral not found.');
+        }
+
+        final latestReferral = ReferralModel.fromMap(
+          referralDocument.data()!,
+        );
+
+        if (latestReferral.isFraudSuspected ||
+            latestReferral.requiresManualReview) {
+          throw StateError(
+            'Referral is waiting for Admin review.',
+          );
+        }
+
+        if (!latestReferral.phoneVerified) {
+          throw StateError(
+            'Phone verification is required.',
+          );
+        }
+
+        if (!latestReferral
+            .supportsQualifyingModule(module)) {
+          throw StateError(
+            'Booking module does not qualify.',
+          );
+        }
+
+        final newCount =
+            latestReferral.completedQualifyingBookings + 1;
+
+        newlyQualified =
+            latestReferral.qualifiesAfterBooking(
+          module: module,
+          completedAmount: completedAmount,
+          newCompletedBookingCount: newCount,
+        );
+
+        final now = DateTime.now();
+
+        finalReferral = latestReferral.copyWith(
+          completedQualifyingBookings: newCount,
+          status: newlyQualified
+              ? ReferralStatus.qualified
+              : ReferralStatus.registered,
+          qualifiedAt: newlyQualified
+              ? latestReferral.qualifiedAt ?? now
+              : null,
+          updatedAt: now,
+        );
+
+        transaction.set(eventReference, {
+          'id': eventId,
+          'referralId': latestReferral.id,
+          'invitedUserId': invitedUserId,
+          'bookingId': bookingId,
+          'module': module.name,
+          'completedAmount': completedAmount,
+          'createdAt': now.millisecondsSinceEpoch,
+        });
+
+        transaction.update(
+          referralReference,
+          finalReferral!.toMap(),
+        );
+      });
+
+      if (duplicate) {
+        return ReferralActionResult(
+          success: true,
+          message: 'Booking was already processed.',
+          referral: referral,
+          duplicate: true,
+        );
+      }
+
+      return ReferralActionResult(
+        success: true,
+        message: newlyQualified
+            ? 'Referral qualified successfully.'
+            : 'Qualifying booking recorded.',
+        referral: finalReferral,
+        newlyQualified: newlyQualified,
+      );
+    } catch (error) {
+      return ReferralActionResult.failed(
+        error.toString().replaceFirst('Bad state: ', ''),
+      );
+    }
+  }
+
+  // =============================================================
+  // REWARD INSTRUCTIONS
+  // =============================================================
+
+  Future<List<ReferralRewardInstruction>>
+      getPendingRewardInstructions(
+    String referralId,
+  ) async {
+    final referral = await getReferralById(referralId);
+
+    if (referral == null ||
+        referral.status != ReferralStatus.qualified ||
+        referral.requiresManualReview ||
+        referral.isFraudSuspected) {
+      return [];
+    }
+
+    final instructions = <ReferralRewardInstruction>[
+      ReferralRewardInstruction(
+        userId: referral.inviterUserId,
+        isInviter: true,
+        rewardType: referral.inviterRewardType,
+        rewardValue: referral.inviterRewardValue,
+        benefitId: referral.inviterBenefitId,
+        alreadyIssued: referral.inviterRewardIssued,
+      ),
+    ];
+
+    if (referral.invitedUserId != null) {
+      instructions.add(
+        ReferralRewardInstruction(
+          userId: referral.invitedUserId!,
+          isInviter: false,
+          rewardType: referral.invitedUserRewardType,
+          rewardValue: referral.invitedUserRewardValue,
+          benefitId: referral.invitedUserBenefitId,
+          alreadyIssued: referral.invitedUserRewardIssued,
+        ),
+      );
+    }
+
+    return instructions
+        .where((instruction) => instruction.requiresAction)
+        .toList();
+  }
+
+  // =============================================================
+  // CONFIRM REWARD AFTER EXTERNAL SERVICE SUCCESS
+  // =============================================================
+
+  Future<ReferralActionResult> confirmInviterRewardIssued({
+    required String referralId,
+    required String rewardTransactionId,
+  }) async {
+    return _confirmRewardIssued(
+      referralId: referralId,
+      rewardTransactionId: rewardTransactionId,
+      forInviter: true,
+    );
+  }
+
+  Future<ReferralActionResult>
+      confirmInvitedUserRewardIssued({
+    required String referralId,
+    required String rewardTransactionId,
+  }) async {
+    return _confirmRewardIssued(
+      referralId: referralId,
+      rewardTransactionId: rewardTransactionId,
+      forInviter: false,
+    );
+  }
+
+  Future<ReferralActionResult> _confirmRewardIssued({
+    required String referralId,
+    required String rewardTransactionId,
+    required bool forInviter,
+  }) async {
+    if (!RewardProductionGate.financialMutationsEnabled) {
+      return ReferralActionResult.failed(
+        'Referral reward confirmation is disabled until the trusted backend is ready.',
+      );
+    }
+
+    if (rewardTransactionId.trim().isEmpty) {
+      return ReferralActionResult.failed(
+        'Reward transaction ID is required.',
+      );
+    }
+
+    final referral = await getReferralById(referralId);
+
+    if (referral == null) {
+      return ReferralActionResult.failed(
+        'Referral not found.',
+      );
+    }
+
+    if (referral.status != ReferralStatus.qualified &&
+        referral.status != ReferralStatus.rewarded) {
+      return ReferralActionResult.failed(
+        'Referral is not qualified for rewards.',
+      );
+    }
+
+    if (referral.requiresManualReview ||
+        referral.isFraudSuspected) {
+      return ReferralActionResult.failed(
+        'Referral is waiting for Admin review.',
+      );
+    }
+
+    if (forInviter && referral.inviterRewardIssued) {
+      return ReferralActionResult(
+        success: true,
+        message: 'Inviter reward was already issued.',
+        referral: referral,
+        duplicate: true,
+      );
+    }
+
+    if (!forInviter && referral.invitedUserRewardIssued) {
+      return ReferralActionResult(
+        success: true,
+        message: 'Invited user reward was already issued.',
+        referral: referral,
+        duplicate: true,
+      );
+    }
+
+    final now = DateTime.now();
+
+    var updatedReferral = referral.copyWith(
+      inviterRewardIssued:
+          forInviter ? true : referral.inviterRewardIssued,
+      invitedUserRewardIssued: forInviter
+          ? referral.invitedUserRewardIssued
+          : true,
+      inviterRewardTransactionId:
+          forInviter ? rewardTransactionId : null,
+      invitedUserRewardTransactionId:
+          forInviter ? null : rewardTransactionId,
+      updatedAt: now,
+    );
+
+    if (updatedReferral.allEnabledRewardsIssued) {
+      updatedReferral = updatedReferral.copyWith(
+        status: ReferralStatus.rewarded,
+        rewardedAt: now,
+        updatedAt: now,
+      );
+    }
+
+    await _storeUpdatedReferral(updatedReferral);
+
+    return ReferralActionResult(
+      success: true,
+      message: forInviter
+          ? 'Inviter reward confirmed.'
+          : 'Invited user reward confirmed.',
+      referral: updatedReferral,
+    );
+  }
+
+  // =============================================================
+  // CANCEL / EXPIRE
+  // =============================================================
+
+  Future<ReferralActionResult> cancelReferral({
+    required String referralId,
+    required String reason,
+  }) async {
+    final referral = await getReferralById(referralId);
+
+    if (referral == null) {
+      return ReferralActionResult.failed(
+        'Referral not found.',
+      );
+    }
+
+    if (referral.status == ReferralStatus.rewarded) {
+      return ReferralActionResult.failed(
+        'A rewarded referral cannot be cancelled.',
+      );
+    }
+
+    final updatedReferral = referral.copyWith(
+      status: ReferralStatus.cancelled,
+      reviewReason: reason,
+      updatedAt: DateTime.now(),
+    );
+
+    await _storeUpdatedReferral(updatedReferral);
+
+    return ReferralActionResult(
+      success: true,
+      message: 'Referral cancelled.',
+      referral: updatedReferral,
+    );
+  }
+
+  Future<int> expireDueReferrals() async {
+    final now = DateTime.now();
+
+    final referrals = useTestingBypass
+        ? _testingReferrals.values.toList()
+        : (await _referralsCollection.get())
+            .docs
+            .map(
+              (document) =>
+                  ReferralModel.fromMap(document.data()),
+            )
+            .toList();
+
+    var expiredCount = 0;
+
+    for (final referral in referrals) {
+      final canExpire =
+          referral.expiryDate != null &&
+              now.isAfter(referral.expiryDate!) &&
+              referral.status != ReferralStatus.rewarded &&
+              referral.status != ReferralStatus.rejected &&
+              referral.status != ReferralStatus.cancelled &&
+              referral.status != ReferralStatus.expired;
+
+      if (!canExpire) {
+        continue;
+      }
+
+      await _setReferralStatus(
+        referral,
+        ReferralStatus.expired,
+      );
+
+      expiredCount++;
+    }
+
+    return expiredCount;
+  }
+
+  // =============================================================
+  // INTERNAL HELPERS
+  // =============================================================
+
+  Future<void> _storeUpdatedReferral(
+    ReferralModel referral,
+  ) async {
+    if (useTestingBypass) {
+      _testingReferrals[referral.id] = referral;
+      return;
+    }
+
+    await _referralsCollection
+        .doc(referral.id)
+        .update(referral.toMap());
+  }
+
+  Future<void> _setReferralStatus(
+    ReferralModel referral,
+    ReferralStatus status,
+  ) async {
+    final updatedReferral = referral.copyWith(
+      status: status,
+      updatedAt: DateTime.now(),
+    );
+
+    await _storeUpdatedReferral(updatedReferral);
+  }
+
+  String _safeDocumentId(String value) {
+    return base64Url
+        .encode(utf8.encode(value))
+        .replaceAll('=', '');
+  }
+
+  // =============================================================
+  // TESTING HELPERS
+  // =============================================================
+
+  void addTestingReferral(ReferralModel referral) {
+    _testingReferrals[referral.id] = referral;
+  }
+
+  void clearTestingData() {
+    _testingReferrals.clear();
+    _testingProcessedBookingEvents.clear();
+    _testingReferralEnabled = true;
+  }
+}

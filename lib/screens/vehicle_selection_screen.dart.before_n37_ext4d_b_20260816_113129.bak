@@ -1,0 +1,639 @@
+import 'package:flutter/material.dart';
+
+import '../data/vehicle_data.dart';
+import '../models/location_model.dart';
+import '../models/vehicle_model.dart';
+import '../widgets/vehicle_card.dart';
+import 'ride_confirmation_screen.dart';
+
+class VehicleSelectionScreen extends StatelessWidget {
+  const VehicleSelectionScreen({
+    super.key,
+    required this.pickupLocation,
+    required this.destinationLocation,
+  });
+
+  static const Color yellow =
+      Color(0xFFFFD60A);
+
+  static const Color background =
+      Color(0xFF0D0D0D);
+
+  static const Color darkCard =
+      Color(0xFF1A1A1A);
+
+  // =========================================================
+  // LOCATIONS
+  // =========================================================
+
+  final LocationModel pickupLocation;
+
+  final LocationModel destinationLocation;
+
+  // =========================================================
+  // BUILD
+  // =========================================================
+
+  @override
+  Widget build(BuildContext context) {
+    final List<VehicleModel> vehicles =
+        VehicleData.rideVehicles;
+
+    return Scaffold(
+      backgroundColor:
+          background,
+
+      // =======================================================
+      // APP BAR
+      // =======================================================
+
+      appBar: AppBar(
+        backgroundColor:
+            background,
+
+        elevation: 0,
+
+        centerTitle: false,
+
+        leading:
+            IconButton(
+          icon:
+              const Icon(
+            Icons.arrow_back_ios_new,
+            color:
+                Colors.white,
+          ),
+
+          onPressed: () {
+            Navigator.pop(
+              context,
+            );
+          },
+        ),
+
+        title:
+            const Text(
+          'Choose your ride',
+
+          style:
+              TextStyle(
+            fontSize:
+                20,
+
+            fontWeight:
+                FontWeight.bold,
+          ),
+        ),
+      ),
+
+      // =======================================================
+      // BODY
+      // =======================================================
+
+      body:
+          SafeArea(
+        child:
+            ListView(
+          padding:
+              const EdgeInsets.fromLTRB(
+            16,
+            10,
+            16,
+            30,
+          ),
+
+          children: [
+
+            // =================================================
+            // TITLE
+            // =================================================
+
+            const Text(
+              'Select a vehicle',
+
+              style:
+                  TextStyle(
+                fontSize:
+                    26,
+
+                fontWeight:
+                    FontWeight.bold,
+
+                color:
+                    Colors.white,
+              ),
+            ),
+
+            const SizedBox(
+              height:
+                  6,
+            ),
+
+            const Text(
+              'Choose the ride that suits your journey',
+
+              style:
+                  TextStyle(
+                color:
+                    Colors.grey,
+
+                fontSize:
+                    14,
+              ),
+            ),
+
+            const SizedBox(
+              height:
+                  20,
+            ),
+
+            // =================================================
+            // PICKUP / DESTINATION SUMMARY
+            // =================================================
+
+            _buildLocationSummary(),
+
+            const SizedBox(
+              height:
+                  24,
+            ),
+
+            // =================================================
+            // DYNAMIC PRICING INFORMATION
+            // =================================================
+
+            Container(
+              padding:
+                  const EdgeInsets.all(
+                14,
+              ),
+
+              decoration:
+                  BoxDecoration(
+                color:
+                    yellow.withValues(
+                  alpha: 0.08,
+                ),
+
+                borderRadius:
+                    BorderRadius.circular(
+                  14,
+                ),
+
+                border:
+                    Border.all(
+                  color:
+                      yellow.withValues(
+                    alpha: 0.32,
+                  ),
+                ),
+              ),
+
+              child:
+                  const Row(
+                crossAxisAlignment:
+                    CrossAxisAlignment.start,
+
+                children: [
+                  Icon(
+                    Icons.local_taxi_outlined,
+                    color:
+                        yellow,
+                    size:
+                        21,
+                  ),
+
+                  SizedBox(
+                    width:
+                        10,
+                  ),
+
+                  Expanded(
+                    child:
+                        Text(
+                      'Select a vehicle to calculate distance, ETA and the latest admin-controlled fare.',
+
+                      style:
+                          TextStyle(
+                        color:
+                            Colors.white70,
+                        fontSize:
+                            12,
+                        height:
+                            1.35,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+
+            const SizedBox(
+              height:
+                  18,
+            ),
+
+            // =================================================
+            // VEHICLE LIST
+            // =================================================
+
+            if (vehicles.isEmpty)
+              _buildNoVehiclesCard()
+            else
+              ...vehicles.map(
+                (vehicle) {
+                  return Padding(
+                    padding:
+                        const EdgeInsets.only(
+                      bottom:
+                          14,
+                    ),
+
+                    child:
+                        VehicleCard(
+                      vehicle:
+                          vehicle,
+
+                      onTap: () {
+                        _selectVehicle(
+                          context,
+                          vehicle,
+                        );
+                      },
+                    ),
+                  );
+                },
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // =========================================================
+  // NO VEHICLES FALLBACK
+  // =========================================================
+
+  Widget _buildNoVehiclesCard() {
+    return Container(
+      padding:
+          const EdgeInsets.all(
+        24,
+      ),
+
+      decoration:
+          BoxDecoration(
+        color:
+            darkCard,
+
+        borderRadius:
+            BorderRadius.circular(
+          18,
+        ),
+
+        border:
+            Border.all(
+          color:
+              Colors.white12,
+        ),
+      ),
+
+      child:
+          const Column(
+        children: [
+          Icon(
+            Icons.no_transfer_outlined,
+            color:
+                yellow,
+            size:
+                42,
+          ),
+
+          SizedBox(
+            height:
+                12,
+          ),
+
+          Text(
+            'No ride vehicle is available',
+
+            textAlign:
+                TextAlign.center,
+
+            style:
+                TextStyle(
+              color:
+                  Colors.white,
+              fontSize:
+                  16,
+              fontWeight:
+                  FontWeight.bold,
+            ),
+          ),
+
+          SizedBox(
+            height:
+                6,
+          ),
+
+          Text(
+            'Please try again later. The app will remain safe if vehicles are disabled by admin.',
+
+            textAlign:
+                TextAlign.center,
+
+            style:
+                TextStyle(
+              color:
+                  Colors.white54,
+              fontSize:
+                  12,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // =========================================================
+  // LOCATION SUMMARY
+  // =========================================================
+
+  Widget _buildLocationSummary() {
+    return Container(
+      padding:
+          const EdgeInsets.all(
+        16,
+      ),
+
+      decoration:
+          BoxDecoration(
+        color:
+            darkCard,
+
+        borderRadius:
+            BorderRadius.circular(
+          18,
+        ),
+
+        border:
+            Border.all(
+          color:
+              Colors.white12,
+        ),
+      ),
+
+      child:
+          Column(
+        crossAxisAlignment:
+            CrossAxisAlignment.start,
+
+        children: [
+
+          // =================================================
+          // PICKUP
+          // =================================================
+
+          Row(
+            crossAxisAlignment:
+                CrossAxisAlignment.start,
+
+            children: [
+
+              const Icon(
+                Icons.my_location,
+                color:
+                    Colors.green,
+                size:
+                    22,
+              ),
+
+              const SizedBox(
+                width:
+                    12,
+              ),
+
+              Expanded(
+                child:
+                    Column(
+                  crossAxisAlignment:
+                      CrossAxisAlignment.start,
+
+                  children: [
+
+                    const Text(
+                      'Pickup',
+
+                      style:
+                          TextStyle(
+                        color:
+                            Colors.grey,
+
+                        fontSize:
+                            12,
+                      ),
+                    ),
+
+                    const SizedBox(
+                      height:
+                          3,
+                    ),
+
+                    Text(
+                      pickupLocation
+                          .placeName,
+
+                      style:
+                          const TextStyle(
+                        color:
+                            Colors.white,
+
+                        fontWeight:
+                            FontWeight.bold,
+
+                        fontSize:
+                            14,
+                      ),
+                    ),
+
+                    const SizedBox(
+                      height:
+                          2,
+                    ),
+
+                    Text(
+                      pickupLocation
+                          .address,
+
+                      maxLines:
+                          2,
+
+                      overflow:
+                          TextOverflow.ellipsis,
+
+                      style:
+                          const TextStyle(
+                        color:
+                            Colors.white54,
+
+                        fontSize:
+                            12,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+
+          const Padding(
+            padding:
+                EdgeInsets.symmetric(
+              vertical:
+                  12,
+            ),
+
+            child:
+                Divider(
+              color:
+                  Colors.white12,
+
+              height:
+                  1,
+            ),
+          ),
+
+          // =================================================
+          // DESTINATION
+          // =================================================
+
+          Row(
+            crossAxisAlignment:
+                CrossAxisAlignment.start,
+
+            children: [
+
+              const Icon(
+                Icons.location_on,
+                color:
+                    Colors.red,
+                size:
+                    22,
+              ),
+
+              const SizedBox(
+                width:
+                    12,
+              ),
+
+              Expanded(
+                child:
+                    Column(
+                  crossAxisAlignment:
+                      CrossAxisAlignment.start,
+
+                  children: [
+
+                    const Text(
+                      'Destination',
+
+                      style:
+                          TextStyle(
+                        color:
+                            Colors.grey,
+
+                        fontSize:
+                            12,
+                      ),
+                    ),
+
+                    const SizedBox(
+                      height:
+                          3,
+                    ),
+
+                    Text(
+                      destinationLocation
+                          .placeName,
+
+                      style:
+                          const TextStyle(
+                        color:
+                            Colors.white,
+
+                        fontWeight:
+                            FontWeight.bold,
+
+                        fontSize:
+                            14,
+                      ),
+                    ),
+
+                    const SizedBox(
+                      height:
+                          2,
+                    ),
+
+                    Text(
+                      destinationLocation
+                          .address,
+
+                      maxLines:
+                          2,
+
+                      overflow:
+                          TextOverflow.ellipsis,
+
+                      style:
+                          const TextStyle(
+                        color:
+                            Colors.white54,
+
+                        fontSize:
+                            12,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  // =========================================================
+  // VEHICLE SELECT
+  // =========================================================
+
+  void _selectVehicle(
+    BuildContext context,
+    VehicleModel vehicle,
+  ) {
+
+    // =======================================================
+    // OPEN RIDE CONFIRMATION
+    // =======================================================
+
+    Navigator.push(
+      context,
+
+      MaterialPageRoute(
+        builder:
+            (context) =>
+                RideConfirmationScreen(
+          pickupLocation:
+              pickupLocation,
+
+          destinationLocation:
+              destinationLocation,
+
+          selectedVehicle:
+              vehicle,
+        ),
+      ),
+    );
+  }
+}
+

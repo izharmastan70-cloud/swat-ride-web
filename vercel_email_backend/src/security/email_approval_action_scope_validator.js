@@ -1,0 +1,116 @@
+export const EMAIL_APPROVAL_SCOPE_KEYS = Object.freeze([
+  'authorizationRequestId',
+  'binding',
+  'draftId',
+  'exactDraftMatchRequired',
+  'oneActionOnly',
+  'oneTimeConsumptionRequired',
+]);
+
+export const EMAIL_APPROVAL_BINDING_KEYS = Object.freeze([
+  'algorithm',
+  'draftId',
+  'exactDraftMatchRequired',
+  'fingerprint',
+]);
+
+export const EMAIL_DRAFT_BINDING_ALGORITHM =
+    'CANONICAL_JSON_SHA256_BASE64URL_V2';
+
+function nonEmptyString(value) {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+function hasExactKeys(value, expectedKeys) {
+  if (!value ||
+      typeof value !== 'object' ||
+      Array.isArray(value)) {
+    return false;
+  }
+
+  const actual =
+      Object.keys(value).sort();
+
+  const expected =
+      [...expectedKeys].sort();
+
+  return actual.length === expected.length &&
+    actual.every(
+        (key, index) => key === expected[index]);
+}
+
+export function validateExactEmailApprovalActionScope({
+  scope,
+  authorizationRequestId,
+  draftId,
+  bindingFingerprint,
+}) {
+  if (!hasExactKeys(
+      scope,
+      EMAIL_APPROVAL_SCOPE_KEYS)) {
+    return Object.freeze({
+      ok: false,
+      code: 'EMAIL_APPROVAL_SCOPE_KEYS_MISMATCH',
+    });
+  }
+
+  if (!hasExactKeys(
+      scope.binding,
+      EMAIL_APPROVAL_BINDING_KEYS)) {
+    return Object.freeze({
+      ok: false,
+      code: 'EMAIL_APPROVAL_BINDING_KEYS_MISMATCH',
+    });
+  }
+
+  const expectedAuthorizationRequestId =
+      nonEmptyString(authorizationRequestId)
+          ? authorizationRequestId.trim()
+          : '';
+
+  const expectedDraftId =
+      nonEmptyString(draftId)
+          ? draftId.trim()
+          : '';
+
+  const expectedFingerprint =
+      nonEmptyString(bindingFingerprint)
+          ? bindingFingerprint.trim()
+          : '';
+
+  if (!expectedAuthorizationRequestId ||
+      !expectedDraftId ||
+      !expectedFingerprint) {
+    return Object.freeze({
+      ok: false,
+      code: 'EMAIL_APPROVAL_EXPECTED_BINDING_MISSING',
+    });
+  }
+
+  const exact =
+      scope.authorizationRequestId ===
+          expectedAuthorizationRequestId &&
+      scope.draftId === expectedDraftId &&
+      scope.exactDraftMatchRequired === true &&
+      scope.oneActionOnly === true &&
+      scope.oneTimeConsumptionRequired === true &&
+      scope.binding.algorithm ===
+          EMAIL_DRAFT_BINDING_ALGORITHM &&
+      scope.binding.fingerprint ===
+          expectedFingerprint &&
+      scope.binding.draftId ===
+          expectedDraftId &&
+      scope.binding.exactDraftMatchRequired === true;
+
+  if (!exact) {
+    return Object.freeze({
+      ok: false,
+      code: 'EMAIL_APPROVAL_SCOPE_VALUE_MISMATCH',
+    });
+  }
+
+  return Object.freeze({
+    ok: true,
+    code: 'EMAIL_APPROVAL_SCOPE_EXACT_MATCH',
+  });
+}

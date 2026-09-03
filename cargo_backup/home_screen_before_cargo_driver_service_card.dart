@@ -1,0 +1,912 @@
+﻿import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/material.dart';
+import 'package:geolocator/geolocator.dart';
+// Central Food routing keeps Customer, Partner and Rider
+// navigation consistent with lib/food/food_routes.dart.
+import '../food/food_routes.dart';
+import '../rewards/reward_routes.dart';
+import '../cargo/screens/cargo_home_screen.dart';
+
+import 'vehicle_selection_screen.dart';
+import 'location_selection_screen.dart';
+import 'promo_code_screen.dart';
+import 'driver_registration_screen.dart';
+import 'tourism_hotels_screen.dart';
+import 'hotel_partner_registration_screen.dart';
+import 'my_hotel_bookings_screen.dart';
+import 'tourism_driver_registration_screen.dart';
+import 'tourism_driver_dashboard_screen.dart';
+import '../models/tourism_driver_application.dart';
+import '../services/tourism_driver_application_service.dart';
+import 'tour_guide_registration_screen.dart';
+import 'my_rides_screen.dart';
+
+class SwatRideHomePage extends StatefulWidget {
+  const SwatRideHomePage({super.key});
+
+  @override
+  State<SwatRideHomePage> createState() => _SwatRideHomePageState();
+}
+
+class _SwatRideHomePageState extends State<SwatRideHomePage> {
+  static const Color yellow = Color(0xFFFFD60A);
+  static const Color darkCard = Color(0xFF1A1A1A);
+
+  Position? currentPosition;
+
+  bool isLoadingLocation = true;
+
+  String currentLocationText = 'Getting your current location...';
+
+  @override
+  void initState() {
+    super.initState();
+    _getCurrentLocation();
+  }
+
+  // =========================================================
+  // GET CURRENT GPS LOCATION
+  // =========================================================
+
+  Future<void> _getCurrentLocation() async {
+    if (!mounted) return;
+
+    setState(() {
+      isLoadingLocation = true;
+      currentLocationText = 'Getting your current location...';
+    });
+
+    try {
+      bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
+
+      if (!serviceEnabled) {
+        if (!mounted) return;
+
+        setState(() {
+          isLoadingLocation = false;
+          currentLocationText = 'Location service is turned off';
+        });
+
+        _showLocationError('Please turn on your phone location/GPS.');
+
+        return;
+      }
+
+      LocationPermission permission = await Geolocator.checkPermission();
+
+      if (permission == LocationPermission.denied) {
+        permission = await Geolocator.requestPermission();
+      }
+
+      if (permission == LocationPermission.denied) {
+        if (!mounted) return;
+
+        setState(() {
+          isLoadingLocation = false;
+          currentLocationText = 'Location permission denied';
+        });
+
+        _showLocationError(
+          'Location permission is required to detect your current location.',
+        );
+
+        return;
+      }
+
+      if (permission == LocationPermission.deniedForever) {
+        if (!mounted) return;
+
+        setState(() {
+          isLoadingLocation = false;
+          currentLocationText = 'Location permission blocked';
+        });
+
+        _showLocationError(
+          'Location permission is permanently denied. Please enable it from app settings.',
+        );
+
+        return;
+      }
+
+      final Position position = await Geolocator.getCurrentPosition(
+        locationSettings: const LocationSettings(
+          accuracy: LocationAccuracy.high,
+        ),
+      );
+
+      if (!mounted) return;
+
+      setState(() {
+        currentPosition = position;
+        isLoadingLocation = false;
+
+        currentLocationText =
+            'Lat: ${position.latitude.toStringAsFixed(5)}\n'
+            'Lng: ${position.longitude.toStringAsFixed(5)}';
+      });
+    } catch (e) {
+      if (!mounted) return;
+
+      setState(() {
+        isLoadingLocation = false;
+        currentLocationText = 'Unable to get current location';
+      });
+
+      _showLocationError(
+        'Unable to get your current location. Please try again.',
+      );
+    }
+  }
+
+  // =========================================================
+  // LOCATION ERROR
+  // =========================================================
+
+  void _showLocationError(String message) {
+    if (!mounted) return;
+
+    ScaffoldMessenger.of(context).hideCurrentSnackBar();
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        backgroundColor: Colors.red,
+        content: Text(message),
+        action: SnackBarAction(
+          label: 'Retry',
+          textColor: Colors.white,
+          onPressed: _getCurrentLocation,
+        ),
+      ),
+    );
+  }
+
+  // =========================================================
+  // OPEN LOCATION SELECTION
+  // =========================================================
+
+  void _openLocationSelection() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(builder: (context) => const LocationSelectionScreen()),
+    );
+  }
+
+  // =========================================================
+  // OPEN TOURISM & HOTELS
+  // =========================================================
+
+  void _openTourismHotels() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(builder: (context) => const TourismHotelsScreen()),
+    );
+  }
+
+  void _showRoleRegistrationMessage({
+    required String title,
+    required String message,
+  }) {
+    if (!mounted) {
+      return;
+    }
+
+    showDialog<void>(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          backgroundColor: darkCard,
+          title: Text(
+            title,
+            style: const TextStyle(
+              color: Colors.white,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          content: Text(
+            message,
+            style: const TextStyle(color: Colors.grey, height: 1.4),
+          ),
+          actions: [
+            ElevatedButton(
+              onPressed: () {
+                Navigator.pop(dialogContext);
+              },
+              style: ElevatedButton.styleFrom(
+                backgroundColor: yellow,
+                foregroundColor: Colors.black,
+              ),
+              child: const Text(
+                'OK',
+                style: TextStyle(fontWeight: FontWeight.bold),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        backgroundColor: const Color(0xFF0D0D0D),
+
+        leading: Builder(
+          builder: (context) {
+            return IconButton(
+              icon: const Icon(Icons.menu, color: Colors.white, size: 30),
+              onPressed: () {
+                Scaffold.of(context).openDrawer();
+              },
+            );
+          },
+        ),
+
+        title: const Text(
+          'SWAT RIDE',
+          style: TextStyle(fontWeight: FontWeight.bold),
+        ),
+      ),
+
+      // =======================================================
+      // SIDE MENU
+      // =======================================================
+      drawer: Drawer(
+        backgroundColor: const Color(0xFF0D0D0D),
+        child: SafeArea(
+          child: ListView(
+            padding: EdgeInsets.zero,
+            children: [
+              Container(
+                padding: const EdgeInsets.all(20),
+                color: yellow,
+                child: const Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Icon(Icons.local_taxi, size: 45, color: Colors.black),
+
+                    SizedBox(height: 10),
+
+                    Text(
+                      'SWAT RIDE',
+                      style: TextStyle(
+                        color: Colors.black,
+                        fontSize: 24,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+
+                    Text(
+                      'Your local ride partner',
+                      style: TextStyle(color: Colors.black87),
+                    ),
+                  ],
+                ),
+              ),
+
+              ListTile(
+                leading: const Icon(Icons.home, color: yellow),
+                title: const Text('Home'),
+                onTap: () {
+                  Navigator.pop(context);
+                },
+              ),
+
+              ListTile(
+                leading: const Icon(Icons.history, color: yellow),
+                title: const Text('My Rides'),
+                onTap: () {
+                  Navigator.pop(context);
+
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute<void>(
+                      builder: (context) => const MyRidesScreen(),
+                    ),
+                  );
+                },
+              ),
+
+              ListTile(
+                leading: const Icon(
+                  Icons.account_balance_wallet,
+                  color: yellow,
+                ),
+                title: const Text('Wallet'),
+                onTap: () {
+                  Navigator.pop(context);
+                },
+              ),
+
+              ListTile(
+                leading: const Icon(
+                  Icons.workspace_premium_outlined,
+                  color: yellow,
+                ),
+                title: const Text('Rewards & Loyalty'),
+                subtitle: const Text('Points, coupons, vouchers and cashback'),
+                onTap: () {
+                  final userId =
+                      FirebaseAuth.instance.currentUser?.uid.trim() ?? '';
+
+                  if (userId.isEmpty) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text('Please sign in to open Rewards.'),
+                      ),
+                    );
+                    return;
+                  }
+
+                  Navigator.pop(context);
+                  Navigator.pushNamed(
+                    context,
+                    RewardRouteNames.wallet,
+                    arguments: RewardRouteArguments(userId: userId),
+                  );
+                },
+              ),
+
+              ListTile(
+                leading: const Icon(Icons.work_outline, color: yellow),
+                title: const Text(
+                  'Become a Partner',
+                  style: TextStyle(fontWeight: FontWeight.bold),
+                ),
+                subtitle: const Text('Driver Ã¢â‚¬Â¢ Food Ã¢â‚¬Â¢ Hotel Ã¢â‚¬Â¢ Tourism'),
+                onTap: () {
+                  Navigator.pop(context);
+
+                  showModalBottomSheet(
+                    context: context,
+                    isScrollControlled: true,
+                    backgroundColor: const Color(0xFF1A1A1A),
+                    shape: const RoundedRectangleBorder(
+                      borderRadius: BorderRadius.vertical(
+                        top: Radius.circular(25),
+                      ),
+                    ),
+                    builder: (context) {
+                      return const RoleSelectionSheet();
+                    },
+                  );
+                },
+              ),
+
+              ListTile(
+                leading: const Icon(Icons.school, color: yellow),
+                title: const Text('Student Ride'),
+                onTap: () {
+                  Navigator.pop(context);
+                },
+              ),
+
+              ListTile(
+                leading: const Icon(Icons.local_offer, color: yellow),
+                title: const Text(
+                  'Promo Codes & Discounts',
+                  style: TextStyle(fontWeight: FontWeight.bold),
+                ),
+                subtitle: const Text('Manage available discounts'),
+                onTap: () {
+                  Navigator.pop(context);
+
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (context) => const PromoCodeScreen(),
+                    ),
+                  );
+                },
+              ),
+
+              ListTile(
+                leading: const Icon(Icons.travel_explore, color: yellow),
+                title: const Text(
+                  'Tourism & Hotels',
+                  style: TextStyle(fontWeight: FontWeight.bold),
+                ),
+                subtitle: const Text('Explore Swat and book hotels'),
+                onTap: () {
+                  Navigator.pop(context);
+                  _openTourismHotels();
+                },
+              ),
+
+              ListTile(
+                leading: const Icon(Icons.book_online, color: yellow),
+                title: const Text('My Bookings'),
+                onTap: () {
+                  Navigator.pop(context);
+
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute<void>(
+                      builder: (context) => const MyHotelBookingsScreen(),
+                    ),
+                  );
+                },
+              ),
+
+              const Divider(color: Colors.grey),
+
+              ListTile(
+                leading: const Icon(Icons.settings, color: yellow),
+                title: const Text('Settings'),
+                onTap: () {
+                  Navigator.pop(context);
+                },
+              ),
+
+              ListTile(
+                leading: const Icon(Icons.help_outline, color: yellow),
+                title: const Text('Help & Support'),
+                onTap: () {
+                  Navigator.pop(context);
+                },
+              ),
+            ],
+          ),
+        ),
+      ),
+
+      // =======================================================
+      // HOME BODY
+      // =======================================================
+      body: SafeArea(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'Good Morning Ã°Å¸â€˜â€¹',
+                style: TextStyle(color: Colors.grey, fontSize: 14),
+              ),
+
+              const SizedBox(height: 5),
+
+              const Text(
+                'Welcome to SWAT RIDE',
+                style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
+              ),
+
+              const SizedBox(height: 24),
+
+              // =================================================
+              // CURRENT LOCATION
+              // =================================================
+              GestureDetector(
+                onTap: _getCurrentLocation,
+                child: Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: darkCard,
+                    borderRadius: BorderRadius.circular(16),
+                  ),
+                  child: Row(
+                    children: [
+                      Container(
+                        width: 45,
+                        height: 45,
+                        decoration: BoxDecoration(
+                          color: yellow.withOpacity(0.15),
+                          shape: BoxShape.circle,
+                        ),
+                        child: const Icon(Icons.location_on, color: yellow),
+                      ),
+
+                      const SizedBox(width: 12),
+
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Text(
+                              'Your current location',
+                              style: TextStyle(
+                                color: Colors.grey,
+                                fontSize: 12,
+                              ),
+                            ),
+
+                            const SizedBox(height: 5),
+
+                            if (isLoadingLocation)
+                              const Row(
+                                children: [
+                                  SizedBox(
+                                    width: 16,
+                                    height: 16,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                      color: yellow,
+                                    ),
+                                  ),
+
+                                  SizedBox(width: 8),
+
+                                  Text(
+                                    'Detecting location...',
+                                    style: TextStyle(
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
+                                ],
+                              )
+                            else
+                              Text(
+                                currentLocationText,
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.bold,
+                                  height: 1.4,
+                                ),
+                              ),
+                          ],
+                        ),
+                      ),
+
+                      const Icon(Icons.refresh, color: yellow),
+                    ],
+                  ),
+                ),
+              ),
+
+              const SizedBox(height: 20),
+
+              // =================================================
+              // WHERE TO
+              // =================================================
+              GestureDetector(
+                onTap: _openLocationSelection,
+                child: Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(18),
+                  decoration: BoxDecoration(
+                    color: yellow,
+                    borderRadius: BorderRadius.circular(16),
+                  ),
+                  child: const Row(
+                    children: [
+                      Icon(Icons.search, color: Colors.black, size: 28),
+
+                      SizedBox(width: 12),
+
+                      Text(
+                        'Where do you want to go?',
+                        style: TextStyle(
+                          color: Colors.black,
+                          fontSize: 16,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+
+              const SizedBox(height: 28),
+
+              // =================================================
+              // SERVICES
+              // =================================================
+              const Text(
+                'Our Services',
+                style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+              ),
+
+              const SizedBox(height: 14),
+
+              GridView.count(
+                crossAxisCount: 2,
+                shrinkWrap: true,
+                physics: const NeverScrollableScrollPhysics(),
+                crossAxisSpacing: 12,
+                mainAxisSpacing: 12,
+                childAspectRatio: 1.3,
+                children: [
+                  // RIDES
+                  _serviceCard(
+                    icon: Icons.local_taxi,
+                    title: 'Rides',
+                    subtitle: 'Book a ride',
+                    onTap: _openLocationSelection,
+                  ),
+
+                  // FOOD
+                  _serviceCard(
+                    icon: Icons.restaurant,
+                    title: 'Food',
+                    subtitle: 'Order food',
+                    onTap: () {
+                      Navigator.pushNamed(context, FoodRoutes.restaurantList);
+                    },
+                  ),
+
+                  // CARGO
+                  _serviceCard(
+                    icon: Icons.local_shipping,
+                    title: 'Cargo',
+                    subtitle: 'Send packages',
+                    onTap: () {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => const CargoHomeScreen(),
+                        ),
+                      );
+                    },
+                  ),
+
+                  // STUDENT
+                  _serviceCard(
+                    icon: Icons.school,
+                    title: 'Student Ride',
+                    subtitle: 'Safe transport',
+                  ),
+
+                  // =================================================
+                  // TOURISM & HOTELS
+                  // =================================================
+                  _serviceCard(
+                    icon: Icons.travel_explore,
+                    title: 'Tourism & Hotels',
+                    subtitle: 'Explore Swat & book stays',
+                    onTap: _openTourismHotels,
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  // =========================================================
+  // SERVICE CARD
+  // =========================================================
+
+  Widget _serviceCard({
+    required IconData icon,
+    required String title,
+    required String subtitle,
+    VoidCallback? onTap,
+  }) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: darkCard,
+          borderRadius: BorderRadius.circular(18),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(icon, color: yellow, size: 32),
+
+            const SizedBox(height: 10),
+
+            Text(
+              title,
+              style: const TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
+            ),
+
+            const SizedBox(height: 4),
+
+            Text(
+              subtitle,
+              style: const TextStyle(color: Colors.grey, fontSize: 11),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class RoleSelectionSheet extends StatelessWidget {
+  const RoleSelectionSheet({super.key});
+
+  static const Color yellow = Color(0xFFFFD60A);
+  static const Color cardColor = Color(0xFF1A1A1A);
+  static const Color optionColor = Color(0xFF252525);
+
+  @override
+  Widget build(BuildContext context) {
+    return SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 14, 16, 24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Center(
+              child: Container(
+                width: 42,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: Colors.grey.shade700,
+                  borderRadius: BorderRadius.circular(20),
+                ),
+              ),
+            ),
+            const SizedBox(height: 18),
+            const Text(
+              'Choose how you want to earn',
+              style: TextStyle(fontSize: 21, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 5),
+            const Text(
+              'Select a role to start registration or open its application.',
+              style: TextStyle(color: Colors.grey, fontSize: 12),
+            ),
+            const SizedBox(height: 18),
+
+            _roleCard(
+              context: context,
+              icon: Icons.local_taxi,
+              title: 'Normal Ride Driver',
+              subtitle: 'Drive regular passenger rides',
+              onTap: () {
+                Navigator.pop(context);
+
+                Navigator.push(
+                  context,
+                  MaterialPageRoute<void>(
+                    builder: (context) => const DriverRegistrationScreen(),
+                  ),
+                );
+              },
+            ),
+
+            _roleCard(
+              context: context,
+              icon: Icons.delivery_dining,
+              title: 'Food Delivery Rider',
+              subtitle: 'Deliver restaurant food orders',
+              onTap: () {
+                Navigator.pop(context);
+
+                Navigator.pushNamed(context, FoodRoutes.riderRegistration);
+              },
+            ),
+
+            _roleCard(
+              context: context,
+              icon: Icons.storefront_outlined,
+              title: 'Restaurant Partner',
+              subtitle: 'Register your restaurant with SWAT RIDE',
+              onTap: () {
+                Navigator.pop(context);
+
+                Navigator.pushNamed(context, FoodRoutes.partnerRegistration);
+              },
+            ),
+
+            _roleCard(
+              context: context,
+              icon: Icons.hotel_outlined,
+              title: 'Hotel Partner',
+              subtitle: 'Register and manage your hotel',
+              onTap: () {
+                Navigator.pop(context);
+
+                Navigator.push(
+                  context,
+                  MaterialPageRoute<void>(
+                    builder: (context) =>
+                        const HotelPartnerRegistrationScreen(),
+                  ),
+                );
+              },
+            ),
+
+            _roleCard(
+              context: context,
+              icon: Icons.tour,
+              title: 'Tourism Driver',
+              subtitle: 'Drive tours and multi-day travel jobs',
+              onTap: () {
+                Navigator.pop(context);
+
+                Navigator.push(
+                  context,
+                  MaterialPageRoute<void>(
+                    builder: (context) =>
+                        const TourismDriverRegistrationScreen(),
+                  ),
+                );
+              },
+            ),
+
+            _roleCard(
+              context: context,
+              icon: Icons.person_pin_circle,
+              title: 'Tour Guide',
+              subtitle: 'Apply as a local Swat tour guide',
+              onTap: () {
+                Navigator.pop(context);
+
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (context) => const TourGuideRegistrationScreen(),
+                  ),
+                );
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  static Widget _roleCard({
+    required BuildContext context,
+    required IconData icon,
+    required String title,
+    required String subtitle,
+    required VoidCallback onTap,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Material(
+        color: optionColor,
+        borderRadius: BorderRadius.circular(16),
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(16),
+          child: Padding(
+            padding: const EdgeInsets.all(15),
+            child: Row(
+              children: <Widget>[
+                Container(
+                  width: 46,
+                  height: 46,
+                  decoration: BoxDecoration(
+                    color: yellow.withValues(alpha: 0.12),
+                    shape: BoxShape.circle,
+                  ),
+                  child: Icon(icon, color: yellow),
+                ),
+                const SizedBox(width: 13),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: <Widget>[
+                      Text(
+                        title,
+                        style: const TextStyle(
+                          fontSize: 15,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        subtitle,
+                        style: const TextStyle(
+                          color: Colors.grey,
+                          fontSize: 11,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const Icon(
+                  Icons.arrow_forward_ios,
+                  color: Colors.grey,
+                  size: 16,
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+

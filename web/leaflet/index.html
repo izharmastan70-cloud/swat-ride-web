@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SWAT Ride Map - OpenStreetMap</title>
+    
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    
+    <!-- Custom Map CSS -->
+    <link rel="stylesheet" href="styles.css">
+    
+    <!-- Leaflet JS -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    
+    <!-- Leaflet Marker Clustering (optional) -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.0/dist/MarkerCluster.css" />
+    <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.0/dist/MarkerCluster.Default.css" />
+    <script src="https://unpkg.com/leaflet.markercluster@1.5.0/dist/leaflet.markercluster.js"></script>
+</head>
+<body>
+    <div id="map" class="map-container"></div>
+    <div id="controls" class="controls-container">
+        <button id="current-location-btn" class="control-btn" title="Use current location">
+            <span class="icon">📍</span>
+            <span class="text">My Location</span>
+        </button>
+        <button id="clear-pins-btn" class="control-btn" title="Clear all pins">
+            <span class="icon">🗑️</span>
+            <span class="text">Clear</span>
+        </button>
+    </div>
+    
+    <div id="location-info" class="location-info-panel">
+        <div id="location-title" class="location-title">Location Selected</div>
+        <div id="location-coords" class="location-coords">Loading...</div>
+        <button id="confirm-location-btn" class="action-btn">Confirm Location</button>
+    </div>
+
+    <!-- Custom Map JavaScript -->
+    <script src="map.js"></script>
+    
+    <!-- Bridge to Flutter/Dart (if needed) -->
+    <script>
+        // Communication bridge for Flutter web platform
+        window.mapBridge = {
+            // Export current location to Flutter
+            getSelectedLocation: function() {
+                if (window.swatRideMap && window.swatRideMap.selectedLocation) {
+                    return {
+                        latitude: window.swatRideMap.selectedLocation.lat,
+                        longitude: window.swatRideMap.selectedLocation.lng,
+                        addressName: window.swatRideMap.selectedLocationName || 'Selected Location',
+                        selectionMethod: 'mapPin',
+                        selectedAt: new Date().toISOString()
+                    };
+                }
+                return null;
+            },
+            
+            // Set location from Flutter
+            setLocation: function(lat, lng, name) {
+                if (window.swatRideMap) {
+                    window.swatRideMap.setLocation(lat, lng, name);
+                }
+            },
+            
+            // Get current GPS location
+            getCurrentLocation: function(callback) {
+                if (navigator.geolocation) {
+                    navigator.geolocation.getCurrentPosition(
+                        function(position) {
+                            callback({
+                                success: true,
+                                latitude: position.coords.latitude,
+                                longitude: position.coords.longitude,
+                                accuracy: position.coords.accuracy
+                            });
+                        },
+                        function(error) {
+                            callback({
+                                success: false,
+                                error: error.message
+                            });
+                        },
+                        {
+                            timeout: 10000,
+                            enableHighAccuracy: true
+                        }
+                    );
+                } else {
+                    callback({
+                        success: false,
+                        error: 'Geolocation not supported'
+                    });
+                }
+            }
+        };
+        
+        // Initialize map when document is ready
+        document.addEventListener('DOMContentLoaded', function() {
+            if (window.swatRideMap) {
+                window.swatRideMap.init();
+            }
+        });
+    </script>
+</body>
+</html>

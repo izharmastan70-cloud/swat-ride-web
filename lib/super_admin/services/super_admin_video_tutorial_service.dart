@@ -1,0 +1,667 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
+
+import '../../help/models/help_video_tutorial_model.dart';
+
+class SuperAdminVideoTutorialService {
+  SuperAdminVideoTutorialService({FirebaseFirestore? firestore})
+    : _firestore = firestore ?? FirebaseFirestore.instance;
+
+  static const String collectionName = 'help_video_tutorials';
+
+  final FirebaseFirestore _firestore;
+
+  CollectionReference<Map<String, dynamic>> get _collection =>
+      _firestore.collection(collectionName);
+
+  Stream<List<HelpVideoTutorialModel>> watchTutorials() {
+    return _collection.snapshots().map((snapshot) {
+      final List<HelpVideoTutorialModel> tutorials = snapshot.docs
+          .map(
+            (document) => HelpVideoTutorialModel.fromMap(
+              id: document.id,
+              map: document.data(),
+            ),
+          )
+          .toList();
+
+      tutorials.sort((first, second) {
+        final int orderCompare = first.displayOrder.compareTo(
+          second.displayOrder,
+        );
+
+        if (orderCompare != 0) {
+          return orderCompare;
+        }
+
+        return first.title.toLowerCase().compareTo(second.title.toLowerCase());
+      });
+
+      return List<HelpVideoTutorialModel>.unmodifiable(tutorials);
+    });
+  }
+
+  Future<void> createTutorial({
+    required String title,
+    required String description,
+    required String videoUrl,
+    required String category,
+    required int displayOrder,
+    required bool isEnabled,
+    required String adminId,
+    String module = 'general',
+    String feature = '',
+    String language = 'und',
+    String audience = 'customer',
+    int duration = 0,
+    String appVersion = '',
+    String videoVersion = '1',
+    List<String> keywords = const <String>[],
+    List<String> intents = const <String>[],
+    String publishedStatus = '',
+    String storageReference = '',
+    String reviewedBy = '',
+    bool outdated = false,
+    String maintenanceSource = 'manual',
+    String changeSummary = '',
+    bool requiresApproval = false,
+    String supersedesVideoId = '',
+    DateTime? changeDetectedAt,
+    String updateTaskId = '',
+  }) async {
+    final String normalizedAdminId = _requiredAdminId(adminId);
+
+    final String effectivePublishedStatus = publishedStatus.trim().isEmpty
+        ? (isEnabled ? 'published' : 'draft')
+        : publishedStatus.trim().toLowerCase();
+
+    final String effectiveApprovalStatus = requiresApproval
+        ? 'pending'
+        : 'approved';
+
+    final bool effectiveEnabled = requiresApproval ? false : isEnabled;
+
+    final Map<String, dynamic> basicData = _validatedBasicData(
+      title: title,
+      description: description,
+      videoUrl: videoUrl,
+      category: category,
+      displayOrder: displayOrder,
+      isEnabled: effectiveEnabled,
+    );
+
+    final Map<String, dynamic> advancedData = _validatedAdvancedData(
+      module: module,
+      feature: feature,
+      language: language,
+      audience: audience,
+      duration: duration,
+      appVersion: appVersion,
+      videoVersion: videoVersion,
+      keywords: keywords,
+      intents: intents,
+      publishedStatus: effectivePublishedStatus,
+      storageReference: storageReference,
+      reviewedBy: reviewedBy,
+      outdated: outdated,
+      maintenanceSource: maintenanceSource,
+      changeSummary: changeSummary,
+      requiresApproval: requiresApproval,
+      approvalStatus: effectiveApprovalStatus,
+      approvedBy: requiresApproval ? '' : normalizedAdminId,
+      supersedesVideoId: supersedesVideoId,
+      changeDetectedAt: changeDetectedAt,
+      updateTaskId: updateTaskId,
+    );
+
+    if (effectiveEnabled) {
+      _assertCanEnable(advancedData);
+    }
+
+    if (advancedData['maintenanceSource'] == 'agent_change_detection' &&
+        advancedData['requiresApproval'] != true) {
+      throw ArgumentError(
+        'AI/change-detected tutorial drafts must require approval.',
+      );
+    }
+
+    if (advancedData['maintenanceSource'] == 'agent_change_detection' &&
+        advancedData['approvalStatus'] != 'pending') {
+      throw ArgumentError(
+        'AI/change-detected tutorial drafts must start as pending.',
+      );
+    }
+
+    await _collection.add(<String, dynamic>{
+      ...basicData,
+      ...advancedData,
+      if (!requiresApproval) 'approvedAt': FieldValue.serverTimestamp(),
+      'createdAt': FieldValue.serverTimestamp(),
+      'createdBy': normalizedAdminId,
+      'updatedAt': FieldValue.serverTimestamp(),
+      'updatedBy': normalizedAdminId,
+    });
+  }
+
+  Future<void> updateTutorial({
+    required String tutorialId,
+    required String title,
+    required String description,
+    required String videoUrl,
+    required String category,
+    required int displayOrder,
+    required bool isEnabled,
+    required String adminId,
+  }) async {
+    final String normalizedId = _requiredTutorialId(tutorialId);
+
+    final String normalizedAdminId = _requiredAdminId(adminId);
+
+    final DocumentSnapshot<Map<String, dynamic>> snapshot = await _collection
+        .doc(normalizedId)
+        .get();
+
+    if (!snapshot.exists) {
+      throw StateError('Tutorial does not exist.');
+    }
+
+    final Map<String, dynamic> current = snapshot.data() ?? <String, dynamic>{};
+
+    if (isEnabled) {
+      _assertCanEnable(current);
+    }
+
+    final Map<String, dynamic> data = _validatedBasicData(
+      title: title,
+      description: description,
+      videoUrl: videoUrl,
+      category: category,
+      displayOrder: displayOrder,
+      isEnabled: isEnabled,
+    );
+
+    await _collection.doc(normalizedId).update(<String, dynamic>{
+      ...data,
+      'updatedAt': FieldValue.serverTimestamp(),
+      'updatedBy': normalizedAdminId,
+    });
+  }
+
+  Future<void> updateAdvancedMetadata({
+    required String tutorialId,
+    required String module,
+    required String feature,
+    required String language,
+    required String audience,
+    required int duration,
+    required String appVersion,
+    required String videoVersion,
+    required List<String> keywords,
+    required List<String> intents,
+    required String publishedStatus,
+    required String storageReference,
+    required String reviewedBy,
+    required bool outdated,
+    required String maintenanceSource,
+    required String changeSummary,
+    required bool requiresApproval,
+    required String supersedesVideoId,
+    required String updateTaskId,
+    required String adminId,
+    DateTime? changeDetectedAt,
+  }) async {
+    final String normalizedId = _requiredTutorialId(tutorialId);
+
+    final String normalizedAdminId = _requiredAdminId(adminId);
+
+    final DocumentSnapshot<Map<String, dynamic>> snapshot = await _collection
+        .doc(normalizedId)
+        .get();
+
+    if (!snapshot.exists) {
+      throw StateError('Tutorial does not exist.');
+    }
+
+    final String effectiveApprovalStatus = requiresApproval
+        ? 'pending'
+        : 'approved';
+
+    final Map<String, dynamic> advancedData = _validatedAdvancedData(
+      module: module,
+      feature: feature,
+      language: language,
+      audience: audience,
+      duration: duration,
+      appVersion: appVersion,
+      videoVersion: videoVersion,
+      keywords: keywords,
+      intents: intents,
+      publishedStatus: publishedStatus,
+      storageReference: storageReference,
+      reviewedBy: reviewedBy,
+      outdated: outdated,
+      maintenanceSource: maintenanceSource,
+      changeSummary: changeSummary,
+      requiresApproval: requiresApproval,
+      approvalStatus: effectiveApprovalStatus,
+      approvedBy: requiresApproval ? '' : normalizedAdminId,
+      supersedesVideoId: supersedesVideoId,
+      changeDetectedAt: changeDetectedAt,
+      updateTaskId: updateTaskId,
+    );
+
+    final bool mustDisable =
+        requiresApproval ||
+        outdated ||
+        advancedData['publishedStatus'] != 'published' ||
+        advancedData['audience'].toString().toLowerCase() != 'customer';
+
+    await _collection.doc(normalizedId).update(<String, dynamic>{
+      ...advancedData,
+      if (requiresApproval)
+        'approvedAt': FieldValue.delete()
+      else
+        'approvedAt': FieldValue.serverTimestamp(),
+      if (mustDisable) 'isEnabled': false,
+      'updatedAt': FieldValue.serverTimestamp(),
+      'updatedBy': normalizedAdminId,
+    });
+  }
+
+  Future<void> approveTutorial({
+    required String tutorialId,
+    required String adminId,
+  }) async {
+    final String normalizedId = _requiredTutorialId(tutorialId);
+
+    final String normalizedAdminId = _requiredAdminId(adminId);
+
+    final DocumentSnapshot<Map<String, dynamic>> snapshot = await _collection
+        .doc(normalizedId)
+        .get();
+
+    if (!snapshot.exists) {
+      throw StateError('Tutorial does not exist.');
+    }
+
+    final Map<String, dynamic> data = snapshot.data() ?? <String, dynamic>{};
+
+    if (_boolValue(data['outdated'], fallback: false)) {
+      throw StateError('Outdated tutorial cannot be approved for publication.');
+    }
+
+    final String videoUrl = data['videoUrl']?.toString().trim() ?? '';
+
+    final String normalizedAudience = _valueOrFallback(
+      data['audience']?.toString() ?? '',
+      'customer',
+    ).toLowerCase();
+
+    // Private role tutorials may be approved, but only
+    // customer tutorials may enter the public Help Library.
+    final bool enablePublicly = normalizedAudience == 'customer';
+    if (!_isSafeVideoUrl(videoUrl)) {
+      throw StateError(
+        'Tutorial cannot be approved without a valid HTTPS video URL.',
+      );
+    }
+
+    await _collection.doc(normalizedId).update(<String, dynamic>{
+      'requiresApproval': true,
+      'approvalStatus': 'approved',
+      'approvedBy': normalizedAdminId,
+      'approvedAt': FieldValue.serverTimestamp(),
+      'reviewedBy': normalizedAdminId,
+      'publishedStatus': 'published',
+      'isEnabled': enablePublicly,
+      'updatedAt': FieldValue.serverTimestamp(),
+      'updatedBy': normalizedAdminId,
+    });
+  }
+
+  Future<void> rejectTutorial({
+    required String tutorialId,
+    required String adminId,
+  }) async {
+    final String normalizedId = _requiredTutorialId(tutorialId);
+
+    final String normalizedAdminId = _requiredAdminId(adminId);
+
+    await _ensureTutorialExists(normalizedId);
+
+    await _collection.doc(normalizedId).update(<String, dynamic>{
+      'requiresApproval': true,
+      'approvalStatus': 'rejected',
+      'approvedBy': '',
+      'approvedAt': FieldValue.delete(),
+      'publishedStatus': 'draft',
+      'isEnabled': false,
+      'updatedAt': FieldValue.serverTimestamp(),
+      'updatedBy': normalizedAdminId,
+    });
+  }
+
+  Future<void> markOutdated({
+    required String tutorialId,
+    required bool outdated,
+    required String adminId,
+  }) async {
+    final String normalizedId = _requiredTutorialId(tutorialId);
+
+    final String normalizedAdminId = _requiredAdminId(adminId);
+
+    await _ensureTutorialExists(normalizedId);
+
+    await _collection.doc(normalizedId).update(<String, dynamic>{
+      'outdated': outdated,
+      if (outdated) 'isEnabled': false,
+      'updatedAt': FieldValue.serverTimestamp(),
+      'updatedBy': normalizedAdminId,
+    });
+  }
+
+  Future<void> archiveTutorial({
+    required String tutorialId,
+    required String adminId,
+  }) async {
+    final String normalizedId = _requiredTutorialId(tutorialId);
+
+    final String normalizedAdminId = _requiredAdminId(adminId);
+
+    await _ensureTutorialExists(normalizedId);
+
+    await _collection.doc(normalizedId).update(<String, dynamic>{
+      'publishedStatus': 'archived',
+      'isEnabled': false,
+      'updatedAt': FieldValue.serverTimestamp(),
+      'updatedBy': normalizedAdminId,
+    });
+  }
+
+  Future<void> setEnabled({
+    required String tutorialId,
+    required bool isEnabled,
+    required String adminId,
+  }) async {
+    final String normalizedId = _requiredTutorialId(tutorialId);
+
+    final String normalizedAdminId = _requiredAdminId(adminId);
+
+    final DocumentSnapshot<Map<String, dynamic>> snapshot = await _collection
+        .doc(normalizedId)
+        .get();
+
+    if (!snapshot.exists) {
+      throw StateError('Tutorial does not exist.');
+    }
+
+    if (isEnabled) {
+      _assertCanEnable(snapshot.data() ?? <String, dynamic>{});
+    }
+
+    await _collection.doc(normalizedId).update(<String, dynamic>{
+      'isEnabled': isEnabled,
+      'updatedAt': FieldValue.serverTimestamp(),
+      'updatedBy': normalizedAdminId,
+    });
+  }
+
+  Future<void> _ensureTutorialExists(String tutorialId) async {
+    final DocumentSnapshot<Map<String, dynamic>> snapshot = await _collection
+        .doc(tutorialId)
+        .get();
+
+    if (!snapshot.exists) {
+      throw StateError('Tutorial does not exist.');
+    }
+  }
+
+  Map<String, dynamic> _validatedBasicData({
+    required String title,
+    required String description,
+    required String videoUrl,
+    required String category,
+    required int displayOrder,
+    required bool isEnabled,
+  }) {
+    final String normalizedTitle = title.trim();
+    final String normalizedDescription = description.trim();
+    final String normalizedVideoUrl = videoUrl.trim();
+    final String normalizedCategory = category.trim().isEmpty
+        ? 'general'
+        : category.trim();
+
+    if (normalizedTitle.isEmpty) {
+      throw ArgumentError('Tutorial title is required.');
+    }
+
+    if (!_isSafeVideoUrl(normalizedVideoUrl)) {
+      throw ArgumentError('A valid HTTPS video URL is required.');
+    }
+
+    if (displayOrder < 0) {
+      throw ArgumentError('Display order cannot be negative.');
+    }
+
+    return <String, dynamic>{
+      'title': normalizedTitle,
+      'description': normalizedDescription,
+      'videoUrl': normalizedVideoUrl,
+      'category': normalizedCategory,
+      'displayOrder': displayOrder,
+      'isEnabled': isEnabled,
+    };
+  }
+
+  Map<String, dynamic> _validatedAdvancedData({
+    required String module,
+    required String feature,
+    required String language,
+    required String audience,
+    required int duration,
+    required String appVersion,
+    required String videoVersion,
+    required List<String> keywords,
+    required List<String> intents,
+    required String publishedStatus,
+    required String storageReference,
+    required String reviewedBy,
+    required bool outdated,
+    required String maintenanceSource,
+    required String changeSummary,
+    required bool requiresApproval,
+    required String approvalStatus,
+    required String approvedBy,
+    required String supersedesVideoId,
+    required DateTime? changeDetectedAt,
+    required String updateTaskId,
+  }) {
+    if (duration < 0) {
+      throw ArgumentError('Tutorial duration cannot be negative.');
+    }
+
+    final String normalizedModule = _valueOrFallback(module, 'general');
+
+    final String normalizedLanguage = _valueOrFallback(language, 'und');
+
+    final String normalizedAudience = _valueOrFallback(audience, 'customer');
+
+    final String normalizedVideoVersion = _valueOrFallback(videoVersion, '1');
+
+    final String normalizedPublishedStatus = _valueOrFallback(
+      publishedStatus,
+      'draft',
+    ).toLowerCase();
+
+    const Set<String> allowedPublicationStates = <String>{
+      'draft',
+      'published',
+      'archived',
+    };
+
+    if (!allowedPublicationStates.contains(normalizedPublishedStatus)) {
+      throw ArgumentError(
+        'Published status must be draft, published, or archived.',
+      );
+    }
+
+    final String normalizedApprovalStatus = _valueOrFallback(
+      approvalStatus,
+      requiresApproval ? 'pending' : 'approved',
+    ).toLowerCase();
+
+    const Set<String> allowedApprovalStates = <String>{
+      'pending',
+      'approved',
+      'rejected',
+    };
+
+    if (!allowedApprovalStates.contains(normalizedApprovalStatus)) {
+      throw ArgumentError(
+        'Approval status must be pending, approved, or rejected.',
+      );
+    }
+
+    final String normalizedMaintenanceSource = _valueOrFallback(
+      maintenanceSource,
+      'manual',
+    ).toLowerCase();
+
+    if (normalizedMaintenanceSource == 'agent_change_detection' &&
+        !requiresApproval) {
+      throw ArgumentError(
+        'Agent change-detection updates require human approval.',
+      );
+    }
+
+    if (outdated && normalizedPublishedStatus == 'published') {
+      throw ArgumentError('Outdated tutorial cannot be marked published.');
+    }
+
+    return <String, dynamic>{
+      'module': normalizedModule,
+      'feature': feature.trim(),
+      'language': normalizedLanguage,
+      'audience': normalizedAudience,
+      'duration': duration,
+      'appVersion': appVersion.trim(),
+      'videoVersion': normalizedVideoVersion,
+      'keywords': _cleanList(keywords),
+      'intents': _cleanList(intents),
+      'publishedStatus': normalizedPublishedStatus,
+      'storageReference': storageReference.trim(),
+      'reviewedBy': reviewedBy.trim(),
+      'outdated': outdated,
+      'maintenanceSource': normalizedMaintenanceSource,
+      'changeSummary': changeSummary.trim(),
+      'requiresApproval': requiresApproval,
+      'approvalStatus': normalizedApprovalStatus,
+      'approvedBy': approvedBy.trim(),
+      'supersedesVideoId': supersedesVideoId.trim(),
+      if (changeDetectedAt != null)
+        'changeDetectedAt': Timestamp.fromDate(changeDetectedAt),
+      'updateTaskId': updateTaskId.trim(),
+    };
+  }
+
+  void _assertCanEnable(Map<String, dynamic> data) {
+    final bool outdated = _boolValue(data['outdated'], fallback: false);
+
+    if (outdated) {
+      throw StateError('Outdated tutorial cannot be enabled.');
+    }
+
+    final bool requiresApproval = _boolValue(
+      data['requiresApproval'],
+      fallback: false,
+    );
+
+    final String approvalStatus = _valueOrFallback(
+      data['approvalStatus']?.toString() ?? '',
+      'approved',
+    ).toLowerCase();
+
+    if (requiresApproval && approvalStatus != 'approved') {
+      throw StateError(
+        'Tutorial requires Owner/Super Admin approval before publication.',
+      );
+    }
+
+    final String publishedStatus = _valueOrFallback(
+      data['publishedStatus']?.toString() ?? '',
+      'published',
+    ).toLowerCase();
+
+    if (publishedStatus != 'published') {
+      throw StateError('Only published tutorials can be enabled.');
+    }
+
+    final String audience = _valueOrFallback(
+      data['audience']?.toString() ?? '',
+      'customer',
+    ).toLowerCase();
+
+    if (audience != 'customer') {
+      throw StateError(
+        'Private role training cannot be enabled in the public customer Video Library.',
+      );
+    }
+  }
+
+  String _requiredTutorialId(String value) {
+    final String normalized = value.trim();
+
+    if (normalized.isEmpty) {
+      throw ArgumentError('Tutorial ID is required.');
+    }
+
+    return normalized;
+  }
+
+  String _requiredAdminId(String value) {
+    final String normalized = value.trim();
+
+    if (normalized.isEmpty) {
+      throw ArgumentError('Super Admin ID is required.');
+    }
+
+    return normalized;
+  }
+
+  String _valueOrFallback(String value, String fallback) {
+    final String normalized = value.trim();
+
+    return normalized.isEmpty ? fallback : normalized;
+  }
+
+  List<String> _cleanList(List<String> values) {
+    final List<String> result = values
+        .map((value) => value.trim())
+        .where((value) => value.isNotEmpty)
+        .toSet()
+        .toList(growable: false);
+
+    return List<String>.unmodifiable(result);
+  }
+
+  bool _boolValue(dynamic value, {required bool fallback}) {
+    if (value is bool) {
+      return value;
+    }
+
+    return fallback;
+  }
+
+  bool _isSafeVideoUrl(String value) {
+    final Uri? uri = Uri.tryParse(value.trim());
+
+    if (uri == null) {
+      return false;
+    }
+
+    if (uri.scheme.toLowerCase() != 'https') {
+      return false;
+    }
+
+    return uri.host.trim().isNotEmpty;
+  }
+}

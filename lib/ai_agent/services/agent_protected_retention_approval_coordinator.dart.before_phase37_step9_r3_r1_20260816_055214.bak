@@ -1,0 +1,187 @@
+import '../models/agent_approval_request.dart';
+import '../models/agent_protected_retention_action_request.dart';
+import 'agent_approval_service.dart';
+import 'agent_audit_recorder.dart';
+import 'agent_protected_retention_action_policy.dart';
+
+/// Result of requesting approval for a protected-retention action.
+///
+/// IMPORTANT:
+/// This result represents approval-workflow creation only.
+/// It does NOT authorize or execute protected-data deletion.
+class AgentProtectedRetentionApprovalResult {
+  final AgentProtectedRetentionActionDecision policyDecision;
+  final AgentApprovalRequest? approval;
+
+  const AgentProtectedRetentionApprovalResult({
+    required this.policyDecision,
+    required this.approval,
+  });
+
+  bool get approvalCreated => approval != null;
+
+  bool get executionAuthorized => false;
+}
+
+/// Connects protected-retention requests to the EXISTING
+/// AgentApprovalService + AgentAuditRecorder architecture.
+///
+/// Safety guarantees in this phase:
+/// - Super Admin request policy is evaluated first.
+/// - Exact action scope is attached to the approval.
+/// - Approval is time-limited by the existing Approval Service.
+/// - Approval creation is appended to the existing audit trail.
+/// - NO protected-data deletion is executed here.
+/// - NO generic Firestore delete/write API is exposed here.
+class AgentProtectedRetentionApprovalCoordinator {
+  static const String roleId = 'super_admin';
+
+  static const String actionId = 'retention.protected_data_action';
+
+  static const String module = 'retention';
+
+  static const String risk = 'CRITICAL';
+
+  static const Duration approvalValidity = Duration(minutes: 15);
+
+  final AgentApprovalService approvalService;
+  final AgentAuditRecorder auditRecorder;
+
+  const AgentProtectedRetentionApprovalCoordinator({
+    required this.approvalService,
+    required this.auditRecorder,
+  });
+
+  Future<AgentProtectedRetentionApprovalResult> requestApproval({
+    required AgentProtectedRetentionActionRequest request,
+  }) async {
+    final AgentProtectedRetentionActionDecision decision =
+        AgentProtectedRetentionActionPolicy.evaluate(request);
+
+    if (!decision.allowedToRequestApproval) {
+      return AgentProtectedRetentionApprovalResult(
+        policyDecision: decision,
+        approval: null,
+      );
+    }
+
+    final String actorId = request.requestedBy.trim();
+
+    if (actorId.isEmpty) {
+      throw const AgentProtectedRetentionApprovalException(
+        'Protected retention approval requires actor identity.',
+      );
+    }
+
+    final Map<String, dynamic> scope = _buildApprovalScope(request);
+
+    final AgentApprovalRequest approval = await approvalService.createRequest(
+      roleId: roleId,
+      actionId: actionId,
+      module: module,
+      reason: request.reason.trim(),
+      risk: risk,
+      requestedBy: actorId,
+      actionScope: scope,
+      validity: approvalValidity,
+    );
+
+    await auditRecorder.approvalRequested(request: approval, actorId: actorId);
+
+    return AgentProtectedRetentionApprovalResult(
+      policyDecision: decision,
+      approval: approval,
+    );
+  }
+
+  /// Exact immutable approval scope.
+  ///
+  /// Confirmation text itself is deliberately NOT persisted.
+  /// Only the fact that exact confirmation passed is recorded.
+  static Map<String, dynamic> _buildApprovalScope(
+    AgentProtectedRetentionActionRequest request,
+  ) {
+    return <String, dynamic>{
+      'requestId': request.requestId.trim(),
+      'actionType': request.actionType.name,
+      'dataClass': request.dataClass.name,
+      'collectionPath': request.collectionPath.trim(),
+      'recordIds': List<String>.unmodifiable(
+        request.recordIds
+            .map((String value) => value.trim())
+            .where((String value) => value.isNotEmpty),
+      ),
+      'requestedBy': request.requestedBy.trim(),
+      'requestedByRole': request.requestedByRole.trim(),
+      'explicitConfirmationPassed': request.hasExplicitConfirmation,
+      'protectedDataAction': true,
+    };
+  }
+
+  /// Consumes one already-approved protected-retention approval.
+  ///
+  /// Safety:
+  /// - exact role/action/module/scope must still match;
+  /// - approval must still be valid;
+  /// - approval may only be consumed once;
+  /// - successful consumption still does NOT delete data.
+  Future<AgentApprovalRequest> consumeApprovedProtectedAction({
+    required String approvalId,
+    required AgentProtectedRetentionActionRequest request,
+  }) async {
+    final String safeApprovalId = approvalId.trim();
+
+    if (safeApprovalId.isEmpty) {
+      throw const AgentProtectedRetentionApprovalException(
+        'Protected retention approvalId is required.',
+      );
+    }
+
+    final AgentProtectedRetentionActionDecision policyDecision =
+        AgentProtectedRetentionActionPolicy.evaluate(request);
+
+    if (!policyDecision.allowedToRequestApproval) {
+      throw AgentProtectedRetentionApprovalException(
+        'Protected retention request no longer passes policy: '
+        '${policyDecision.decisionCode}.',
+      );
+    }
+
+    final Map<String, dynamic> expectedScope = _buildApprovalScope(request);
+
+    final AgentApprovalRequest consumed = await approvalService
+        .consumeApprovedRequest(
+          approvalId: safeApprovalId,
+          expectedRoleId: roleId,
+          expectedActionId: actionId,
+          expectedModule: module,
+          expectedActionScope: expectedScope,
+        );
+
+    await auditRecorder.approvalDecision(
+      request: consumed,
+      actorId: request.requestedBy.trim(),
+      reason:
+          'Protected retention approval consumed for exact approved scope. '
+          'No deletion executed.',
+    );
+
+    return consumed;
+  }
+
+  /// Phase 37 fail-closed boundary.
+  ///
+  /// Creating an approval never equals deletion authorization.
+  static bool canExecuteProtectedDeletion() {
+    return false;
+  }
+}
+
+class AgentProtectedRetentionApprovalException implements Exception {
+  final String message;
+
+  const AgentProtectedRetentionApprovalException(this.message);
+
+  @override
+  String toString() => 'AgentProtectedRetentionApprovalException: $message';
+}

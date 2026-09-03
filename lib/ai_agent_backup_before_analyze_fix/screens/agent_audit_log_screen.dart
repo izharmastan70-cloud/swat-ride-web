@@ -1,0 +1,116 @@
+import 'package:flutter/material.dart';
+
+import '../models/agent_audit_log.dart';
+import '../services/agent_audit_service.dart';
+
+// =========================================================
+// AI AGENT — AUDIT LOG SCREEN
+// =========================================================
+//
+// Standalone Phase 4 viewer. Read-only.
+// Not wired into main.dart.
+
+class AgentAuditLogScreen extends StatelessWidget {
+  AgentAuditLogScreen({super.key});
+
+  final AgentAuditService _service = AgentAuditService();
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFF0D0D0D),
+      appBar: AppBar(
+        title: const Text('AI Audit Log'),
+      ),
+      body: StreamBuilder<List<AgentAuditLog>>(
+        stream: _service.watchRecent(limit: 200),
+        builder: (
+          BuildContext context,
+          AsyncSnapshot<List<AgentAuditLog>> snapshot,
+        ) {
+          if (snapshot.hasError) {
+            return Center(
+              child: Text(
+                'Audit log error: ${snapshot.error}',
+                style: const TextStyle(color: Colors.redAccent),
+              ),
+            );
+          }
+
+          if (!snapshot.hasData) {
+            return const Center(child: CircularProgressIndicator());
+          }
+
+          final List<AgentAuditLog> logs = snapshot.data!;
+
+          if (logs.isEmpty) {
+            return const Center(
+              child: Text(
+                'No AI audit events yet.',
+                style: TextStyle(color: Colors.white70),
+              ),
+            );
+          }
+
+          return ListView.separated(
+            padding: const EdgeInsets.all(16),
+            itemCount: logs.length,
+            separatorBuilder: (BuildContext _, int __) =>
+                const SizedBox(height: 10),
+            itemBuilder: (BuildContext context, int index) {
+              final AgentAuditLog log = logs[index];
+
+              return Card(
+                color: const Color(0xFF1A1A1A),
+                child: Padding(
+                  padding: const EdgeInsets.all(12),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: <Widget>[
+                      Text(
+                        log.eventType,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      const SizedBox(height: 6),
+                      Text(
+                        '${log.module} • ${log.actionId}',
+                        style: const TextStyle(color: Colors.white60),
+                      ),
+                      Text(
+                        'Result: ${log.result}',
+                        style: const TextStyle(color: Colors.white70),
+                      ),
+                      if (log.reason.isNotEmpty)
+                        Text(
+                          log.reason,
+                          style: const TextStyle(color: Colors.white54),
+                        ),
+                      const SizedBox(height: 6),
+                      Text(
+                        '${log.actorType}: ${log.actorId}',
+                        style: const TextStyle(
+                          color: Colors.white38,
+                          fontSize: 12,
+                        ),
+                      ),
+                      Text(
+                        log.createdAt.toLocal().toString(),
+                        style: const TextStyle(
+                          color: Colors.white38,
+                          fontSize: 12,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              );
+            },
+          );
+        },
+      ),
+    );
+  }
+}

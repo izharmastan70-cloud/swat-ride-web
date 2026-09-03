@@ -1,0 +1,104 @@
+import 'package:flutter_test/flutter_test.dart';
+import 'package:swat_ride/ai_agent/models/agent_production_rollout_operational_observation_models.dart';
+
+void main() {
+  AgentProductionRolloutOperationalObservation observation({
+    int criticalAudit = 0,
+    int criticalCrash = 0,
+    int emergencyAttention = 0,
+    int securityAttention = 0,
+    int fraudAttention = 0,
+    int emergencyCaseAttention = 0,
+    List<String> failures = const <String>[],
+  }) {
+    return AgentProductionRolloutOperationalObservation(
+      observedAtUtc: DateTime.utc(2026, 8, 26),
+      rolloutActivatedAtUtc: DateTime.utc(2026, 8, 25),
+      auditEventsObserved: 10,
+      highAuditEvents: 0,
+      criticalAuditEvents: criticalAudit,
+      failureAuditEvents: 0,
+      securityAuditSignals: 0,
+      openCrashEvents: 0,
+      highCrashEvents: 0,
+      criticalCrashEvents: criticalCrash,
+      repeatedCrashEvents: 0,
+      ownerAttentionObserved: 0,
+      unresolvedOwnerAttention: 0,
+      criticalOwnerAttention: 0,
+      emergencyOwnerAttention: emergencyAttention,
+      securityOwnerAttention: securityAttention,
+      crashOwnerAttention: 0,
+      fraudOwnerAttention: fraudAttention,
+      emergencyCaseOwnerAttention: emergencyCaseAttention,
+      dedicatedSecurityIncidentStoreAvailable: false,
+      failureCodes: failures,
+    );
+  }
+
+  test('clean persisted signals are operationally clear', () {
+    final value = observation();
+
+    expect(value.hardSafetySignalDetected, false);
+    expect(value.operationallyClear, true);
+  });
+
+  test('dedicated security incident observability remains incomplete', () {
+    final value = observation();
+
+    expect(value.dedicatedIncidentObservabilityComplete, false);
+    expect(value.authorizesSuggestOnly, false);
+    expect(value.authorizesAuto, false);
+  });
+
+  test('critical audit is hard safety signal', () {
+    final value = observation(criticalAudit: 1);
+
+    expect(value.hardSafetySignalDetected, true);
+  });
+
+  test('critical open crash is hard safety signal', () {
+    final value = observation(criticalCrash: 1);
+
+    expect(value.hardSafetySignalDetected, true);
+  });
+
+  test('emergency Owner Attention is hard safety signal', () {
+    final value = observation(emergencyAttention: 1);
+
+    expect(value.hardSafetySignalDetected, true);
+  });
+
+  test('security Owner Attention is hard safety signal', () {
+    final value = observation(securityAttention: 1);
+
+    expect(value.hardSafetySignalDetected, true);
+  });
+
+  test('fraud Owner Attention is hard safety signal', () {
+    final value = observation(fraudAttention: 1);
+
+    expect(value.hardSafetySignalDetected, true);
+  });
+
+  test('emergency-case Owner Attention is hard safety signal', () {
+    final value = observation(emergencyCaseAttention: 1);
+
+    expect(value.hardSafetySignalDetected, true);
+  });
+
+  test('failure codes block operationally clear result', () {
+    final value = observation(
+      failures: const <String>['CRITICAL_AUDIT_EVENT_DETECTED'],
+    );
+
+    expect(value.operationallyClear, false);
+  });
+
+  test('observation never changes production state', () {
+    final value = observation();
+
+    expect(value.changesProductionState, false);
+    expect(value.writesFirestore, false);
+  });
+}

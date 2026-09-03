@@ -1,0 +1,155 @@
+import 'package:flutter_test/flutter_test.dart';
+
+import 'package:swat_ride/ai_agent/models/agent_call_ride_booking_stage1_readiness_manifest.dart';
+import 'package:swat_ride/ai_agent/services/agent_call_ride_booking_idempotency_repository.dart';
+
+void main() {
+  group('Phase 49 Step 1I Stage 1 readiness', () {
+    test('foundation closeout is distinct from production activation', () {
+      final manifest =
+          AgentCallRideBookingStage1ReadinessManifest.foundationClosedProductionBlocked();
+
+      expect(manifest.stage1SecurityFoundationComplete, isTrue);
+      expect(manifest.canTruthfullyClaimStage1FoundationClosed, isTrue);
+      expect(manifest.productionBookingActivationAllowed, isFalse);
+      expect(manifest.canTruthfullyClaimProductionLive, isFalse);
+
+      manifest.validate();
+    });
+
+    test('current production blockers remain explicit', () {
+      final manifest =
+          AgentCallRideBookingStage1ReadinessManifest.foundationClosedProductionBlocked();
+
+      expect(
+        manifest.missingProductionRequirements(),
+        containsAll(<String>[
+          'TRUSTED_BACKEND_RIDE_EXECUTOR',
+          'TRUSTED_SERVER_IDEMPOTENCY',
+          'CALL_AGENT_ROLE_MIGRATION_PROOF',
+          'TELEPHONY_PROVIDER',
+          'SERVER_SIDE_PROVIDER_SECRETS',
+          'PRODUCTION_MONITORING_ROLLBACK',
+        ]),
+      );
+    });
+
+    test('client idempotency can never authorize a booking', () {
+      final manifest =
+          AgentCallRideBookingStage1ReadinessManifest.foundationClosedProductionBlocked();
+
+      expect(manifest.clientFirestoreIdempotencyCanAuthorizeBooking, isFalse);
+    });
+
+    test('intermediate steps cannot claim BOOKED', () {
+      final manifest =
+          AgentCallRideBookingStage1ReadinessManifest.foundationClosedProductionBlocked();
+
+      expect(manifest.preflightCanClaimBooked, isFalse);
+      expect(manifest.authorizationCanClaimBooked, isFalse);
+      expect(manifest.confirmationCanClaimBooked, isFalse);
+      expect(manifest.handoffCanClaimBooked, isFalse);
+      expect(manifest.localPlaceholderRideIdCanClaimBooked, isFalse);
+    });
+
+    test(
+      'all deployed production requirements are required for live claim',
+      () {
+        const manifest = AgentCallRideBookingStage1ReadinessManifest(
+          centralPermissionRuntimeVerified: true,
+          trustedCallerContactBindingVerified: true,
+          preflightFareAndAvailabilityVerified: true,
+          trustedCustomerConfirmationVerified: true,
+          exactlyOnceContractVerified: true,
+          truthfulFinalReceiptVerified: true,
+          clientIdempotencyAccessExplicitlyDenied: true,
+          realTrustedBackendExecutorDeployed: true,
+          trustedServerIdempotencyDeployed: true,
+          callAgentRoleMigrationProven: true,
+          telephonyProviderConnected: true,
+          providerSecretsServerSide: true,
+          productionMonitoringReady: true,
+        );
+
+        expect(manifest.stage1SecurityFoundationComplete, isTrue);
+        expect(manifest.productionBookingActivationAllowed, isTrue);
+        expect(manifest.canTruthfullyClaimProductionLive, isTrue);
+        expect(manifest.missingProductionRequirements(), isEmpty);
+
+        manifest.validate();
+      },
+    );
+
+    test('missing one production requirement blocks live claim', () {
+      const manifest = AgentCallRideBookingStage1ReadinessManifest(
+        centralPermissionRuntimeVerified: true,
+        trustedCallerContactBindingVerified: true,
+        preflightFareAndAvailabilityVerified: true,
+        trustedCustomerConfirmationVerified: true,
+        exactlyOnceContractVerified: true,
+        truthfulFinalReceiptVerified: true,
+        clientIdempotencyAccessExplicitlyDenied: true,
+        realTrustedBackendExecutorDeployed: true,
+        trustedServerIdempotencyDeployed: true,
+        callAgentRoleMigrationProven: true,
+        telephonyProviderConnected: true,
+        providerSecretsServerSide: true,
+        productionMonitoringReady: false,
+      );
+
+      expect(manifest.productionBookingActivationAllowed, isFalse);
+      expect(manifest.canTruthfullyClaimProductionLive, isFalse);
+      expect(
+        manifest.missingProductionRequirements(),
+        contains('PRODUCTION_MONITORING_ROLLBACK'),
+      );
+    });
+
+    test('foundation is incomplete if client idempotency is not denied', () {
+      const manifest = AgentCallRideBookingStage1ReadinessManifest(
+        centralPermissionRuntimeVerified: true,
+        trustedCallerContactBindingVerified: true,
+        preflightFareAndAvailabilityVerified: true,
+        trustedCustomerConfirmationVerified: true,
+        exactlyOnceContractVerified: true,
+        truthfulFinalReceiptVerified: true,
+        clientIdempotencyAccessExplicitlyDenied: false,
+        realTrustedBackendExecutorDeployed: false,
+        trustedServerIdempotencyDeployed: false,
+        callAgentRoleMigrationProven: false,
+        telephonyProviderConnected: false,
+        providerSecretsServerSide: false,
+        productionMonitoringReady: false,
+      );
+
+      expect(manifest.stage1SecurityFoundationComplete, isFalse);
+      expect(manifest.productionBookingActivationAllowed, isFalse);
+    });
+
+    test('client Firestore repository declares non-production boundary', () {
+      final repository = AgentCallRideBookingIdempotencyRepository();
+
+      expect(repository.productionClientPersistenceAllowed, isFalse);
+      expect(repository.requiresTrustedBackendReplacementForProduction, isTrue);
+      expect(repository.firestoreClientAccessMustRemainDenied, isTrue);
+      expect(repository.productionBookingAuthority, isFalse);
+      expect(repository.isAuthorizationSource, isFalse);
+      expect(repository.createsRide, isFalse);
+    });
+
+    test('idempotency document key encoding remains deterministic', () {
+      final first =
+          AgentCallRideBookingIdempotencyRepository.encodeIdempotencyKey(
+            'call/session/1:booking:1',
+          );
+      final second =
+          AgentCallRideBookingIdempotencyRepository.encodeIdempotencyKey(
+            'call/session/1:booking:1',
+          );
+
+      expect(first, second);
+      expect(first, isNot(contains('/')));
+      expect(first, isNotEmpty);
+    });
+  });
+}

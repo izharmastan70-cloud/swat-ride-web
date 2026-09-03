@@ -1,0 +1,623 @@
+﻿$ErrorActionPreference = "Stop"
+
+Set-Location -LiteralPath "E:\swat_ride"
+
+$screenPath = ".\lib\super_admin\screens\super_admin_hotel_partner_application_management_screen.dart"
+
+if (Test-Path -LiteralPath $screenPath) {
+    $backupPath = "$screenPath.before_phase2_step4.bak"
+    Copy-Item -LiteralPath $screenPath -Destination $backupPath -Force
+    throw "Management screen pehle se mojood thi. Backup bana diya; replace nahi ki gayi: $backupPath"
+}
+
+$screenCode = @'
+import 'package:flutter/material.dart';
+
+import '../../models/hotel_partner_application.dart';
+import '../../services/hotel_partner_application_service.dart';
+
+class SuperAdminHotelPartnerApplicationManagementScreen
+    extends StatefulWidget {
+  const SuperAdminHotelPartnerApplicationManagementScreen({
+    super.key,
+    required this.adminId,
+  });
+
+  final String adminId;
+
+  @override
+  State<SuperAdminHotelPartnerApplicationManagementScreen> createState() =>
+      _SuperAdminHotelPartnerApplicationManagementScreenState();
+}
+
+class _SuperAdminHotelPartnerApplicationManagementScreenState
+    extends State<SuperAdminHotelPartnerApplicationManagementScreen> {
+  static const Color _background = Color(0xFF0D0D0D);
+  static const Color _card = Color(0xFF1A1A1A);
+  static const Color _yellow = Color(0xFFFFD60A);
+
+  final HotelPartnerApplicationService _service =
+      HotelPartnerApplicationService();
+
+  static const Map<String, String> _filters = <String, String>{
+    'all': 'All',
+    'submitted': 'Submitted',
+    'under_review': 'Under Review',
+    'changes_requested': 'Changes Requested',
+    'approved': 'Approved',
+    'rejected': 'Rejected',
+    'suspended': 'Suspended',
+  };
+
+  String _selectedStatus = 'all';
+  String _workingApplicationId = '';
+
+  String get _adminId => widget.adminId.trim();
+
+  Stream<List<HotelPartnerApplication>> get _applications {
+    return _service.adminApplicationsStream(
+      status: _selectedStatus == 'all' ? null : _selectedStatus,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: _background,
+      appBar: AppBar(
+        backgroundColor: _background,
+        foregroundColor: Colors.white,
+        title: const Text(
+          'Hotel Partner Applications',
+          style: TextStyle(fontWeight: FontWeight.w800),
+        ),
+      ),
+      body: Column(
+        children: <Widget>[
+          _buildFilterBar(),
+          Expanded(
+            child: StreamBuilder<List<HotelPartnerApplication>>(
+              stream: _applications,
+              builder: (BuildContext context,
+                  AsyncSnapshot<List<HotelPartnerApplication>> snapshot) {
+                if (snapshot.connectionState == ConnectionState.waiting &&
+                    !snapshot.hasData) {
+                  return const Center(
+                    child: CircularProgressIndicator(color: _yellow),
+                  );
+                }
+
+                if (snapshot.hasError) {
+                  return _messageState(
+                    icon: Icons.error_outline,
+                    title: 'Applications load nahi ho sakin',
+                    message: snapshot.error.toString(),
+                  );
+                }
+
+                final List<HotelPartnerApplication> applications =
+                    snapshot.data ?? <HotelPartnerApplication>[];
+
+                if (applications.isEmpty) {
+                  return _messageState(
+                    icon: Icons.assignment_outlined,
+                    title: 'No applications found',
+                    message: 'Selected status mein koi application nahi hai.',
+                  );
+                }
+
+                return ListView.separated(
+                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 28),
+                  itemCount: applications.length,
+                  separatorBuilder: (_, __) => const SizedBox(height: 12),
+                  itemBuilder: (BuildContext context, int index) {
+                    return _applicationCard(applications[index]);
+                  },
+                );
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildFilterBar() {
+    return SizedBox(
+      height: 58,
+      child: ListView.separated(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        scrollDirection: Axis.horizontal,
+        itemCount: _filters.length,
+        separatorBuilder: (_, __) => const SizedBox(width: 8),
+        itemBuilder: (BuildContext context, int index) {
+          final String value = _filters.keys.elementAt(index);
+          final bool selected = value == _selectedStatus;
+
+          return ChoiceChip(
+            label: Text(_filters[value]!),
+            selected: selected,
+            onSelected: (_) {
+              setState(() => _selectedStatus = value);
+            },
+            selectedColor: _yellow,
+            backgroundColor: _card,
+            side: BorderSide(
+              color: selected ? _yellow : Colors.white12,
+            ),
+            labelStyle: TextStyle(
+              color: selected ? Colors.black : Colors.white,
+              fontWeight: FontWeight.w700,
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _applicationCard(HotelPartnerApplication application) {
+    final bool working = _workingApplicationId == application.id;
+    final Color statusColor = _statusColor(application.applicationStatus);
+
+    return Container(
+      decoration: BoxDecoration(
+        color: _card,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: statusColor.withValues(alpha: 0.35)),
+      ),
+      child: ExpansionTile(
+        iconColor: _yellow,
+        collapsedIconColor: Colors.white54,
+        tilePadding: const EdgeInsets.fromLTRB(16, 8, 10, 8),
+        childrenPadding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+        title: Text(
+          application.hotelName.isEmpty ? 'Unnamed Hotel' : application.hotelName,
+          style: const TextStyle(
+            color: Colors.white,
+            fontSize: 17,
+            fontWeight: FontWeight.w800,
+          ),
+        ),
+        subtitle: Padding(
+          padding: const EdgeInsets.only(top: 7),
+          child: Wrap(
+            spacing: 8,
+            runSpacing: 6,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: <Widget>[
+              _statusBadge(application.applicationStatus, statusColor),
+              Text(
+                application.ownerName,
+                style: const TextStyle(color: Colors.white60),
+              ),
+              if (working)
+                const SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    color: _yellow,
+                  ),
+                ),
+            ],
+          ),
+        ),
+        trailing: working
+            ? const SizedBox(width: 24)
+            : PopupMenuButton<String>(
+                color: const Color(0xFF262626),
+                iconColor: Colors.white,
+                onSelected: (String action) {
+                  _runAction(application, action);
+                },
+                itemBuilder: (_) => _actionItems(application),
+              ),
+        children: <Widget>[
+          const Divider(color: Colors.white12),
+          _detail('Owner', application.ownerName),
+          _detail('Phone', application.ownerPhone),
+          _detail('CNIC', application.ownerCnic),
+          _detail('Email', application.ownerEmail),
+          _detail('Hotel phone', application.hotelPhone),
+          _detail('Location', application.location),
+          _detail('Address', application.address),
+          _detail('Type', application.hotelType),
+          _detail('Categories', application.hotelCategories.join(', ')),
+          _detail('Rooms', application.totalRooms.toString()),
+          _detail(
+            'Minimum price',
+            'PKR ${application.minimumRoomPrice.toStringAsFixed(0)}',
+          ),
+          _detail('Check-in', application.checkInTime),
+          _detail('Check-out', application.checkOutTime),
+          _detail('Facilities', application.facilities.join(', ')),
+          _detail('Images', application.imageUrls.length.toString()),
+          _detail('Documents', application.documentUrls.length.toString()),
+          if (application.adminNote.isNotEmpty)
+            _detail('Admin note', application.adminNote),
+          if (application.rejectionReason.isNotEmpty)
+            _detail('Rejection reason', application.rejectionReason),
+          if (application.reviewedBy.isNotEmpty)
+            _detail('Reviewed by', application.reviewedBy),
+          if (application.reviewedAt != null)
+            _detail('Reviewed at', _dateText(application.reviewedAt!)),
+          if (application.hotelId.isNotEmpty)
+            _detail('Hotel ID', application.hotelId),
+        ],
+      ),
+    );
+  }
+
+  List<PopupMenuEntry<String>> _actionItems(
+    HotelPartnerApplication application,
+  ) {
+    final String status = application.applicationStatus;
+    final List<PopupMenuEntry<String>> items = <PopupMenuEntry<String>>[];
+
+    if (status == 'submitted') {
+      items.add(_menuItem('start_review', 'Start Review', Icons.visibility));
+    }
+
+    if (status == 'submitted' || status == 'under_review') {
+      items.add(_menuItem('approve', 'Approve', Icons.check_circle));
+      items.add(_menuItem('changes', 'Request Changes', Icons.edit_note));
+      items.add(_menuItem('reject', 'Reject', Icons.cancel));
+    }
+
+    if (status == 'approved') {
+      items.add(_menuItem('suspend', 'Suspend Partner', Icons.block));
+    }
+
+    if (status == 'suspended') {
+      items.add(_menuItem('reactivate', 'Reactivate', Icons.restore));
+    }
+
+    if (items.isEmpty) {
+      items.add(
+        const PopupMenuItem<String>(
+          enabled: false,
+          value: 'none',
+          child: Text('No admin action available'),
+        ),
+      );
+    }
+
+    return items;
+  }
+
+  PopupMenuItem<String> _menuItem(
+    String value,
+    String label,
+    IconData icon,
+  ) {
+    return PopupMenuItem<String>(
+      value: value,
+      child: Row(
+        children: <Widget>[
+          Icon(icon, color: _yellow, size: 20),
+          const SizedBox(width: 10),
+          Text(label, style: const TextStyle(color: Colors.white)),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _runAction(
+    HotelPartnerApplication application,
+    String action,
+  ) async {
+    if (_adminId.isEmpty || action == 'none') {
+      _showMessage('Verified Super Admin ID is missing.');
+      return;
+    }
+
+    String? note;
+    if (action == 'changes') {
+      note = await _askForText('Request Changes', 'Required corrections');
+    } else if (action == 'reject') {
+      note = await _askForText('Reject Application', 'Rejection reason');
+    } else if (action == 'suspend') {
+      note = await _askForText('Suspend Partner', 'Suspension reason');
+    } else if (action == 'approve' || action == 'reactivate') {
+      final bool confirmed = await _confirm(
+        action == 'approve' ? 'Approve this application?' : 'Reactivate partner?',
+      );
+      if (!confirmed) {
+        return;
+      }
+    }
+
+    if ((action == 'changes' || action == 'reject' || action == 'suspend') &&
+        (note == null || note.trim().isEmpty)) {
+      return;
+    }
+
+    setState(() => _workingApplicationId = application.id);
+
+    try {
+      switch (action) {
+        case 'start_review':
+          await _service.adminStartReview(
+            applicationId: application.id,
+            adminId: _adminId,
+          );
+          break;
+        case 'approve':
+          await _service.adminApproveApplication(
+            applicationId: application.id,
+            adminId: _adminId,
+          );
+          break;
+        case 'changes':
+          await _service.adminRequestChanges(
+            applicationId: application.id,
+            adminId: _adminId,
+            note: note!,
+          );
+          break;
+        case 'reject':
+          await _service.adminRejectApplication(
+            applicationId: application.id,
+            adminId: _adminId,
+            reason: note!,
+          );
+          break;
+        case 'suspend':
+          await _service.adminSuspendPartner(
+            applicationId: application.id,
+            adminId: _adminId,
+            reason: note!,
+          );
+          break;
+        case 'reactivate':
+          await _service.adminReactivatePartner(
+            applicationId: application.id,
+            adminId: _adminId,
+          );
+          break;
+      }
+
+      _showMessage('Application action completed.');
+    } catch (error) {
+      _showMessage(error.toString());
+    } finally {
+      if (mounted) {
+        setState(() => _workingApplicationId = '');
+      }
+    }
+  }
+
+  Future<String?> _askForText(String title, String hint) async {
+    final TextEditingController controller = TextEditingController();
+    final String? result = await showDialog<String>(
+      context: context,
+      builder: (BuildContext dialogContext) {
+        return AlertDialog(
+          backgroundColor: const Color(0xFF202020),
+          title: Text(title, style: const TextStyle(color: Colors.white)),
+          content: TextField(
+            controller: controller,
+            autofocus: true,
+            minLines: 3,
+            maxLines: 5,
+            style: const TextStyle(color: Colors.white),
+            decoration: InputDecoration(
+              hintText: hint,
+              hintStyle: const TextStyle(color: Colors.white38),
+              enabledBorder: const OutlineInputBorder(
+                borderSide: BorderSide(color: Colors.white24),
+              ),
+              focusedBorder: const OutlineInputBorder(
+                borderSide: BorderSide(color: _yellow),
+              ),
+            ),
+          ),
+          actions: <Widget>[
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () {
+                final String value = controller.text.trim();
+                if (value.isNotEmpty) {
+                  Navigator.pop(dialogContext, value);
+                }
+              },
+              child: const Text('Confirm'),
+            ),
+          ],
+        );
+      },
+    );
+    controller.dispose();
+    return result;
+  }
+
+  Future<bool> _confirm(String title) async {
+    return await showDialog<bool>(
+          context: context,
+          builder: (BuildContext dialogContext) {
+            return AlertDialog(
+              backgroundColor: const Color(0xFF202020),
+              title: Text(title, style: const TextStyle(color: Colors.white)),
+              actions: <Widget>[
+                TextButton(
+                  onPressed: () => Navigator.pop(dialogContext, false),
+                  child: const Text('Cancel'),
+                ),
+                FilledButton(
+                  onPressed: () => Navigator.pop(dialogContext, true),
+                  child: const Text('Confirm'),
+                ),
+              ],
+            );
+          },
+        ) ??
+        false;
+  }
+
+  Widget _detail(String label, String value) {
+    if (value.trim().isEmpty) {
+      return const SizedBox.shrink();
+    }
+
+    return Padding(
+      padding: const EdgeInsets.only(top: 8),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          SizedBox(
+            width: 112,
+            child: Text(label, style: const TextStyle(color: Colors.white54)),
+          ),
+          Expanded(
+            child: Text(value, style: const TextStyle(color: Colors.white)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _statusBadge(String status, Color color) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.14),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: color.withValues(alpha: 0.45)),
+      ),
+      child: Text(
+        _statusLabel(status),
+        style: TextStyle(color: color, fontSize: 11, fontWeight: FontWeight.w800),
+      ),
+    );
+  }
+
+  Widget _messageState({
+    required IconData icon,
+    required String title,
+    required String message,
+  }) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(28),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            Icon(icon, color: _yellow, size: 52),
+            const SizedBox(height: 14),
+            Text(
+              title,
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 18,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              message,
+              textAlign: TextAlign.center,
+              style: const TextStyle(color: Colors.white54),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Color _statusColor(String status) {
+    switch (status) {
+      case 'approved':
+        return Colors.greenAccent;
+      case 'rejected':
+      case 'suspended':
+        return Colors.redAccent;
+      case 'changes_requested':
+        return Colors.orangeAccent;
+      case 'under_review':
+        return Colors.lightBlueAccent;
+      default:
+        return _yellow;
+    }
+  }
+
+  String _statusLabel(String status) {
+    return status
+        .split('_')
+        .where((String part) => part.isNotEmpty)
+        .map((String part) => '${part[0].toUpperCase()}${part.substring(1)}')
+        .join(' ');
+  }
+
+  String _dateText(DateTime date) {
+    String two(int value) => value.toString().padLeft(2, '0');
+    return '${date.year}-${two(date.month)}-${two(date.day)} '
+        '${two(date.hour)}:${two(date.minute)}';
+  }
+
+  void _showMessage(String message) {
+    if (!mounted) {
+      return;
+    }
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message)),
+    );
+  }
+}
+'@
+
+$parentDirectory = Split-Path -Parent $screenPath
+if (-not (Test-Path -LiteralPath $parentDirectory)) {
+    New-Item -ItemType Directory -Path $parentDirectory -Force | Out-Null
+}
+
+$absoluteScreenPath = [System.IO.Path]::GetFullPath($screenPath)
+$utf8WithoutBom = [System.Text.UTF8Encoding]::new($false)
+
+# ===== SWAT RIDE FORCE PROJECT PATH FIX =====
+$absoluteScreenPath = "E:\swat_ride\lib\super_admin\screens\super_admin_hotel_partner_application_management_screen.dart"
+$absoluteScreenDirectory = Split-Path -Parent $absoluteScreenPath
+if (-not (Test-Path -LiteralPath $absoluteScreenDirectory)) {
+    New-Item -ItemType Directory -Path $absoluteScreenDirectory -Force | Out-Null
+}
+Write-Host ("Correct screen path: " + $absoluteScreenPath) -ForegroundColor Cyan
+# ===== END FORCE PROJECT PATH FIX =====
+
+[System.IO.File]::WriteAllText($absoluteScreenPath, $screenCode, $utf8WithoutBom)
+
+$writtenCode = Get-Content -LiteralPath $screenPath -Raw
+$requiredChecks = @(
+    "class SuperAdminHotelPartnerApplicationManagementScreen",
+    "adminApplicationsStream",
+    "adminStartReview",
+    "adminRequestChanges",
+    "adminRejectApplication",
+    "adminApproveApplication",
+    "adminSuspendPartner",
+    "adminReactivatePartner",
+    "reviewedBy",
+    "reviewedAt"
+)
+
+foreach ($check in $requiredChecks) {
+    if (-not $writtenCode.Contains($check)) {
+        Remove-Item -LiteralPath $screenPath -Force
+        throw "Screen verification failed: $check missing tha. Incomplete screen delete kar di."
+    }
+}
+
+flutter analyze `
+    ".\lib\models\hotel_partner_application.dart" `
+    ".\lib\services\hotel_partner_application_service.dart" `
+    $screenPath
+
+if ($LASTEXITCODE -ne 0) {
+    throw "Management screen analyze fail hua. File review karein: $screenPath"
+}
+
+Write-Host "`nPHASE 2 STEP 4 PASSED." -ForegroundColor Green
+Write-Host "Hotel Partner Application Management screen created." -ForegroundColor Green
+Write-Host "Screen: $screenPath" -ForegroundColor Cyan

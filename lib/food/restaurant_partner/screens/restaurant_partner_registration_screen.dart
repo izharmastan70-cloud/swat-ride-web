@@ -1,0 +1,989 @@
+﻿// lib/food/restaurant_partner/screens/restaurant_partner_registration_screen.dart
+// =============================================================
+// SWAT RIDE - FOOD DELIVERY
+// Restaurant Partner Registration Screen
+//
+// Connected with:
+// - RestaurantPartnerModel
+// - RestaurantPartnerService
+// - All Restaurant Partner form widgets
+//
+// Firebase Storage upload is temporarily bypassed.
+// Mobile camera/gallery selection is enabled through image_picker.
+// Selected local paths keep the Firestore workflow functional.
+// =============================================================
+
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
+
+import '../../services/food_service_control_service.dart';
+import '../models/restaurant_partner_model.dart';
+import '../services/restaurant_partner_service.dart';
+import '../widgets/partner_address_form.dart';
+import '../widgets/partner_business_form.dart';
+import '../widgets/partner_documents_form.dart';
+import '../widgets/partner_images_form.dart';
+import '../widgets/partner_owner_information_form.dart';
+import '../widgets/partner_payment_form.dart';
+import '../widgets/partner_restaurant_information_form.dart';
+import 'restaurant_partner_status_screen.dart';
+
+class RestaurantPartnerRegistrationScreen
+    extends StatefulWidget {
+  const RestaurantPartnerRegistrationScreen({
+    super.key,
+  });
+
+  @override
+  State<RestaurantPartnerRegistrationScreen>
+      createState() =>
+          _RestaurantPartnerRegistrationScreenState();
+}
+
+class _RestaurantPartnerRegistrationScreenState
+    extends State<RestaurantPartnerRegistrationScreen> {
+  static const Color yellow = Color(0xFFFFD60A);
+  static const Color background = Color(0xFF0D0D0D);
+  static const Color cardColor = Color(0xFF1A1A1A);
+
+  final GlobalKey<FormState> _formKey =
+      GlobalKey<FormState>();
+
+  final RestaurantPartnerService _partnerService =
+      RestaurantPartnerService();
+
+  final FoodServiceControlService _serviceControlService =
+      FoodServiceControlService();
+
+  final ImagePicker _imagePicker =
+      ImagePicker();
+
+  final TextEditingController _ownerNameController =
+      TextEditingController();
+
+  final TextEditingController _phoneController =
+      TextEditingController();
+
+  final TextEditingController _emailController =
+      TextEditingController();
+
+  final TextEditingController _cnicController =
+      TextEditingController();
+
+  final TextEditingController
+      _restaurantNameController =
+      TextEditingController();
+
+  final TextEditingController
+      _restaurantTypeController =
+      TextEditingController();
+
+  final TextEditingController
+      _descriptionController =
+      TextEditingController();
+
+  final TextEditingController _countryController =
+      TextEditingController(
+    text: 'Pakistan',
+  );
+
+  final TextEditingController _provinceController =
+      TextEditingController(
+    text: 'Khyber Pakhtunkhwa',
+  );
+
+  final TextEditingController _cityController =
+      TextEditingController(
+    text: 'Swat',
+  );
+
+  final TextEditingController _areaController =
+      TextEditingController();
+
+  final TextEditingController _addressController =
+      TextEditingController();
+
+  final TextEditingController _landmarkController =
+      TextEditingController();
+
+  final TextEditingController _latitudeController =
+      TextEditingController();
+
+  final TextEditingController _longitudeController =
+      TextEditingController();
+
+  final TextEditingController _openingTimeController =
+      TextEditingController(
+    text: '09:00',
+  );
+
+  final TextEditingController _closingTimeController =
+      TextEditingController(
+    text: '23:00',
+  );
+
+  final TextEditingController
+      _deliveryRadiusController =
+      TextEditingController(
+    text: '10',
+  );
+
+  final TextEditingController
+      _minimumOrderController =
+      TextEditingController(
+    text: '0',
+  );
+
+  final TextEditingController _deliveryFeeController =
+      TextEditingController(
+    text: '0',
+  );
+
+  final TextEditingController _accountTitleController =
+      TextEditingController();
+
+  final TextEditingController
+      _accountNumberController =
+      TextEditingController();
+
+  final TextEditingController _bankNameController =
+      TextEditingController();
+
+  Set<String> _selectedCategories = <String>{};
+
+  String _cnicFrontPath = '';
+  String _cnicBackPath = '';
+  String _restaurantLicensePath = '';
+  String _foodAuthorityCertificatePath = '';
+
+  String _logoImagePath = '';
+  String _coverImagePath = '';
+  final List<String> _galleryImagePaths = <String>[];
+
+  String _settlementMethod = 'cash';
+
+  bool _acceptsCash = true;
+  bool _acceptsWallet = true;
+  bool _acceptsJazzCash = false;
+  bool _acceptsEasypaisa = false;
+
+  bool _isSubmitting = false;
+  bool _acceptedTerms = false;
+
+  @override
+  void dispose() {
+    _ownerNameController.dispose();
+    _phoneController.dispose();
+    _emailController.dispose();
+    _cnicController.dispose();
+    _restaurantNameController.dispose();
+    _restaurantTypeController.dispose();
+    _descriptionController.dispose();
+    _countryController.dispose();
+    _provinceController.dispose();
+    _cityController.dispose();
+    _areaController.dispose();
+    _addressController.dispose();
+    _landmarkController.dispose();
+    _latitudeController.dispose();
+    _longitudeController.dispose();
+    _openingTimeController.dispose();
+    _closingTimeController.dispose();
+    _deliveryRadiusController.dispose();
+    _minimumOrderController.dispose();
+    _deliveryFeeController.dispose();
+    _accountTitleController.dispose();
+    _accountNumberController.dispose();
+    _bankNameController.dispose();
+    super.dispose();
+  }
+
+  void _showMessage(String message) {
+    if (!mounted) {
+      return;
+    }
+
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Text(message),
+        ),
+      );
+  }
+
+  Future<void> _pickPath(
+    String title,
+    String hint,
+    ValueChanged<String> onSelected,
+  ) async {
+    if (_isSubmitting) {
+      return;
+    }
+
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: cardColor,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(
+          top: Radius.circular(24),
+        ),
+      ),
+      builder: (
+        BuildContext bottomSheetContext,
+      ) {
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(
+              18,
+              16,
+              18,
+              24,
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment:
+                  CrossAxisAlignment.start,
+              children: <Widget>[
+                Text(
+                  title,
+                  style: const TextStyle(
+                    fontSize: 19,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(height: 5),
+                const Text(
+                  'Take a clear photo or choose one from your phone gallery.',
+                  style: TextStyle(
+                    color: Colors.grey,
+                    fontSize: 12,
+                    height: 1.4,
+                  ),
+                ),
+                const SizedBox(height: 15),
+                ListTile(
+                  leading: const CircleAvatar(
+                    backgroundColor:
+                        Color(0x22FFD60A),
+                    child: Icon(
+                      Icons.camera_alt_outlined,
+                      color: yellow,
+                    ),
+                  ),
+                  title: const Text(
+                    'Take Photo with Camera',
+                  ),
+                  subtitle: const Text(
+                    'Open the mobile camera',
+                  ),
+                  onTap: () {
+                    Navigator.pop(
+                      bottomSheetContext,
+                    );
+
+                    _pickImageFromDevice(
+                      source: ImageSource.camera,
+                      onSelected: onSelected,
+                    );
+                  },
+                ),
+                const SizedBox(height: 6),
+                ListTile(
+                  leading: const CircleAvatar(
+                    backgroundColor:
+                        Color(0x22FFD60A),
+                    child: Icon(
+                      Icons.photo_library_outlined,
+                      color: yellow,
+                    ),
+                  ),
+                  title: const Text(
+                    'Choose from Gallery',
+                  ),
+                  subtitle: const Text(
+                    'Select an image from your phone',
+                  ),
+                  onTap: () {
+                    Navigator.pop(
+                      bottomSheetContext,
+                    );
+
+                    _pickImageFromDevice(
+                      source: ImageSource.gallery,
+                      onSelected: onSelected,
+                    );
+                  },
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Future<void> _pickImageFromDevice({
+    required ImageSource source,
+    required ValueChanged<String> onSelected,
+  }) async {
+    try {
+      final XFile? pickedImage =
+          await _imagePicker.pickImage(
+        source: source,
+        imageQuality: 90,
+        maxWidth: 2048,
+        maxHeight: 2048,
+      );
+
+      if (pickedImage == null || !mounted) {
+        return;
+      }
+
+      setState(() {
+        onSelected(pickedImage.path);
+      });
+
+      _showMessage(
+        source == ImageSource.camera
+            ? 'Photo captured successfully.'
+            : 'Image selected successfully.',
+      );
+    } catch (error) {
+      _showMessage(
+        'Unable to select image: $error',
+      );
+    }
+  }
+
+  bool _validateCustomRequirements() {
+    if (_selectedCategories.isEmpty) {
+      _showMessage(
+        'Select at least one food category.',
+      );
+      return false;
+    }
+
+    if (_cnicFrontPath.trim().isEmpty ||
+        _cnicBackPath.trim().isEmpty) {
+      _showMessage(
+        'CNIC front and back are required.',
+      );
+      return false;
+    }
+
+    if (_logoImagePath.trim().isEmpty ||
+        _coverImagePath.trim().isEmpty) {
+      _showMessage(
+        'Restaurant logo and cover image are required.',
+      );
+      return false;
+    }
+
+    if (!_acceptsCash &&
+        !_acceptsWallet &&
+        !_acceptsJazzCash &&
+        !_acceptsEasypaisa) {
+      _showMessage(
+        'Select at least one customer payment method.',
+      );
+      return false;
+    }
+
+    if (!_acceptedTerms) {
+      _showMessage(
+        'Please accept the declaration before submitting.',
+      );
+      return false;
+    }
+
+    return true;
+  }
+
+  double _parseDouble(
+    TextEditingController controller,
+  ) {
+    return double.tryParse(
+          controller.text.trim(),
+        ) ??
+        0;
+  }
+
+  Future<void> _submitApplication() async {
+    if (_isSubmitting) {
+      return;
+    }
+
+    final bool formValid =
+        _formKey.currentState?.validate() ?? false;
+
+    if (!formValid ||
+        !_validateCustomRequirements()) {
+      return;
+    }
+
+    setState(() {
+      _isSubmitting = true;
+    });
+
+    try {
+      await _serviceControlService
+          .assertRestaurantApplicationsEnabled();
+
+      final String userId =
+          FirebaseAuth.instance.currentUser?.uid ??
+              'guest_restaurant_partner';
+
+      final DateTime now = DateTime.now();
+
+      final RestaurantPartnerModel partner =
+          RestaurantPartnerModel(
+        partnerId: '',
+        userId: userId,
+        restaurantId: '',
+        ownerName:
+            _ownerNameController.text.trim(),
+        email: _emailController.text.trim(),
+        phoneNumber:
+            _phoneController.text.trim(),
+        cnicNumber:
+            _cnicController.text.trim(),
+        restaurantName:
+            _restaurantNameController.text.trim(),
+        restaurantType:
+            _restaurantTypeController.text.trim(),
+        description:
+            _descriptionController.text.trim(),
+        categories:
+            _selectedCategories.toList()..sort(),
+        foodTypes:
+            _selectedCategories.toList()..sort(),
+        openingTime:
+            _openingTimeController.text.trim(),
+        closingTime:
+            _closingTimeController.text.trim(),
+        openDays:
+            const <int>[1, 2, 3, 4, 5, 6, 7],
+        deliveryRadiusKm:
+            _parseDouble(
+          _deliveryRadiusController,
+        ),
+        minimumOrderAmount:
+            _parseDouble(
+          _minimumOrderController,
+        ),
+        deliveryFee:
+            _parseDouble(
+          _deliveryFeeController,
+        ),
+        country:
+            _countryController.text.trim(),
+        province:
+            _provinceController.text.trim(),
+        city: _cityController.text.trim(),
+        area: _areaController.text.trim(),
+        address:
+            _addressController.text.trim(),
+        landmark:
+            _landmarkController.text.trim(),
+        latitude:
+            _parseDouble(
+          _latitudeController,
+        ),
+        longitude:
+            _parseDouble(
+          _longitudeController,
+        ),
+        cnicFrontPath: _cnicFrontPath,
+        cnicBackPath: _cnicBackPath,
+        restaurantLicensePath:
+            _restaurantLicensePath,
+        foodAuthorityCertificatePath:
+            _foodAuthorityCertificatePath,
+        logoImagePath: _logoImagePath,
+        coverImagePath: _coverImagePath,
+        galleryImagePaths:
+            List<String>.unmodifiable(
+          _galleryImagePaths,
+        ),
+        settlementMethod: _settlementMethod,
+        accountTitle:
+            _accountTitleController.text.trim(),
+        accountNumber:
+            _accountNumberController.text.trim(),
+        bankName:
+            _bankNameController.text.trim(),
+        applicationStatus:
+            RestaurantPartnerApplicationStatus.pending,
+        isApproved: false,
+        isRejected: false,
+        isBlocked: false,
+        isActive: false,
+        rejectionReason: '',
+        suspensionReason: '',
+        commissionPercentage: 0,
+        acceptsCash: _acceptsCash,
+        acceptsWallet: _acceptsWallet,
+        acceptsJazzCash: _acceptsJazzCash,
+        acceptsEasypaisa:
+            _acceptsEasypaisa,
+        rating: 0,
+        totalReviews: 0,
+        totalOrders: 0,
+        completedOrders: 0,
+        cancelledOrders: 0,
+        totalEarnings: 0,
+        createdAt: now,
+        updatedAt: now,
+        approvedAt: null,
+      );
+
+      final String partnerId =
+          await _partnerService.submitApplication(
+        partner,
+      );
+
+      if (!mounted) {
+        return;
+      }
+
+      await showDialog<void>(
+        context: context,
+        barrierDismissible: false,
+        builder: (
+          BuildContext dialogContext,
+        ) {
+          return AlertDialog(
+            backgroundColor: cardColor,
+            title: const Row(
+              children: <Widget>[
+                Icon(
+                  Icons.check_circle,
+                  color: Colors.greenAccent,
+                ),
+                SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    'Application Submitted',
+                  ),
+                ),
+              ],
+            ),
+            content: Text(
+              'Your Restaurant Partner application has been submitted successfully.\n\n'
+              'Application ID:\n$partnerId\n\n'
+              'You will receive an update after admin review.',
+              style: const TextStyle(
+                color: Colors.grey,
+                height: 1.45,
+              ),
+            ),
+            actions: <Widget>[
+              ElevatedButton(
+                onPressed: () {
+                  Navigator.pop(dialogContext);
+                  Navigator.pushReplacement(
+  context,
+  MaterialPageRoute(
+    builder: (context) => 
+    const RestaurantPartnerStatusScreen(),
+  ),
+);
+                },
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: yellow,
+                  foregroundColor: Colors.black,
+                ),
+                child: const Text('Done'),
+              ),
+            ],
+          );
+        },
+      );
+    } on FoodServiceControlException catch (error) {
+      _showMessage(error.message);
+    } on RestaurantPartnerServiceException
+        catch (error) {
+      _showMessage(error.message);
+    } catch (error) {
+      _showMessage(
+        'Unable to submit application: $error',
+      );
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isSubmitting = false;
+        });
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: background,
+      appBar: AppBar(
+        backgroundColor: background,
+        title: const Text(
+          'Restaurant Partner',
+          style: TextStyle(
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+      ),
+      body: SafeArea(
+        child: Form(
+          key: _formKey,
+          child: ListView(
+            padding: const EdgeInsets.fromLTRB(
+              16,
+              16,
+              16,
+              32,
+            ),
+            children: <Widget>[
+              _buildHeader(),
+              const SizedBox(height: 18),
+              PartnerOwnerInformationForm(
+                ownerNameController:
+                    _ownerNameController,
+                phoneController:
+                    _phoneController,
+                emailController:
+                    _emailController,
+                cnicController:
+                    _cnicController,
+              ),
+              const SizedBox(height: 16),
+              PartnerRestaurantInformationForm(
+                restaurantNameController:
+                    _restaurantNameController,
+                restaurantTypeController:
+                    _restaurantTypeController,
+                descriptionController:
+                    _descriptionController,
+                selectedCategories:
+                    _selectedCategories,
+                onCategoriesChanged:
+                    (Set<String> categories) {
+                  setState(() {
+                    _selectedCategories =
+                        categories;
+                  });
+                },
+              ),
+              const SizedBox(height: 16),
+              PartnerAddressForm(
+                countryController:
+                    _countryController,
+                provinceController:
+                    _provinceController,
+                cityController:
+                    _cityController,
+                areaController:
+                    _areaController,
+                addressController:
+                    _addressController,
+                landmarkController:
+                    _landmarkController,
+                latitudeController:
+                    _latitudeController,
+                longitudeController:
+                    _longitudeController,
+              ),
+              const SizedBox(height: 16),
+              PartnerBusinessForm(
+                openingTimeController:
+                    _openingTimeController,
+                closingTimeController:
+                    _closingTimeController,
+                deliveryRadiusController:
+                    _deliveryRadiusController,
+                minimumOrderController:
+                    _minimumOrderController,
+                deliveryFeeController:
+                    _deliveryFeeController,
+              ),
+              const SizedBox(height: 16),
+              PartnerDocumentsForm(
+                cnicFrontPath: _cnicFrontPath,
+                cnicBackPath: _cnicBackPath,
+                restaurantLicensePath:
+                    _restaurantLicensePath,
+                foodAuthorityCertificatePath:
+                    _foodAuthorityCertificatePath,
+                onPickCnicFront: () => _pickPath(
+                  'CNIC Front',
+                  r'C:\documents\cnic_front.jpg',
+                  (String value) {
+                    _cnicFrontPath = value;
+                  },
+                ),
+                onPickCnicBack: () => _pickPath(
+                  'CNIC Back',
+                  r'C:\documents\cnic_back.jpg',
+                  (String value) {
+                    _cnicBackPath = value;
+                  },
+                ),
+                onPickRestaurantLicense:
+                    () => _pickPath(
+                  'Restaurant License',
+                  r'C:\documents\license.pdf',
+                  (String value) {
+                    _restaurantLicensePath =
+                        value;
+                  },
+                ),
+                onPickFoodAuthorityCertificate:
+                    () => _pickPath(
+                  'Food Authority Certificate',
+                  r'C:\documents\certificate.pdf',
+                  (String value) {
+                    _foodAuthorityCertificatePath =
+                        value;
+                  },
+                ),
+                onClearCnicFront: () {
+                  setState(() {
+                    _cnicFrontPath = '';
+                  });
+                },
+                onClearCnicBack: () {
+                  setState(() {
+                    _cnicBackPath = '';
+                  });
+                },
+                onClearRestaurantLicense: () {
+                  setState(() {
+                    _restaurantLicensePath = '';
+                  });
+                },
+                onClearFoodAuthorityCertificate:
+                    () {
+                  setState(() {
+                    _foodAuthorityCertificatePath =
+                        '';
+                  });
+                },
+              ),
+              const SizedBox(height: 16),
+              PartnerImagesForm(
+                logoImagePath: _logoImagePath,
+                coverImagePath: _coverImagePath,
+                galleryImagePaths:
+                    _galleryImagePaths,
+                onPickLogo: () => _pickPath(
+                  'Restaurant Logo',
+                  r'C:\images\restaurant_logo.jpg',
+                  (String value) {
+                    _logoImagePath = value;
+                  },
+                ),
+                onPickCover: () => _pickPath(
+                  'Restaurant Cover Image',
+                  r'C:\images\restaurant_cover.jpg',
+                  (String value) {
+                    _coverImagePath = value;
+                  },
+                ),
+                onAddGalleryImage: () => _pickPath(
+                  'Gallery Image',
+                  r'C:\images\gallery_1.jpg',
+                  (String value) {
+                    _galleryImagePaths.add(
+                      value,
+                    );
+                  },
+                ),
+                onClearLogo: () {
+                  setState(() {
+                    _logoImagePath = '';
+                  });
+                },
+                onClearCover: () {
+                  setState(() {
+                    _coverImagePath = '';
+                  });
+                },
+                onRemoveGalleryImage:
+                    (int index) {
+                  setState(() {
+                    _galleryImagePaths.removeAt(
+                      index,
+                    );
+                  });
+                },
+              ),
+              const SizedBox(height: 16),
+              PartnerPaymentForm(
+                settlementMethod:
+                    _settlementMethod,
+                onSettlementMethodChanged:
+                    (String value) {
+                  setState(() {
+                    _settlementMethod = value;
+                  });
+                },
+                accountTitleController:
+                    _accountTitleController,
+                accountNumberController:
+                    _accountNumberController,
+                bankNameController:
+                    _bankNameController,
+                acceptsCash: _acceptsCash,
+                acceptsWallet: _acceptsWallet,
+                acceptsJazzCash:
+                    _acceptsJazzCash,
+                acceptsEasypaisa:
+                    _acceptsEasypaisa,
+                onAcceptsCashChanged:
+                    (bool value) {
+                  setState(() {
+                    _acceptsCash = value;
+                  });
+                },
+                onAcceptsWalletChanged:
+                    (bool value) {
+                  setState(() {
+                    _acceptsWallet = value;
+                  });
+                },
+                onAcceptsJazzCashChanged:
+                    (bool value) {
+                  setState(() {
+                    _acceptsJazzCash = value;
+                  });
+                },
+                onAcceptsEasypaisaChanged:
+                    (bool value) {
+                  setState(() {
+                    _acceptsEasypaisa = value;
+                  });
+                },
+              ),
+              const SizedBox(height: 16),
+              _buildDeclaration(),
+              const SizedBox(height: 20),
+              SizedBox(
+                width: double.infinity,
+                height: 56,
+                child: ElevatedButton(
+                  onPressed: _isSubmitting
+                      ? null
+                      : _submitApplication,
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: yellow,
+                    foregroundColor: Colors.black,
+                    shape: RoundedRectangleBorder(
+                      borderRadius:
+                          BorderRadius.circular(16),
+                    ),
+                  ),
+                  child: _isSubmitting
+                      ? const SizedBox(
+                          width: 22,
+                          height: 22,
+                          child:
+                              CircularProgressIndicator(
+                            color: Colors.black,
+                            strokeWidth: 2,
+                          ),
+                        )
+                      : const Text(
+                          'Submit Application',
+                          style: TextStyle(
+                            fontSize: 16,
+                            fontWeight:
+                                FontWeight.bold,
+                          ),
+                        ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildHeader() {
+    return Container(
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        color: yellow,
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: const Row(
+        children: <Widget>[
+          Icon(
+            Icons.restaurant_menu,
+            color: Colors.black,
+            size: 48,
+          ),
+          SizedBox(width: 16),
+          Expanded(
+            child: Column(
+              crossAxisAlignment:
+                  CrossAxisAlignment.start,
+              children: <Widget>[
+                Text(
+                  'Grow with SWAT RIDE Food',
+                  style: TextStyle(
+                    color: Colors.black,
+                    fontSize: 20,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                SizedBox(height: 5),
+                Text(
+                  'Register your restaurant and wait for admin approval.',
+                  style: TextStyle(
+                    color: Colors.black87,
+                    height: 1.35,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildDeclaration() {
+    return Container(
+      decoration: BoxDecoration(
+        color: cardColor,
+        borderRadius: BorderRadius.circular(18),
+      ),
+      child: CheckboxListTile(
+        value: _acceptedTerms,
+        onChanged: (bool? value) {
+          setState(() {
+            _acceptedTerms = value ?? false;
+          });
+        },
+        activeColor: yellow,
+        controlAffinity:
+            ListTileControlAffinity.leading,
+        title: const Text(
+          'Application declaration',
+          style: TextStyle(
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+        subtitle: const Text(
+          'I confirm that the information provided is correct and may be reviewed by the SWAT RIDE admin.',
+          style: TextStyle(
+            color: Colors.grey,
+            fontSize: 12,
+            height: 1.4,
+          ),
+        ),
+      ),
+    );
+  }
+}
+

@@ -1,0 +1,296 @@
+import '../constants/agent_code_change_constants.dart';
+import '../constants/agent_future_proposal_constants.dart';
+import 'agent_code_test_result.dart';
+import 'agent_security_finding.dart';
+
+class AgentFutureOwnerDecision {
+  AgentFutureOwnerDecision._();
+
+  static const String pending = 'PENDING';
+  static const String keep = 'KEEP';
+  static const String rollback = 'ROLLBACK';
+
+  static const Set<String> values = <String>{pending, keep, rollback};
+}
+
+/// Immutable QA evidence for one Future Proposal implementation.
+///
+/// Strict Phase 41 rule:
+/// unavailable tests are NOT sufficient for QA_PASSED.
+/// Analyze + unit tests + build must all explicitly report PASSED.
+class AgentFutureQaEvidence {
+  const AgentFutureQaEvidence({
+    required this.codeChangeId,
+    required this.backupId,
+    required this.reviewerId,
+    required this.testResult,
+    required this.recordedAt,
+  });
+
+  final String codeChangeId;
+  final String backupId;
+  final String reviewerId;
+  final AgentCodeTestResult testResult;
+  final DateTime recordedAt;
+
+  bool get rollbackAvailable => backupId.trim().isNotEmpty;
+
+  bool get strictPassed =>
+      testResult.analyzeStatus == AgentCodeTestStatus.passed &&
+      testResult.unitTestStatus == AgentCodeTestStatus.passed &&
+      testResult.buildStatus == AgentCodeTestStatus.passed;
+
+  void validate() {
+    if (codeChangeId.trim().isEmpty ||
+        backupId.trim().isEmpty ||
+        reviewerId.trim().isEmpty) {
+      throw const AgentFutureQualityLifecycleValidationException(
+        'QA evidence requires codeChangeId, backupId and reviewerId.',
+      );
+    }
+
+    final Set<String> validTestStates = <String>{
+      AgentCodeTestStatus.notRun,
+      AgentCodeTestStatus.passed,
+      AgentCodeTestStatus.failed,
+      AgentCodeTestStatus.unavailable,
+    };
+
+    if (!validTestStates.contains(testResult.analyzeStatus) ||
+        !validTestStates.contains(testResult.unitTestStatus) ||
+        !validTestStates.contains(testResult.buildStatus)) {
+      throw const AgentFutureQualityLifecycleValidationException(
+        'QA evidence contains an unsupported test status.',
+      );
+    }
+  }
+
+  Map<String, dynamic> toMap() {
+    validate();
+
+    return <String, dynamic>{
+      'codeChangeId': codeChangeId.trim(),
+      'backupId': backupId.trim(),
+      'reviewerId': reviewerId.trim(),
+      'analyzeStatus': testResult.analyzeStatus,
+      'unitTestStatus': testResult.unitTestStatus,
+      'buildStatus': testResult.buildStatus,
+      'outputSummary': testResult.outputSummary,
+      'testCompletedAt': testResult.completedAt.toUtc().toIso8601String(),
+      'strictPassed': strictPassed,
+      'rollbackAvailable': rollbackAvailable,
+      'recordedAt': recordedAt.toUtc().toIso8601String(),
+    };
+  }
+}
+
+/// Immutable Security review evidence.
+///
+/// Security PASS requires an explicit completed review and zero HIGH/CRITICAL
+/// findings. Warning/info findings remain visible but do not become an
+/// automatic security rejection.
+class AgentFutureSecurityEvidence {
+  const AgentFutureSecurityEvidence({
+    required this.reviewerId,
+    required this.reviewCompleted,
+    required this.findings,
+    required this.recordedAt,
+  });
+
+  final String reviewerId;
+  final bool reviewCompleted;
+  final List<AgentSecurityFinding> findings;
+  final DateTime recordedAt;
+
+  int get highOrCriticalCount => findings.where((AgentSecurityFinding item) {
+    return item.isHighOrCritical;
+  }).length;
+
+  bool get passed => reviewCompleted && highOrCriticalCount == 0;
+
+  void validate() {
+    if (reviewerId.trim().isEmpty) {
+      throw const AgentFutureQualityLifecycleValidationException(
+        'Security evidence requires reviewerId.',
+      );
+    }
+
+    for (final AgentSecurityFinding finding in findings) {
+      finding.validate();
+    }
+  }
+
+  Map<String, dynamic> toMap() {
+    validate();
+
+    return <String, dynamic>{
+      'reviewerId': reviewerId.trim(),
+      'reviewCompleted': reviewCompleted,
+      'findings': findings
+          .map((AgentSecurityFinding item) => item.toMap())
+          .toList(),
+      'highOrCriticalCount': highOrCriticalCount,
+      'passed': passed,
+      'recordedAt': recordedAt.toUtc().toIso8601String(),
+    };
+  }
+}
+
+/// In-memory Phase 41 lifecycle state.
+///
+/// G1 does not persist or execute anything. G2 will own persistence and
+/// explicit Owner KEEP/ROLLBACK action wiring.
+class AgentFutureQualityLifecycle {
+  const AgentFutureQualityLifecycle({
+    required this.proposalId,
+    required this.status,
+    required this.qaEvidence,
+    required this.securityEvidence,
+    required this.ownerDecision,
+    required this.ownerId,
+    required this.ownerDecisionNote,
+    required this.updatedAt,
+  });
+
+  final String proposalId;
+  final String status;
+  final AgentFutureQaEvidence? qaEvidence;
+  final AgentFutureSecurityEvidence? securityEvidence;
+  final String ownerDecision;
+  final String ownerId;
+  final String ownerDecisionNote;
+  final DateTime updatedAt;
+
+  bool get qaPassed => qaEvidence?.strictPassed == true;
+  bool get securityPassed => securityEvidence?.passed == true;
+
+  bool get rollbackAvailable => qaEvidence?.rollbackAvailable == true;
+
+  bool get ownerKeepAllowed =>
+      status == AgentFutureProposalStatus.ownerDecisionPending &&
+      qaPassed &&
+      securityPassed &&
+      rollbackAvailable;
+
+  bool get ownerRollbackAllowed =>
+      rollbackAvailable &&
+      <String>{
+        AgentFutureProposalStatus.qaFailed,
+        AgentFutureProposalStatus.securityRejected,
+        AgentFutureProposalStatus.ownerDecisionPending,
+      }.contains(status);
+
+  bool get deploymentAuthorized => false;
+  bool get automaticKeepAuthorized => false;
+  bool get automaticRollbackAuthorized => false;
+
+  void validate() {
+    if (proposalId.trim().isEmpty) {
+      throw const AgentFutureQualityLifecycleValidationException(
+        'proposalId cannot be empty.',
+      );
+    }
+
+    if (!AgentFutureProposalStatus.isValid(status)) {
+      throw AgentFutureQualityLifecycleValidationException(
+        'Unsupported Future lifecycle status: $status',
+      );
+    }
+
+    if (!AgentFutureOwnerDecision.values.contains(ownerDecision)) {
+      throw AgentFutureQualityLifecycleValidationException(
+        'Unsupported owner decision: $ownerDecision',
+      );
+    }
+
+    qaEvidence?.validate();
+    securityEvidence?.validate();
+
+    if (ownerDecision == AgentFutureOwnerDecision.keep) {
+      if (status != AgentFutureProposalStatus.kept ||
+          ownerId.trim().isEmpty ||
+          !qaPassed ||
+          !securityPassed ||
+          !rollbackAvailable) {
+        throw const AgentFutureQualityLifecycleValidationException(
+          'KEEP requires Owner identity, strict QA pass, Security pass and rollback availability.',
+        );
+      }
+    }
+
+    if (ownerDecision == AgentFutureOwnerDecision.rollback) {
+      if (!<String>{
+            AgentFutureProposalStatus.rollbackRequested,
+            AgentFutureProposalStatus.rolledBack,
+          }.contains(status) ||
+          ownerId.trim().isEmpty ||
+          !rollbackAvailable) {
+        throw const AgentFutureQualityLifecycleValidationException(
+          'ROLLBACK requires Owner identity, rollback availability and a requested/completed rollback state.',
+        );
+      }
+    }
+
+    if (deploymentAuthorized ||
+        automaticKeepAuthorized ||
+        automaticRollbackAuthorized) {
+      throw const AgentFutureQualityLifecycleValidationException(
+        'Future quality lifecycle must not grant automatic deploy/keep/rollback authority.',
+      );
+    }
+  }
+
+  AgentFutureQualityLifecycle copyWith({
+    String? status,
+    AgentFutureQaEvidence? qaEvidence,
+    AgentFutureSecurityEvidence? securityEvidence,
+    String? ownerDecision,
+    String? ownerId,
+    String? ownerDecisionNote,
+    DateTime? updatedAt,
+  }) {
+    return AgentFutureQualityLifecycle(
+      proposalId: proposalId,
+      status: status ?? this.status,
+      qaEvidence: qaEvidence ?? this.qaEvidence,
+      securityEvidence: securityEvidence ?? this.securityEvidence,
+      ownerDecision: ownerDecision ?? this.ownerDecision,
+      ownerId: ownerId ?? this.ownerId,
+      ownerDecisionNote: ownerDecisionNote ?? this.ownerDecisionNote,
+      updatedAt: updatedAt ?? this.updatedAt,
+    );
+  }
+
+  Map<String, dynamic> toMap() {
+    validate();
+
+    return <String, dynamic>{
+      'proposalId': proposalId,
+      'status': status,
+      'qaEvidence': qaEvidence?.toMap(),
+      'securityEvidence': securityEvidence?.toMap(),
+      'ownerDecision': ownerDecision,
+      'ownerId': ownerId,
+      'ownerDecisionNote': ownerDecisionNote,
+      'qaPassed': qaPassed,
+      'securityPassed': securityPassed,
+      'rollbackAvailable': rollbackAvailable,
+      'ownerKeepAllowed': ownerKeepAllowed,
+      'ownerRollbackAllowed': ownerRollbackAllowed,
+      'deploymentAuthorized': false,
+      'automaticKeepAuthorized': false,
+      'automaticRollbackAuthorized': false,
+      'updatedAt': updatedAt.toUtc().toIso8601String(),
+    };
+  }
+}
+
+class AgentFutureQualityLifecycleValidationException implements Exception {
+  const AgentFutureQualityLifecycleValidationException(this.message);
+
+  final String message;
+
+  @override
+  String toString() =>
+      'AgentFutureQualityLifecycleValidationException: $message';
+}

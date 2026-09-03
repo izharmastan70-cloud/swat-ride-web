@@ -1,0 +1,729 @@
+// lib/food/restaurant_partner/screens/add_food_category_screen.dart
+// =============================================================
+// SWAT RIDE - FOOD DELIVERY
+// Add / Edit Restaurant Menu Category Screen
+//
+// Connected with:
+// - RestaurantPartnerModel
+// - RestaurantMenuCategoryModel
+// - FoodCategoryService
+//
+// Firebase Storage image upload remains bypassed.
+// A temporary local image path dialog is used.
+// =============================================================
+
+import 'package:flutter/material.dart';
+
+import '../models/food_category_model.dart';
+import '../models/restaurant_partner_model.dart';
+import '../services/food_category_service.dart';
+
+class AddFoodCategoryScreen extends StatefulWidget {
+  const AddFoodCategoryScreen({
+    required this.partner,
+    this.category,
+    super.key,
+  });
+
+  final RestaurantPartnerModel partner;
+  final RestaurantMenuCategoryModel? category;
+
+  bool get isEditing => category != null;
+
+  @override
+  State<AddFoodCategoryScreen> createState() =>
+      _AddFoodCategoryScreenState();
+}
+
+class _AddFoodCategoryScreenState
+    extends State<AddFoodCategoryScreen> {
+  static const Color yellow = Color(0xFFFFD60A);
+  static const Color background = Color(0xFF0D0D0D);
+  static const Color cardColor = Color(0xFF1A1A1A);
+
+  final GlobalKey<FormState> _formKey =
+      GlobalKey<FormState>();
+
+  final FoodCategoryService _categoryService =
+      FoodCategoryService();
+
+  final TextEditingController _nameController =
+      TextEditingController();
+
+  final TextEditingController _descriptionController =
+      TextEditingController();
+
+  final TextEditingController _sortOrderController =
+      TextEditingController(text: '0');
+
+  String _localImagePath = '';
+
+  bool _isActive = true;
+  bool _isVisible = true;
+  bool _isFeatured = false;
+  bool _isSaving = false;
+
+  RestaurantPartnerModel get partner => widget.partner;
+
+  @override
+  void initState() {
+    super.initState();
+
+    final RestaurantMenuCategoryModel? category =
+        widget.category;
+
+    if (category != null) {
+      _nameController.text = category.name;
+      _descriptionController.text = category.description;
+      _sortOrderController.text =
+          category.sortOrder.toString();
+      _localImagePath = category.localImagePath;
+      _isActive = category.isActive;
+      _isVisible = category.isVisible;
+      _isFeatured = category.isFeatured;
+    }
+  }
+
+  @override
+  void dispose() {
+    _nameController.dispose();
+    _descriptionController.dispose();
+    _sortOrderController.dispose();
+    super.dispose();
+  }
+
+  void _showMessage(String message) {
+    if (!mounted) {
+      return;
+    }
+
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Text(message),
+        ),
+      );
+  }
+
+  String? _requiredValidator(
+    String? value,
+    String field,
+  ) {
+    if (value == null || value.trim().isEmpty) {
+      return 'Please enter $field';
+    }
+
+    return null;
+  }
+
+  String? _sortOrderValidator(String? value) {
+    final String text = value?.trim() ?? '';
+
+    if (text.isEmpty) {
+      return 'Please enter sort order';
+    }
+
+    final int? number = int.tryParse(text);
+
+    if (number == null || number < 0) {
+      return 'Enter zero or a positive number';
+    }
+
+    return null;
+  }
+
+  Future<void> _pickLocalImagePath() async {
+    final TextEditingController controller =
+        TextEditingController(
+      text: _localImagePath,
+    );
+
+    final String? result = await showDialog<String>(
+      context: context,
+      builder: (BuildContext dialogContext) {
+        return AlertDialog(
+          backgroundColor: cardColor,
+          title: const Text('Category Image'),
+          content: TextField(
+            controller: controller,
+            autofocus: true,
+            decoration: InputDecoration(
+              labelText: 'Local image path',
+              hintText: r'C:\images\burgers.jpg',
+              filled: true,
+              fillColor: const Color(0xFF252525),
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(14),
+                borderSide: BorderSide.none,
+              ),
+            ),
+          ),
+          actions: <Widget>[
+            TextButton(
+              onPressed: () =>
+                  Navigator.pop(dialogContext),
+              child: const Text('Cancel'),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                final String value =
+                    controller.text.trim();
+
+                if (value.isEmpty) {
+                  return;
+                }
+
+                Navigator.pop(
+                  dialogContext,
+                  value,
+                );
+              },
+              style: ElevatedButton.styleFrom(
+                backgroundColor: yellow,
+                foregroundColor: Colors.black,
+              ),
+              child: const Text('Use Path'),
+            ),
+          ],
+        );
+      },
+    );
+
+    controller.dispose();
+
+    if (result == null || !mounted) {
+      return;
+    }
+
+    setState(() {
+      _localImagePath = result;
+    });
+  }
+
+  Future<void> _saveCategory() async {
+    if (_isSaving) {
+      return;
+    }
+
+    final bool valid =
+        _formKey.currentState?.validate() ?? false;
+
+    if (!valid) {
+      return;
+    }
+
+    if (partner.restaurantId.trim().isEmpty) {
+      _showMessage(
+        'Approved restaurant ID is missing.',
+      );
+      return;
+    }
+
+    setState(() {
+      _isSaving = true;
+    });
+
+    try {
+      final DateTime now = DateTime.now();
+      final RestaurantMenuCategoryModel? existing =
+          widget.category;
+
+      final RestaurantMenuCategoryModel category =
+          RestaurantMenuCategoryModel(
+        id: existing?.id ?? '',
+        restaurantId: partner.restaurantId,
+        partnerId: partner.partnerId,
+        name: _nameController.text.trim(),
+        description:
+            _descriptionController.text.trim(),
+        imageUrl: existing?.imageUrl ?? '',
+        localImagePath: _localImagePath,
+        sortOrder: int.tryParse(
+              _sortOrderController.text.trim(),
+            ) ??
+            0,
+        isActive: _isActive,
+        isVisible: _isVisible,
+        isFeatured: _isFeatured,
+        createdBy: partner.userId,
+        totalItems: existing?.totalItems ?? 0,
+        createdAt: existing?.createdAt ?? now,
+        updatedAt: now,
+      );
+
+      if (widget.isEditing) {
+        await _categoryService.updateCategory(
+          category,
+        );
+      } else {
+        await _categoryService.createCategory(
+          category,
+        );
+      }
+
+      if (!mounted) {
+        return;
+      }
+
+      _showMessage(
+        widget.isEditing
+            ? 'Category updated successfully.'
+            : 'Category created successfully.',
+      );
+
+      Navigator.pop(context, true);
+    } on FoodCategoryServiceException catch (error) {
+      _showMessage(error.message);
+    } catch (error) {
+      _showMessage(
+        'Unable to save category: $error',
+      );
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isSaving = false;
+        });
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: background,
+      appBar: AppBar(
+        backgroundColor: background,
+        title: Text(
+          widget.isEditing
+              ? 'Edit Category'
+              : 'Add Category',
+          style: const TextStyle(
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+      ),
+      body: SafeArea(
+        child: Form(
+          key: _formKey,
+          child: ListView(
+            padding: const EdgeInsets.fromLTRB(
+              16,
+              16,
+              16,
+              30,
+            ),
+            children: <Widget>[
+              _buildHeader(),
+              const SizedBox(height: 16),
+              _buildDetailsCard(),
+              const SizedBox(height: 16),
+              _buildImageCard(),
+              const SizedBox(height: 16),
+              _buildSettingsCard(),
+              const SizedBox(height: 22),
+              SizedBox(
+                width: double.infinity,
+                height: 56,
+                child: ElevatedButton(
+                  onPressed:
+                      _isSaving ? null : _saveCategory,
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: yellow,
+                    foregroundColor: Colors.black,
+                    shape: RoundedRectangleBorder(
+                      borderRadius:
+                          BorderRadius.circular(16),
+                    ),
+                  ),
+                  child: _isSaving
+                      ? const SizedBox(
+                          width: 22,
+                          height: 22,
+                          child:
+                              CircularProgressIndicator(
+                            color: Colors.black,
+                            strokeWidth: 2,
+                          ),
+                        )
+                      : Text(
+                          widget.isEditing
+                              ? 'Update Category'
+                              : 'Create Category',
+                          style: const TextStyle(
+                            fontSize: 16,
+                            fontWeight:
+                                FontWeight.bold,
+                          ),
+                        ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildHeader() {
+    return Container(
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: yellow,
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Row(
+        children: <Widget>[
+          const Icon(
+            Icons.create_new_folder_outlined,
+            color: Colors.black,
+            size: 45,
+          ),
+          const SizedBox(width: 15),
+          Expanded(
+            child: Column(
+              crossAxisAlignment:
+                  CrossAxisAlignment.start,
+              children: <Widget>[
+                Text(
+                  widget.isEditing
+                      ? 'Update Menu Category'
+                      : 'Create Menu Category',
+                  style: const TextStyle(
+                    color: Colors.black,
+                    fontSize: 20,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(height: 5),
+                const Text(
+                  'Categories help customers browse the restaurant menu easily.',
+                  style: TextStyle(
+                    color: Colors.black87,
+                    height: 1.35,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildDetailsCard() {
+    return _sectionCard(
+      title: 'Category Details',
+      icon: Icons.category_outlined,
+      children: <Widget>[
+        TextFormField(
+          controller: _nameController,
+          validator: (String? value) =>
+              _requiredValidator(
+            value,
+            'category name',
+          ),
+          autovalidateMode:
+              AutovalidateMode.onUserInteraction,
+          decoration: _inputDecoration(
+            label: 'Category name',
+            hint: 'Example: Burgers',
+            icon: Icons.label_outline,
+          ),
+        ),
+        const SizedBox(height: 14),
+        TextFormField(
+          controller: _descriptionController,
+          minLines: 3,
+          maxLines: 5,
+          decoration: _inputDecoration(
+            label: 'Description',
+            hint:
+                'Describe the food items in this category',
+            icon: Icons.description_outlined,
+          ),
+        ),
+        const SizedBox(height: 14),
+        TextFormField(
+          controller: _sortOrderController,
+          keyboardType: TextInputType.number,
+          validator: _sortOrderValidator,
+          autovalidateMode:
+              AutovalidateMode.onUserInteraction,
+          decoration: _inputDecoration(
+            label: 'Sort order',
+            hint: '0',
+            icon: Icons.sort,
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildImageCard() {
+    final bool hasImage =
+        _localImagePath.trim().isNotEmpty;
+
+    return _sectionCard(
+      title: 'Category Image',
+      icon: Icons.image_outlined,
+      children: <Widget>[
+        Material(
+          color: const Color(0xFF252525),
+          borderRadius: BorderRadius.circular(16),
+          child: InkWell(
+            onTap: _pickLocalImagePath,
+            borderRadius: BorderRadius.circular(16),
+            child: Padding(
+              padding: const EdgeInsets.all(15),
+              child: Row(
+                children: <Widget>[
+                  CircleAvatar(
+                    radius: 26,
+                    backgroundColor:
+                        yellow.withValues(alpha: 0.12),
+                    child: Icon(
+                      hasImage
+                          ? Icons.check
+                          : Icons.add_photo_alternate_outlined,
+                      color: hasImage
+                          ? Colors.greenAccent
+                          : yellow,
+                    ),
+                  ),
+                  const SizedBox(width: 13),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment:
+                          CrossAxisAlignment.start,
+                      children: <Widget>[
+                        Text(
+                          hasImage
+                              ? 'Image path selected'
+                              : 'Add category image',
+                          style: const TextStyle(
+                            fontWeight:
+                                FontWeight.bold,
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          hasImage
+                              ? _fileName(
+                                  _localImagePath,
+                                )
+                              : 'Firebase Storage is bypassed for now',
+                          maxLines: 1,
+                          overflow:
+                              TextOverflow.ellipsis,
+                          style: TextStyle(
+                            color: hasImage
+                                ? Colors.greenAccent
+                                : Colors.grey,
+                            fontSize: 11,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  if (hasImage)
+                    IconButton(
+                      onPressed: () {
+                        setState(() {
+                          _localImagePath = '';
+                        });
+                      },
+                      icon: const Icon(
+                        Icons.close,
+                        color: Colors.redAccent,
+                      ),
+                    )
+                  else
+                    const Icon(
+                      Icons.chevron_right,
+                      color: yellow,
+                    ),
+                ],
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(height: 10),
+        const Text(
+          'The local image path will be saved temporarily. '
+          'Real Firebase Storage upload can be connected later.',
+          style: TextStyle(
+            color: Colors.grey,
+            fontSize: 11,
+            height: 1.4,
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildSettingsCard() {
+    return _sectionCard(
+      title: 'Visibility Settings',
+      icon: Icons.tune,
+      children: <Widget>[
+        _switchTile(
+          title: 'Active',
+          subtitle:
+              'Allow this category to be used in the menu',
+          icon: Icons.power_settings_new,
+          value: _isActive,
+          onChanged: (bool value) {
+            setState(() {
+              _isActive = value;
+            });
+          },
+        ),
+        const SizedBox(height: 8),
+        _switchTile(
+          title: 'Visible to Customers',
+          subtitle:
+              'Show this category in the customer menu',
+          icon: Icons.visibility_outlined,
+          value: _isVisible,
+          onChanged: (bool value) {
+            setState(() {
+              _isVisible = value;
+            });
+          },
+        ),
+        const SizedBox(height: 8),
+        _switchTile(
+          title: 'Featured Category',
+          subtitle:
+              'Give this category higher priority',
+          icon: Icons.star_outline,
+          value: _isFeatured,
+          onChanged: (bool value) {
+            setState(() {
+              _isFeatured = value;
+            });
+          },
+        ),
+      ],
+    );
+  }
+
+  Widget _sectionCard({
+    required String title,
+    required IconData icon,
+    required List<Widget> children,
+  }) {
+    return Container(
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: cardColor,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(
+          color: Colors.white10,
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment:
+            CrossAxisAlignment.start,
+        children: <Widget>[
+          Row(
+            children: <Widget>[
+              Icon(
+                icon,
+                color: yellow,
+              ),
+              const SizedBox(width: 10),
+              Text(
+                title,
+                style: const TextStyle(
+                  fontSize: 17,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 18),
+          ...children,
+        ],
+      ),
+    );
+  }
+
+  Widget _switchTile({
+    required String title,
+    required String subtitle,
+    required IconData icon,
+    required bool value,
+    required ValueChanged<bool> onChanged,
+  }) {
+    return Container(
+      decoration: BoxDecoration(
+        color: const Color(0xFF252525),
+        borderRadius: BorderRadius.circular(15),
+      ),
+      child: SwitchListTile(
+        value: value,
+        onChanged: onChanged,
+        activeColor: yellow,
+        secondary: Icon(
+          icon,
+          color: yellow,
+        ),
+        title: Text(
+          title,
+          style: const TextStyle(
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+        subtitle: Text(
+          subtitle,
+          style: const TextStyle(
+            color: Colors.grey,
+            fontSize: 11,
+          ),
+        ),
+      ),
+    );
+  }
+
+  InputDecoration _inputDecoration({
+    required String label,
+    required String hint,
+    required IconData icon,
+  }) {
+    return InputDecoration(
+      labelText: label,
+      hintText: hint,
+      prefixIcon: Icon(
+        icon,
+        color: yellow,
+      ),
+      filled: true,
+      fillColor: const Color(0xFF252525),
+      border: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(15),
+        borderSide: BorderSide.none,
+      ),
+      focusedBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(15),
+        borderSide: const BorderSide(
+          color: yellow,
+        ),
+      ),
+      errorBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(15),
+        borderSide: const BorderSide(
+          color: Colors.redAccent,
+        ),
+      ),
+    );
+  }
+
+  String _fileName(String path) {
+    final String normalized =
+        path.replaceAll('\\', '/');
+
+    return normalized.split('/').last;
+  }
+}

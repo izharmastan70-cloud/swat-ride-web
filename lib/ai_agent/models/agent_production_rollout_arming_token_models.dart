@@ -1,0 +1,259 @@
+import '../constants/agent_production_rollout_arming_token_constants.dart';
+import '../constants/agent_production_rollout_runtime_guard_constants.dart';
+import '../constants/agent_production_rollout_snapshot_constants.dart';
+import 'agent_production_rollout_activation_models.dart';
+import 'agent_production_rollout_runtime_guard.dart';
+
+class AgentProductionRolloutTrustedLivePreflight {
+  AgentProductionRolloutTrustedLivePreflight({
+    required this.actorReferenceSha256,
+    required this.ownerApprovalId,
+    required this.ownerApprovedSnapshotFingerprintSha256,
+    required this.liveSnapshotFingerprintSha256,
+    required this.controlStateFingerprintSha256,
+    required this.planFingerprintSha256,
+    required this.roleCount,
+    required this.preflightAtUtc,
+  }) {
+    validate();
+  }
+
+  final String actorReferenceSha256;
+  final String ownerApprovalId;
+  final String ownerApprovedSnapshotFingerprintSha256;
+  final String liveSnapshotFingerprintSha256;
+  final String controlStateFingerprintSha256;
+  final String planFingerprintSha256;
+  final int roleCount;
+  final DateTime preflightAtUtc;
+
+  bool get writesFirestore => false;
+  bool get grantsPermission => false;
+  bool get activatesProduction => false;
+
+  void validate() {
+    final RegExp sha256 = RegExp(r'^[A-Fa-f0-9]{64}$');
+
+    if (!sha256.hasMatch(actorReferenceSha256) ||
+        ownerApprovalId.trim().isEmpty ||
+        !sha256.hasMatch(ownerApprovedSnapshotFingerprintSha256) ||
+        !sha256.hasMatch(liveSnapshotFingerprintSha256) ||
+        !sha256.hasMatch(controlStateFingerprintSha256) ||
+        !sha256.hasMatch(planFingerprintSha256) ||
+        roleCount <= 0 ||
+        !preflightAtUtc.isUtc) {
+      throw const FormatException('Invalid Phase 66 trusted live preflight.');
+    }
+  }
+}
+
+class AgentProductionRolloutTrustedLivePreflightDecision {
+  const AgentProductionRolloutTrustedLivePreflightDecision({
+    required this.status,
+    required this.reasonCode,
+    required this.preflight,
+  });
+
+  final String status;
+  final String reasonCode;
+  final AgentProductionRolloutTrustedLivePreflight? preflight;
+
+  bool get ready => preflight != null;
+  bool get activatesProduction => false;
+}
+
+class AgentProductionRolloutArmingCredential {
+  AgentProductionRolloutArmingCredential({
+    required this.rawToken,
+    required this.tokenIdSha256,
+    required this.actorReferenceSha256,
+    required this.ownerApprovalId,
+    required this.planFingerprintSha256,
+    required this.controlStateFingerprintSha256,
+    required this.guardRevision,
+    required this.guardVersion,
+    required this.roleCount,
+    required this.issuedAtUtc,
+    required this.expiresAtUtc,
+  }) {
+    validate();
+  }
+
+  final String rawToken;
+  final String tokenIdSha256;
+
+  final String actorReferenceSha256;
+  final String ownerApprovalId;
+  final String planFingerprintSha256;
+  final String controlStateFingerprintSha256;
+
+  final int guardRevision;
+  final String guardVersion;
+  final int roleCount;
+
+  final DateTime issuedAtUtc;
+  final DateTime expiresAtUtc;
+
+  bool get rawTokenPersistsToFirestore => false;
+  bool get rawTokenWrittenToAudit => false;
+  bool get grantsPermissionByItself => false;
+  bool get activatesProductionByItself => false;
+
+  void validate() {
+    final RegExp sha256 = RegExp(r'^[A-Fa-f0-9]{64}$');
+
+    if (rawToken.trim().length < 32 ||
+        !sha256.hasMatch(tokenIdSha256) ||
+        !sha256.hasMatch(actorReferenceSha256) ||
+        ownerApprovalId.trim().isEmpty ||
+        !sha256.hasMatch(planFingerprintSha256) ||
+        !sha256.hasMatch(controlStateFingerprintSha256) ||
+        guardRevision < 1 ||
+        guardVersion !=
+            AgentProductionRolloutRuntimeGuardVersion.monitorOnlyV1 ||
+        roleCount <= 0 ||
+        !issuedAtUtc.isUtc ||
+        !expiresAtUtc.isUtc ||
+        !expiresAtUtc.isAfter(issuedAtUtc) ||
+        expiresAtUtc.difference(issuedAtUtc) >
+            AgentProductionRolloutArmingTokenLimits.maxValidity) {
+      throw const FormatException(
+        'Invalid Phase 66 one-time arming credential.',
+      );
+    }
+  }
+
+  Map<String, dynamic> toPersistentMap() {
+    validate();
+
+    return <String, dynamic>{
+      'tokenIdSha256': tokenIdSha256.toLowerCase(),
+      'status': AgentProductionRolloutArmingTokenStatus.ready,
+      'targetStage': AgentProductionRolloutStage.monitorOnly,
+      'actorReferenceSha256': actorReferenceSha256.toLowerCase(),
+      'ownerApprovalId': ownerApprovalId.trim(),
+      'planFingerprintSha256': planFingerprintSha256.toLowerCase(),
+      'controlStateFingerprintSha256': controlStateFingerprintSha256
+          .toLowerCase(),
+      'guardRevision': guardRevision,
+      'guardVersion': guardVersion,
+      'roleCount': roleCount,
+      'issuedAtUtc': issuedAtUtc,
+      'expiresAtUtc': expiresAtUtc,
+      'consumedAt': null,
+    };
+  }
+}
+
+class AgentProductionRolloutArmingTokenIssuanceRequest {
+  AgentProductionRolloutArmingTokenIssuanceRequest({
+    required this.credential,
+    required this.preflight,
+    required this.plan,
+  }) {
+    validate();
+  }
+
+  final AgentProductionRolloutArmingCredential credential;
+  final AgentProductionRolloutTrustedLivePreflight preflight;
+  final AgentProductionRolloutMonitorActivationPlan plan;
+
+  void validate() {
+    credential.validate();
+    preflight.validate();
+    plan.validate();
+
+    if (credential.actorReferenceSha256.toLowerCase() !=
+            preflight.actorReferenceSha256.toLowerCase() ||
+        credential.ownerApprovalId != preflight.ownerApprovalId ||
+        credential.planFingerprintSha256.toLowerCase() !=
+            preflight.planFingerprintSha256.toLowerCase() ||
+        credential.controlStateFingerprintSha256.toLowerCase() !=
+            preflight.controlStateFingerprintSha256.toLowerCase() ||
+        credential.roleCount != preflight.roleCount ||
+        plan.ownerApprovalId != credential.ownerApprovalId ||
+        plan.actorReferenceSha256.toLowerCase() !=
+            credential.actorReferenceSha256.toLowerCase() ||
+        plan.sourceControlStateFingerprintSha256.toLowerCase() !=
+            credential.controlStateFingerprintSha256.toLowerCase() ||
+        plan.precondition.expectedRoleCount != credential.roleCount) {
+      throw const FormatException(
+        'Arming token issuance is not exact-bound to preflight/plan.',
+      );
+    }
+  }
+}
+
+class AgentProductionRolloutArmingTokenIssuanceResult {
+  const AgentProductionRolloutArmingTokenIssuanceResult({
+    required this.status,
+    required this.reasonCode,
+    required this.tokenIdSha256,
+    required this.issued,
+  });
+
+  final String status;
+  final String reasonCode;
+  final String tokenIdSha256;
+  final bool issued;
+
+  bool get activatesProduction => false;
+  bool get armsActivationRepository => false;
+}
+
+class AgentProductionRolloutActivationAuthorizationDecision {
+  const AgentProductionRolloutActivationAuthorizationDecision({
+    required this.status,
+    required this.reasonCode,
+    required this.authorized,
+    required this.tokenIdSha256,
+  });
+
+  final String status;
+  final String reasonCode;
+  final bool authorized;
+  final String tokenIdSha256;
+
+  bool get grantsBusinessWriteAuthority => false;
+  bool get grantsAutoAuthority => false;
+}
+
+class AgentProductionRolloutOwnerBoundGuardRequest {
+  AgentProductionRolloutOwnerBoundGuardRequest({
+    required this.preflight,
+    required this.plan,
+    required this.guard,
+    required this.expectedPreviousRevision,
+  }) {
+    validate();
+  }
+
+  final AgentProductionRolloutTrustedLivePreflight preflight;
+  final AgentProductionRolloutMonitorActivationPlan plan;
+  final AgentProductionRolloutRuntimeGuard guard;
+  final int expectedPreviousRevision;
+
+  void validate() {
+    preflight.validate();
+    plan.validate();
+    guard.validate();
+
+    if (expectedPreviousRevision < 0 ||
+        guard.revision != expectedPreviousRevision + 1 ||
+        guard.actorReferenceSha256.toLowerCase() !=
+            preflight.actorReferenceSha256.toLowerCase() ||
+        guard.ownerApprovalId != preflight.ownerApprovalId ||
+        guard.planFingerprintSha256.toLowerCase() !=
+            preflight.planFingerprintSha256.toLowerCase() ||
+        guard.controlStateFingerprintSha256.toLowerCase() !=
+            preflight.controlStateFingerprintSha256.toLowerCase() ||
+        guard.roleCount != preflight.roleCount ||
+        plan.ownerApprovalId != guard.ownerApprovalId ||
+        plan.sourceControlStateFingerprintSha256.toLowerCase() !=
+            guard.controlStateFingerprintSha256.toLowerCase()) {
+      throw const FormatException(
+        'Owner-bound guard is not exact-bound to trusted preflight.',
+      );
+    }
+  }
+}

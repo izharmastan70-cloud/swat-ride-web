@@ -1,0 +1,574 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
+
+import '../constants/agent_audit_constants.dart';
+import '../models/agent_master_settings.dart';
+import 'agent_customer_whatsapp_control_policy.dart';
+import 'agent_emergency_whatsapp_control_policy.dart';
+import 'agent_owner_whatsapp_control_policy.dart';
+import 'agent_audit_service.dart';
+
+// =========================================================
+// AI AGENT ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â MASTER SETTINGS SERVICE
+// =========================================================
+//
+// Firestore:
+// agent_settings/master
+//
+// Existing SWAT RIDE business modules are not touched.
+// Every write here is only for the standalone AI control plane.
+
+class AgentMasterSettingsService {
+  final FirebaseFirestore _firestore = FirebaseFirestore.instance;
+  final AgentAuditService _auditService = AgentAuditService();
+
+  static const String _collectionPath = 'agent_settings';
+
+  DocumentReference<Map<String, dynamic>> get _document => _firestore
+      .collection(_collectionPath)
+      .doc(AgentMasterSettings.documentId);
+
+  Future<AgentMasterSettings> getSettings() async {
+    final DocumentSnapshot<Map<String, dynamic>> snapshot = await _document
+        .get();
+
+    if (!snapshot.exists) {
+      return AgentMasterSettings.safeDefaults();
+    }
+
+    return AgentMasterSettings.fromMap(snapshot.data() ?? <String, dynamic>{});
+  }
+
+  Stream<AgentMasterSettings> watchSettings() {
+    return _document.snapshots().map((
+      DocumentSnapshot<Map<String, dynamic>> snapshot,
+    ) {
+      if (!snapshot.exists) {
+        return AgentMasterSettings.safeDefaults();
+      }
+
+      return AgentMasterSettings.fromMap(
+        snapshot.data() ?? <String, dynamic>{},
+      );
+    });
+  }
+
+  Future<void> bootstrapSafeDefaults({required String actorId}) async {
+    final DocumentSnapshot<Map<String, dynamic>> existing = await _document
+        .get();
+
+    if (existing.exists) return;
+
+    final AgentMasterSettings defaults = AgentMasterSettings.safeDefaults();
+
+    await _document.set(defaults.toMap());
+
+    await _auditService.append(
+      eventType: AgentAuditEventType.systemEvent,
+      severity: AgentAuditSeverity.info,
+      actorType: AgentAuditActorType.admin,
+      actorId: actorId,
+      module: 'ai_core',
+      actionId: 'ai.settings.bootstrap',
+      result: 'CREATED',
+      reason: 'Created safe default AI master settings.',
+    );
+  }
+
+  Future<void> setMasterEnabled({
+    required bool enabled,
+    required String actorId,
+  }) async {
+    await _document.set(<String, dynamic>{
+      'masterEnabled': enabled,
+      'updatedAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
+
+    await _audit(
+      actorId: actorId,
+      actionId: 'ai.settings.master_enabled',
+      result: enabled ? 'ON' : 'OFF',
+      reason: 'Owner/admin changed AI master state.',
+    );
+  }
+
+  Future<void> setFreeAiEnabled({
+    required bool enabled,
+    required String actorId,
+  }) async {
+    await _document.set(<String, dynamic>{
+      'freeAiEnabled': enabled,
+      'updatedAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
+
+    await _audit(
+      actorId: actorId,
+      actionId: 'ai.settings.free_ai',
+      result: enabled ? 'ON' : 'OFF',
+      reason: 'Free AI routing setting changed.',
+    );
+  }
+
+  Future<void> setLocalAiEnabled({
+    required bool enabled,
+    required String actorId,
+  }) async {
+    await _document.set(<String, dynamic>{
+      'localAiEnabled': enabled,
+      'updatedAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
+
+    await _audit(
+      actorId: actorId,
+      actionId: 'ai.settings.local_ai',
+      result: enabled ? 'ON' : 'OFF',
+      reason: 'Local AI routing setting changed.',
+    );
+  }
+
+  Future<void> setCallAgentEnabled({
+    required bool enabled,
+    required String actorId,
+  }) async {
+    await _document.set(<String, dynamic>{
+      'callAgentEnabled': enabled,
+      'updatedAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
+
+    await _audit(
+      actorId: actorId,
+      actionId: 'ai.settings.call_agent',
+      result: enabled ? 'ON' : 'OFF',
+      reason: 'Call Agent master setting changed.',
+    );
+  }
+
+  Future<void> setEmailAgentEnabled({
+    required bool enabled,
+    required String actorId,
+  }) async {
+    await _document.set(<String, dynamic>{
+      'emailAgentEnabled': enabled,
+      'updatedAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
+
+    await _audit(
+      actorId: actorId,
+      actionId: 'ai.settings.email_agent',
+      result: enabled ? 'ON' : 'OFF',
+      reason:
+          'Super Admin changed Email Agent master switch. Provider transport remains separately controlled.',
+      metadata: <String, dynamic>{
+        'emailAgentEnabled': enabled,
+        'providerTransportChanged': false,
+        'permissionEngineBypassed': false,
+        'runtimeGateBypassed': false,
+        'approvalEngineBypassed': false,
+      },
+    );
+  }
+
+  Future<void> setCustomerWhatsAppAgentEnabled({
+    required bool enabled,
+    required String actorId,
+    required String actorRole,
+  }) async {
+    const AgentCustomerWhatsAppControlPolicy controlPolicy =
+        AgentCustomerWhatsAppControlPolicy();
+
+    final AgentCustomerWhatsAppControlDecision controlDecision = controlPolicy
+        .authorizeMasterToggle(actorRole: actorRole);
+
+    if (!controlDecision.allowed) {
+      throw const AgentSettingsValidationException(
+        'Only Admin or Super Admin may change the Customer WhatsApp Agent switch.',
+      );
+    }
+
+    if (actorId.trim().isEmpty) {
+      throw const AgentSettingsValidationException(
+        'Customer WhatsApp Agent control requires a non-empty actor ID.',
+      );
+    }
+
+    await _document.set(<String, dynamic>{
+      'customerWhatsAppAgentEnabled': enabled,
+      'updatedAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
+
+    await _audit(
+      actorId: actorId.trim(),
+      actionId: 'ai.settings.customer_whatsapp_agent',
+      result: enabled ? 'ON' : 'OFF',
+      reason:
+          'Admin/Super Admin changed Customer WhatsApp Agent master switch.',
+      metadata: <String, dynamic>{
+        'customerWhatsAppAgentEnabled': enabled,
+        'actorRole': actorRole.trim().toLowerCase(),
+        'adminControlPlaneRemainsAvailable': true,
+        'coreSwatRideServicesRemainAvailable': true,
+        'providerTransportChanged': false,
+        'permissionEngineBypassed': false,
+        'approvalEngineBypassed': false,
+        'runtimeGateBypassed': false,
+      },
+    );
+  }
+
+  Future<void> setOwnerWhatsAppAgentEnabled({
+    required bool enabled,
+    required String actorId,
+    required String actorRole,
+  }) async {
+    const AgentOwnerWhatsAppControlPolicy controlPolicy =
+        AgentOwnerWhatsAppControlPolicy();
+
+    final AgentOwnerWhatsAppControlDecision controlDecision = controlPolicy
+        .authorizeMasterToggle(actorRole: actorRole);
+
+    if (!controlDecision.allowed) {
+      throw const AgentSettingsValidationException(
+        'Only Admin or Super Admin may change the Owner WhatsApp Agent switch.',
+      );
+    }
+
+    if (actorId.trim().isEmpty) {
+      throw const AgentSettingsValidationException(
+        'Owner WhatsApp Agent control requires a non-empty actor ID.',
+      );
+    }
+
+    await _document.set(<String, dynamic>{
+      'ownerWhatsAppAgentEnabled': enabled,
+      'updatedAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
+
+    await _audit(
+      actorId: actorId.trim(),
+      actionId: 'ai.settings.owner_whatsapp_agent',
+      result: enabled ? 'ON' : 'OFF',
+      reason: 'Admin/Super Admin changed Owner WhatsApp Agent master switch.',
+      metadata: <String, dynamic>{
+        'ownerWhatsAppAgentEnabled': enabled,
+        'actorRole': actorRole.trim().toLowerCase(),
+        'customerWhatsappPrivilegesInherited': false,
+        'emergencyWhatsappAuthorityChanged': false,
+        'providerTransportChanged': false,
+        'permissionEngineBypassed': false,
+        'approvalEngineBypassed': false,
+        'runtimeGateBypassed': false,
+        'coreSwatRideServicesRemainAvailable': true,
+      },
+    );
+  }
+
+  Future<void> setEmergencyWhatsAppAgentEnabled({
+    required bool enabled,
+    required String actorId,
+    required String actorRole,
+  }) async {
+    const AgentEmergencyWhatsAppControlPolicy controlPolicy =
+        AgentEmergencyWhatsAppControlPolicy();
+
+    final AgentEmergencyWhatsAppControlDecision controlDecision = controlPolicy
+        .authorizeMasterToggle(actorRole: actorRole);
+
+    if (!controlDecision.allowed) {
+      throw const AgentSettingsValidationException(
+        'Only Admin or Super Admin may change the Emergency WhatsApp Agent switch.',
+      );
+    }
+
+    if (actorId.trim().isEmpty) {
+      throw const AgentSettingsValidationException(
+        'Emergency WhatsApp Agent control requires a non-empty actor ID.',
+      );
+    }
+
+    await _document.set(<String, dynamic>{
+      'emergencyWhatsAppAgentEnabled': enabled,
+      'updatedAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
+
+    await _audit(
+      actorId: actorId.trim(),
+      actionId: 'ai.settings.emergency_whatsapp_agent',
+      result: enabled ? 'ON' : 'OFF',
+      reason:
+          'Admin/Super Admin changed Emergency WhatsApp Agent master switch.',
+      metadata: <String, dynamic>{
+        'emergencyWhatsAppAgentEnabled': enabled,
+        'actorRole': actorRole.trim().toLowerCase(),
+        'customerWhatsappAuthorityChanged': false,
+        'ownerWhatsappAuthorityChanged': false,
+        'universalSafetyAvailabilityChanged': false,
+        'providerTransportChanged': false,
+        'permissionEngineBypassed': false,
+        'approvalEngineBypassed': false,
+        'runtimeGateBypassed': false,
+        'coreSwatRideServicesRemainAvailable': true,
+      },
+    );
+  }
+
+  Future<void> setPaidCodeBudget({
+    required int monthlyBudgetRs,
+    required String actorId,
+  }) async {
+    if (monthlyBudgetRs < 0) {
+      throw const AgentSettingsValidationException(
+        'Monthly paid-code budget cannot be negative.',
+      );
+    }
+
+    await _document.set(<String, dynamic>{
+      'monthlyPaidCodeBudgetRs': monthlyBudgetRs,
+      'updatedAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
+
+    await _audit(
+      actorId: actorId,
+      actionId: 'ai.settings.paid_code_budget',
+      result: 'UPDATED',
+      reason: 'Paid Code AI monthly budget changed.',
+      metadata: <String, dynamic>{'monthlyBudgetRs': monthlyBudgetRs},
+    );
+  }
+
+  Future<void> setPaidCodeAiEnabled({
+    required bool enabled,
+    required String actorId,
+  }) async {
+    final AgentMasterSettings current = await getSettings();
+
+    if (enabled && current.monthlyPaidCodeBudgetRs <= 0) {
+      throw const AgentSettingsValidationException(
+        'Set a positive Paid Code AI monthly budget before enabling it.',
+      );
+    }
+
+    await _document.set(<String, dynamic>{
+      'paidCodeAiEnabled': enabled,
+      'updatedAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
+
+    await _audit(
+      actorId: actorId,
+      actionId: 'ai.settings.paid_code_ai',
+      result: enabled ? 'ON' : 'OFF',
+      reason: 'Paid Code AI setting changed.',
+    );
+  }
+
+  Future<void> recordPaidCodeUsage({
+    required int amountRs,
+    required String actorId,
+  }) async {
+    if (amountRs <= 0) {
+      throw const AgentSettingsValidationException(
+        'Paid Code AI usage amount must be positive.',
+      );
+    }
+
+    final DocumentReference<Map<String, dynamic>> ref = _document;
+
+    await _firestore.runTransaction((Transaction transaction) async {
+      final DocumentSnapshot<Map<String, dynamic>> snapshot = await transaction
+          .get(ref);
+
+      final AgentMasterSettings current = snapshot.exists
+          ? AgentMasterSettings.fromMap(snapshot.data() ?? <String, dynamic>{})
+          : AgentMasterSettings.safeDefaults();
+
+      final int newUsed = current.paidCodeBudgetUsedRs + amountRs;
+      final bool reachedLimit =
+          current.monthlyPaidCodeBudgetRs <= 0 ||
+          newUsed >= current.monthlyPaidCodeBudgetRs;
+
+      transaction.set(ref, <String, dynamic>{
+        'paidCodeBudgetUsedRs': newUsed,
+        if (reachedLimit) 'paidCodeAiEnabled': false,
+        'updatedAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+    });
+
+    await _audit(
+      actorId: actorId,
+      actionId: 'ai.settings.paid_code_usage',
+      result: 'RECORDED',
+      reason: 'Recorded Paid Code AI usage.',
+      metadata: <String, dynamic>{'amountRs': amountRs},
+    );
+  }
+
+  Future<void> resetPaidCodeUsage({required String actorId}) async {
+    await _document.set(<String, dynamic>{
+      'paidCodeBudgetUsedRs': 0,
+      'paidCodeAiEnabled': false,
+      'updatedAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
+
+    await _audit(
+      actorId: actorId,
+      actionId: 'ai.settings.paid_code_usage_reset',
+      result: 'RESET',
+      reason:
+          'Paid Code AI usage reset. Provider remains OFF until re-enabled.',
+    );
+  }
+
+  Future<void> setApprovalEngineEnabled({
+    required bool enabled,
+    required String actorId,
+  }) async {
+    await _document.set(<String, dynamic>{
+      'approvalEngineEnabled': enabled,
+      'updatedAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
+
+    await _audit(
+      actorId: actorId,
+      actionId: 'ai.settings.approval_engine',
+      result: enabled ? 'ON' : 'OFF',
+      reason: 'Approval Engine setting changed.',
+    );
+  }
+
+  /// Controls optional/verbose audit logging preference only.
+  /// Protected security/approval/task/provider audit evidence remains
+  /// governed by the existing mandatory audit boundaries.
+  Future<void> setAuditLoggingEnabled({
+    required bool enabled,
+    required String actorId,
+  }) async {
+    await _document.set(<String, dynamic>{
+      'auditLoggingEnabled': enabled,
+      'updatedAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
+
+    await _audit(
+      actorId: actorId,
+      actionId: 'ai.settings.audit_logging',
+      result: enabled ? 'ON' : 'OFF',
+      reason:
+          'Optional audit logging preference changed. Protected audit evidence remains mandatory.',
+      metadata: <String, dynamic>{
+        'auditLoggingEnabled': enabled,
+        'protectedAuditBoundariesRemainMandatory': true,
+      },
+    );
+  }
+
+  Future<void> setPaidReasoningLimits({
+    required int perTaskLimitRs,
+    required int dailyLimitRs,
+    required int monthlyLimitRs,
+    required String actorId,
+  }) async {
+    if (perTaskLimitRs < 0 || dailyLimitRs < 0 || monthlyLimitRs < 0) {
+      throw const AgentSettingsValidationException(
+        'Paid Reasoning Rs limits cannot be negative.',
+      );
+    }
+
+    final AgentMasterSettings current = await getSettings();
+
+    if (current.paidReasoningEnabled &&
+        (perTaskLimitRs <= 0 || dailyLimitRs <= 0 || monthlyLimitRs <= 0)) {
+      throw const AgentSettingsValidationException(
+        'Disable Paid Reasoning before clearing any Paid Reasoning Rs limit.',
+      );
+    }
+
+    await _document.set(<String, dynamic>{
+      'paidReasoningPerTaskLimitRs': perTaskLimitRs,
+      'paidReasoningDailyLimitRs': dailyLimitRs,
+      'paidReasoningMonthlyLimitRs': monthlyLimitRs,
+      'updatedAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
+
+    await _audit(
+      actorId: actorId,
+      actionId: 'ai.settings.paid_reasoning_limits',
+      result: 'UPDATED',
+      reason: 'Generic Paid Reasoning Rs limits changed.',
+      metadata: <String, dynamic>{
+        'perTaskLimitRs': perTaskLimitRs,
+        'dailyLimitRs': dailyLimitRs,
+        'monthlyLimitRs': monthlyLimitRs,
+        'paidCodeBudgetChanged': false,
+      },
+    );
+  }
+
+  Future<void> setAskBeforePaid({
+    required bool enabled,
+    required String actorId,
+  }) async {
+    await _document.set(<String, dynamic>{
+      'askBeforePaid': enabled,
+      'updatedAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
+
+    await _audit(
+      actorId: actorId,
+      actionId: 'ai.settings.ask_before_paid',
+      result: enabled ? 'ON' : 'OFF',
+      reason: 'Ask Before Paid setting changed for generic Paid Reasoning.',
+      metadata: <String, dynamic>{
+        'askBeforePaid': enabled,
+        'approvalEngineAuthorityChanged': false,
+      },
+    );
+  }
+
+  Future<void> setPaidReasoningEnabled({
+    required bool enabled,
+    required String actorId,
+  }) async {
+    final AgentMasterSettings current = await getSettings();
+
+    if (enabled && !current.paidReasoningBudgetConfigured) {
+      throw const AgentSettingsValidationException(
+        'Set positive per-task, daily and monthly Paid Reasoning Rs limits before enabling it.',
+      );
+    }
+
+    await _document.set(<String, dynamic>{
+      'paidReasoningEnabled': enabled,
+      'updatedAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
+
+    await _audit(
+      actorId: actorId,
+      actionId: 'ai.settings.paid_reasoning',
+      result: enabled ? 'ON' : 'OFF',
+      reason: 'Generic Paid Reasoning setting changed.',
+      metadata: <String, dynamic>{
+        'paidReasoningEnabled': enabled,
+        'paidCodeAiChanged': false,
+      },
+    );
+  }
+
+  Future<void> _audit({
+    required String actorId,
+    required String actionId,
+    required String result,
+    required String reason,
+    Map<String, dynamic> metadata = const <String, dynamic>{},
+  }) {
+    return _auditService
+        .append(
+          eventType: AgentAuditEventType.systemEvent,
+          severity: AgentAuditSeverity.info,
+          actorType: AgentAuditActorType.admin,
+          actorId: actorId,
+          module: 'ai_core',
+          actionId: actionId,
+          result: result,
+          reason: reason,
+          metadata: metadata,
+        )
+        .then((_) {});
+  }
+}

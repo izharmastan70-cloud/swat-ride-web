@@ -1,0 +1,366 @@
+// lib/food/restaurant_partner/widgets/partner_payment_form.dart
+// =============================================================
+// SWAT RIDE - FOOD DELIVERY
+// Restaurant Partner Payment & Settlement Form
+//
+// Real data structure:
+// - Cash
+// - SWAT RIDE Wallet
+// - JazzCash
+// - Easypaisa
+// - Bank account settlement details
+//
+// Online payment gateway execution remains bypassed for now.
+// =============================================================
+
+import 'package:flutter/material.dart';
+
+class PartnerPaymentForm extends StatelessWidget {
+  const PartnerPaymentForm({
+    required this.settlementMethod,
+    required this.onSettlementMethodChanged,
+    required this.accountTitleController,
+    required this.accountNumberController,
+    required this.bankNameController,
+    required this.acceptsCash,
+    required this.acceptsWallet,
+    required this.acceptsJazzCash,
+    required this.acceptsEasypaisa,
+    required this.onAcceptsCashChanged,
+    required this.onAcceptsWalletChanged,
+    required this.onAcceptsJazzCashChanged,
+    required this.onAcceptsEasypaisaChanged,
+    super.key,
+  });
+
+  static const Color yellow = Color(0xFFFFD60A);
+  static const Color cardColor = Color(0xFF1A1A1A);
+
+  final String settlementMethod;
+  final ValueChanged<String> onSettlementMethodChanged;
+
+  final TextEditingController accountTitleController;
+  final TextEditingController accountNumberController;
+  final TextEditingController bankNameController;
+
+  final bool acceptsCash;
+  final bool acceptsWallet;
+  final bool acceptsJazzCash;
+  final bool acceptsEasypaisa;
+
+  final ValueChanged<bool> onAcceptsCashChanged;
+  final ValueChanged<bool> onAcceptsWalletChanged;
+  final ValueChanged<bool> onAcceptsJazzCashChanged;
+  final ValueChanged<bool> onAcceptsEasypaisaChanged;
+
+  static const List<String> settlementMethods = <String>[
+    'cash',
+    'wallet',
+    'jazzcash',
+    'easypaisa',
+    'bank',
+  ];
+
+  String _displayName(String value) {
+    switch (value) {
+      case 'cash':
+        return 'Cash';
+      case 'wallet':
+        return 'SWAT RIDE Wallet';
+      case 'jazzcash':
+        return 'JazzCash';
+      case 'easypaisa':
+        return 'Easypaisa';
+      case 'bank':
+        return 'Bank Account';
+      default:
+        return value;
+    }
+  }
+
+  IconData _methodIcon(String value) {
+    switch (value) {
+      case 'cash':
+        return Icons.payments_outlined;
+      case 'wallet':
+        return Icons.account_balance_wallet_outlined;
+      case 'jazzcash':
+        return Icons.phone_android;
+      case 'easypaisa':
+        return Icons.mobile_friendly;
+      case 'bank':
+        return Icons.account_balance_outlined;
+      default:
+        return Icons.payment;
+    }
+  }
+
+  bool get _requiresAccountDetails {
+    return settlementMethod != 'cash';
+  }
+
+  String? _accountValidator(String? value, String field) {
+    if (!_requiresAccountDetails) {
+      return null;
+    }
+
+    if (value == null || value.trim().isEmpty) {
+      return 'Please enter $field';
+    }
+
+    return null;
+  }
+
+  bool get _hasAtLeastOnePaymentMethod {
+    return acceptsCash || acceptsWallet || acceptsJazzCash || acceptsEasypaisa;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: cardColor,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: Colors.white10),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          const Row(
+            children: <Widget>[
+              CircleAvatar(
+                backgroundColor: Color(0x22FFD60A),
+                child: Icon(
+                  Icons.account_balance_wallet_outlined,
+                  color: yellow,
+                ),
+              ),
+              SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: <Widget>[
+                    Text(
+                      'Payment & Settlement',
+                      style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    Text(
+                      'Choose customer payments and restaurant settlement',
+                      style: TextStyle(color: Colors.grey, fontSize: 12),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 20),
+          const Text(
+            'Customer payment methods',
+            style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 10),
+          _paymentSwitch(
+            title: 'Cash on Delivery',
+            subtitle: 'Customer pays the delivery rider in cash',
+            icon: Icons.payments_outlined,
+            value: acceptsCash,
+            onChanged: onAcceptsCashChanged,
+          ),
+          const SizedBox(height: 8),
+          _paymentSwitch(
+            title: 'SWAT RIDE Wallet',
+            subtitle: 'Online charging is temporarily bypassed',
+            icon: Icons.account_balance_wallet_outlined,
+            value: acceptsWallet,
+            onChanged: onAcceptsWalletChanged,
+          ),
+          const SizedBox(height: 8),
+          _paymentSwitch(
+            title: 'JazzCash',
+            subtitle: 'Gateway connection will be enabled later',
+            icon: Icons.phone_android,
+            value: acceptsJazzCash,
+            onChanged: onAcceptsJazzCashChanged,
+          ),
+          const SizedBox(height: 8),
+          _paymentSwitch(
+            title: 'Easypaisa',
+            subtitle: 'Gateway connection will be enabled later',
+            icon: Icons.mobile_friendly,
+            value: acceptsEasypaisa,
+            onChanged: onAcceptsEasypaisaChanged,
+          ),
+          if (!_hasAtLeastOnePaymentMethod) ...<Widget>[
+            const SizedBox(height: 10),
+            const Text(
+              'Select at least one customer payment method.',
+              style: TextStyle(color: Colors.redAccent, fontSize: 12),
+            ),
+          ],
+          const SizedBox(height: 22),
+          const Text(
+            'Restaurant settlement method',
+            style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 10),
+          DropdownButtonFormField<String>(
+            initialValue: settlementMethods.contains(settlementMethod)
+                ? settlementMethod
+                : 'cash',
+            dropdownColor: const Color(0xFF252525),
+            decoration: InputDecoration(
+              labelText: 'Settlement method',
+              prefixIcon: Icon(_methodIcon(settlementMethod), color: yellow),
+              filled: true,
+              fillColor: const Color(0xFF252525),
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(15),
+                borderSide: BorderSide.none,
+              ),
+              focusedBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(15),
+                borderSide: const BorderSide(color: yellow),
+              ),
+            ),
+            items: settlementMethods
+                .map(
+                  (String method) => DropdownMenuItem<String>(
+                    value: method,
+                    child: Row(
+                      children: <Widget>[
+                        Icon(_methodIcon(method), color: yellow, size: 20),
+                        const SizedBox(width: 10),
+                        Text(_displayName(method)),
+                      ],
+                    ),
+                  ),
+                )
+                .toList(),
+            onChanged: (String? value) {
+              if (value != null) {
+                onSettlementMethodChanged(value);
+              }
+            },
+          ),
+          if (_requiresAccountDetails) ...<Widget>[
+            const SizedBox(height: 14),
+            _field(
+              controller: accountTitleController,
+              label: 'Account title',
+              icon: Icons.person_outline,
+              validator: (String? value) =>
+                  _accountValidator(value, 'account title'),
+            ),
+            const SizedBox(height: 14),
+            _field(
+              controller: accountNumberController,
+              label: settlementMethod == 'bank'
+                  ? 'Account / IBAN number'
+                  : 'Mobile account number',
+              icon: Icons.numbers,
+              keyboardType: TextInputType.phone,
+              validator: (String? value) =>
+                  _accountValidator(value, 'account number'),
+            ),
+            if (settlementMethod == 'bank') ...<Widget>[
+              const SizedBox(height: 14),
+              _field(
+                controller: bankNameController,
+                label: 'Bank name',
+                icon: Icons.account_balance_outlined,
+                validator: (String? value) =>
+                    _accountValidator(value, 'bank name'),
+              ),
+            ],
+          ],
+          const SizedBox(height: 14),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(
+              color: const Color(0xFF252525),
+              borderRadius: BorderRadius.circular(15),
+            ),
+            child: const Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                Icon(Icons.info_outline, color: yellow),
+                SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    'Payment preferences and settlement details will be saved in Firestore. '
+                    'Real JazzCash, Easypaisa, wallet and bank transfers remain bypassed until billing is enabled.',
+                    style: TextStyle(
+                      color: Colors.grey,
+                      fontSize: 11,
+                      height: 1.4,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _paymentSwitch({
+    required String title,
+    required String subtitle,
+    required IconData icon,
+    required bool value,
+    required ValueChanged<bool> onChanged,
+  }) {
+    return Container(
+      decoration: BoxDecoration(
+        color: const Color(0xFF252525),
+        borderRadius: BorderRadius.circular(15),
+      ),
+      child: SwitchListTile(
+        value: value,
+        onChanged: onChanged,
+        activeThumbColor: yellow,
+        secondary: Icon(icon, color: yellow),
+        title: Text(title, style: const TextStyle(fontWeight: FontWeight.bold)),
+        subtitle: Text(
+          subtitle,
+          style: const TextStyle(color: Colors.grey, fontSize: 11),
+        ),
+      ),
+    );
+  }
+
+  Widget _field({
+    required TextEditingController controller,
+    required String label,
+    required IconData icon,
+    required String? Function(String?) validator,
+    TextInputType keyboardType = TextInputType.text,
+  }) {
+    return TextFormField(
+      controller: controller,
+      keyboardType: keyboardType,
+      validator: validator,
+      autovalidateMode: AutovalidateMode.onUserInteraction,
+      decoration: InputDecoration(
+        labelText: label,
+        prefixIcon: Icon(icon, color: yellow),
+        filled: true,
+        fillColor: const Color(0xFF252525),
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(15),
+          borderSide: BorderSide.none,
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(15),
+          borderSide: const BorderSide(color: yellow),
+        ),
+      ),
+    );
+  }
+}

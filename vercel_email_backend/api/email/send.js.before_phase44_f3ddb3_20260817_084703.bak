@@ -1,0 +1,22 @@
+import { buildPhase44F3dcServerConfig } from '../../src/config/email_server_config.js';
+import { createEmailSendHandler } from '../../src/core/email_send_handler.js';
+import { DisabledFirebaseIdTokenVerifier } from '../../src/security/firebase_id_token_verifier.js';
+import { DisabledConsumedApprovalRechecker } from '../../src/security/consumed_approval_rechecker.js';
+import { DisabledVerifiedSenderIdentityVerifier } from '../../src/security/verified_sender_identity_verifier.js';
+import { DisabledEmailReplayGuard } from '../../src/security/email_replay_guard.js';
+import { DisabledBrevoTransactionalEmailTransport } from '../../src/providers/brevo_transactional_email_transport.js';
+
+const handler = createEmailSendHandler({
+  config: buildPhase44F3dcServerConfig(),
+  authVerifier: new DisabledFirebaseIdTokenVerifier(),
+  approvalRechecker: new DisabledConsumedApprovalRechecker(),
+  senderVerifier: new DisabledVerifiedSenderIdentityVerifier(),
+  replayGuard: new DisabledEmailReplayGuard(),
+  providerTransport: new DisabledBrevoTransactionalEmailTransport(),
+});
+
+export default {
+  async fetch(request) {
+    return handler(request);
+  },
+};

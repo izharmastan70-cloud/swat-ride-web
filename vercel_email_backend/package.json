@@ -1,0 +1,14 @@
+{
+  "name": "swat-ride-vercel-email-backend",
+  "private": true,
+  "version": "0.0.0-phase44-f3dc",
+  "type": "module",
+  "scripts": {
+    "test": "node --test",
+    "check": "node --check api/email/send.js && node --check src/core/email_send_handler.js"
+  },
+  "dependencies": {
+    "firebase-admin": "14.2.0",
+    "socket.io": "^4.8.1"
+  }
+}

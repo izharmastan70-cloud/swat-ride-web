@@ -1,0 +1,394 @@
+import 'package:flutter_test/flutter_test.dart';
+import 'package:swat_ride/ai_agent/services/agent_security_incident_role_inventory_migration_exact_pending_approval_reader.dart';
+import 'package:swat_ride/ai_agent/services/agent_security_incident_role_inventory_migration_expected_approval_request_factory.dart';
+
+void main() {
+  const String binding =
+      AgentSecurityIncidentRoleInventoryMigrationExpectedApprovalRequestFactory
+          .requestBindingSha256;
+
+  test('historical Issue 1 deterministic id remains unchanged', () {
+    expect(
+      AgentSecurityIncidentRoleInventoryMigrationExactPendingApprovalReader.deterministicApprovalIdForIssue(
+        binding,
+        issue: 1,
+      ),
+      'phase66-migration-1b2041d892cdafaaa312d04b8794ee2f',
+    );
+
+    expect(
+      AgentSecurityIncidentRoleInventoryMigrationExactPendingApprovalReader.deterministicApprovalIdForBinding(
+        binding,
+      ),
+      'phase66-migration-1b2041d892cdafaaa312d04b8794ee2f',
+    );
+  });
+
+  test('Issue 2 receives a new deterministic document id', () {
+    expect(
+      AgentSecurityIncidentRoleInventoryMigrationExactPendingApprovalReader.deterministicApprovalIdForIssue(
+        binding,
+        issue: 2,
+      ),
+      'phase66-migration-878525d903c07d82032319c46d0857ca',
+    );
+  });
+
+  test('Issue 2 cannot overwrite/reuse historical Issue 1 id', () {
+    final String issue1 =
+        AgentSecurityIncidentRoleInventoryMigrationExactPendingApprovalReader.deterministicApprovalIdForIssue(
+          binding,
+          issue: 1,
+        );
+
+    final String issue2 =
+        AgentSecurityIncidentRoleInventoryMigrationExactPendingApprovalReader.deterministicApprovalIdForIssue(
+          binding,
+          issue: 2,
+        );
+
+    expect(issue2, isNot(issue1));
+  });
+
+  test('reader current issue is exactly 10', () {
+    expect(
+      AgentSecurityIncidentRoleInventoryMigrationExactPendingApprovalReader
+          .currentApprovalIssue,
+      10,
+    );
+  });
+
+  test('invalid approval issue fails closed', () {
+    expect(
+      () =>
+          AgentSecurityIncidentRoleInventoryMigrationExactPendingApprovalReader.deterministicApprovalIdForIssue(
+            binding,
+            issue: 0,
+          ),
+      throwsFormatException,
+    );
+  });
+
+  test('invalid binding SHA fails closed', () {
+    expect(
+      () =>
+          AgentSecurityIncidentRoleInventoryMigrationExactPendingApprovalReader.deterministicApprovalIdForIssue(
+            'not-a-sha',
+            issue: 2,
+          ),
+      throwsFormatException,
+    );
+  });
+
+  test('Issue 3 receives the next deterministic document id', () {
+    expect(
+      AgentSecurityIncidentRoleInventoryMigrationExactPendingApprovalReader.deterministicApprovalIdForIssue(
+        binding,
+        issue: 3,
+      ),
+      'phase66-migration-cccd1ff7e012d637e06e743ecb248596',
+    );
+  });
+
+  test('Issue 3 cannot overwrite/reuse Issue 1 or Issue 2', () {
+    final String issue1 =
+        AgentSecurityIncidentRoleInventoryMigrationExactPendingApprovalReader.deterministicApprovalIdForIssue(
+          binding,
+          issue: 1,
+        );
+
+    final String issue2 =
+        AgentSecurityIncidentRoleInventoryMigrationExactPendingApprovalReader.deterministicApprovalIdForIssue(
+          binding,
+          issue: 2,
+        );
+
+    final String issue3 =
+        AgentSecurityIncidentRoleInventoryMigrationExactPendingApprovalReader.deterministicApprovalIdForIssue(
+          binding,
+          issue: 3,
+        );
+
+    expect(issue3, isNot(issue1));
+    expect(issue3, isNot(issue2));
+  });
+
+  test('Issue 4 receives the next deterministic document id', () {
+    expect(
+      AgentSecurityIncidentRoleInventoryMigrationExactPendingApprovalReader.deterministicApprovalIdForIssue(
+        binding,
+        issue: 4,
+      ),
+      'phase66-migration-1dac446cb22c7509e05438783870c4a4',
+    );
+  });
+
+  test('Issue 4 cannot overwrite/reuse Issue 1, Issue 2, or Issue 3', () {
+    final String issue1 =
+        AgentSecurityIncidentRoleInventoryMigrationExactPendingApprovalReader.deterministicApprovalIdForIssue(
+          binding,
+          issue: 1,
+        );
+
+    final String issue2 =
+        AgentSecurityIncidentRoleInventoryMigrationExactPendingApprovalReader.deterministicApprovalIdForIssue(
+          binding,
+          issue: 2,
+        );
+
+    final String issue3 =
+        AgentSecurityIncidentRoleInventoryMigrationExactPendingApprovalReader.deterministicApprovalIdForIssue(
+          binding,
+          issue: 3,
+        );
+
+    final String issue4 =
+        AgentSecurityIncidentRoleInventoryMigrationExactPendingApprovalReader.deterministicApprovalIdForIssue(
+          binding,
+          issue: 4,
+        );
+
+    expect(issue4, isNot(issue1));
+    expect(issue4, isNot(issue2));
+    expect(issue4, isNot(issue3));
+  });
+
+  test('Issue 5 receives the next deterministic document id', () {
+    expect(
+      AgentSecurityIncidentRoleInventoryMigrationExactPendingApprovalReader.deterministicApprovalIdForIssue(
+        binding,
+        issue: 5,
+      ),
+      'phase66-migration-ad546f04e1a989a07aa72b09bae98911',
+    );
+  });
+
+  test('Issue 5 cannot overwrite/reuse Issue 1, Issue 2, Issue 3, or Issue 4', () {
+    final String issue1 =
+        AgentSecurityIncidentRoleInventoryMigrationExactPendingApprovalReader.deterministicApprovalIdForIssue(
+          binding,
+          issue: 1,
+        );
+
+    final String issue2 =
+        AgentSecurityIncidentRoleInventoryMigrationExactPendingApprovalReader.deterministicApprovalIdForIssue(
+          binding,
+          issue: 2,
+        );
+
+    final String issue3 =
+        AgentSecurityIncidentRoleInventoryMigrationExactPendingApprovalReader.deterministicApprovalIdForIssue(
+          binding,
+          issue: 3,
+        );
+
+    final String issue4 =
+        AgentSecurityIncidentRoleInventoryMigrationExactPendingApprovalReader.deterministicApprovalIdForIssue(
+          binding,
+          issue: 4,
+        );
+
+    final String issue5 =
+        AgentSecurityIncidentRoleInventoryMigrationExactPendingApprovalReader.deterministicApprovalIdForIssue(
+          binding,
+          issue: 5,
+        );
+
+    expect(issue5, isNot(issue1));
+    expect(issue5, isNot(issue2));
+    expect(issue5, isNot(issue3));
+    expect(issue5, isNot(issue4));
+  });
+
+  test('Issue 6 receives the next deterministic document id', () {
+    expect(
+      AgentSecurityIncidentRoleInventoryMigrationExactPendingApprovalReader.deterministicApprovalIdForIssue(
+        binding,
+        issue: 6,
+      ),
+      'phase66-migration-77a90fad8ebec5d2f06f649c63526e20',
+    );
+  });
+
+  test('Issue 6 cannot overwrite/reuse Issue 1 through Issue 5', () {
+    final String issue1 =
+        AgentSecurityIncidentRoleInventoryMigrationExactPendingApprovalReader.deterministicApprovalIdForIssue(
+          binding,
+          issue: 1,
+        );
+
+    final String issue2 =
+        AgentSecurityIncidentRoleInventoryMigrationExactPendingApprovalReader.deterministicApprovalIdForIssue(
+          binding,
+          issue: 2,
+        );
+
+    final String issue3 =
+        AgentSecurityIncidentRoleInventoryMigrationExactPendingApprovalReader.deterministicApprovalIdForIssue(
+          binding,
+          issue: 3,
+        );
+
+    final String issue4 =
+        AgentSecurityIncidentRoleInventoryMigrationExactPendingApprovalReader.deterministicApprovalIdForIssue(
+          binding,
+          issue: 4,
+        );
+
+    final String issue5 =
+        AgentSecurityIncidentRoleInventoryMigrationExactPendingApprovalReader.deterministicApprovalIdForIssue(
+          binding,
+          issue: 5,
+        );
+
+    final String issue6 =
+        AgentSecurityIncidentRoleInventoryMigrationExactPendingApprovalReader.deterministicApprovalIdForIssue(
+          binding,
+          issue: 6,
+        );
+
+    expect(issue6, isNot(issue1));
+    expect(issue6, isNot(issue2));
+    expect(issue6, isNot(issue3));
+    expect(issue6, isNot(issue4));
+    expect(issue6, isNot(issue5));
+  });
+
+  test('Issue 7 receives the next deterministic document id', () {
+    expect(
+      AgentSecurityIncidentRoleInventoryMigrationExactPendingApprovalReader.deterministicApprovalIdForIssue(
+        binding,
+        issue: 7,
+      ),
+      'phase66-migration-7678f3908f92f8d56bfdc512f6202c1a',
+    );
+  });
+
+  test('Issue 7 cannot overwrite/reuse Issue 1 through Issue 6', () {
+    final String issue1 =
+        AgentSecurityIncidentRoleInventoryMigrationExactPendingApprovalReader.deterministicApprovalIdForIssue(
+          binding,
+          issue: 1,
+        );
+
+    final String issue2 =
+        AgentSecurityIncidentRoleInventoryMigrationExactPendingApprovalReader.deterministicApprovalIdForIssue(
+          binding,
+          issue: 2,
+        );
+
+    final String issue3 =
+        AgentSecurityIncidentRoleInventoryMigrationExactPendingApprovalReader.deterministicApprovalIdForIssue(
+          binding,
+          issue: 3,
+        );
+
+    final String issue4 =
+        AgentSecurityIncidentRoleInventoryMigrationExactPendingApprovalReader.deterministicApprovalIdForIssue(
+          binding,
+          issue: 4,
+        );
+
+    final String issue5 =
+        AgentSecurityIncidentRoleInventoryMigrationExactPendingApprovalReader.deterministicApprovalIdForIssue(
+          binding,
+          issue: 5,
+        );
+
+    final String issue6 =
+        AgentSecurityIncidentRoleInventoryMigrationExactPendingApprovalReader.deterministicApprovalIdForIssue(
+          binding,
+          issue: 6,
+        );
+
+    final String issue7 =
+        AgentSecurityIncidentRoleInventoryMigrationExactPendingApprovalReader.deterministicApprovalIdForIssue(
+          binding,
+          issue: 7,
+        );
+
+    expect(issue7, isNot(issue1));
+    expect(issue7, isNot(issue2));
+    expect(issue7, isNot(issue3));
+    expect(issue7, isNot(issue4));
+    expect(issue7, isNot(issue5));
+    expect(issue7, isNot(issue6));
+  });
+
+  test('Issue 8 receives the next deterministic document id', () {
+    expect(
+      AgentSecurityIncidentRoleInventoryMigrationExactPendingApprovalReader.deterministicApprovalIdForIssue(
+        binding,
+        issue: 8,
+      ),
+      'phase66-migration-8baa34d12271bea5988d2ba0fdb3e2d3',
+    );
+  });
+
+  test('Issue 8 cannot overwrite/reuse Issue 1 through Issue 7', () {
+    final ids = <String>[
+      for (var issue = 1; issue <= 8; issue++)
+        AgentSecurityIncidentRoleInventoryMigrationExactPendingApprovalReader.deterministicApprovalIdForIssue(
+          binding,
+          issue: issue,
+        ),
+    ];
+
+    expect(ids.toSet().length, 8);
+    expect(ids[7], isNot(ids[0]));
+    expect(ids[7], isNot(ids[1]));
+    expect(ids[7], isNot(ids[2]));
+    expect(ids[7], isNot(ids[3]));
+    expect(ids[7], isNot(ids[4]));
+    expect(ids[7], isNot(ids[5]));
+    expect(ids[7], isNot(ids[6]));
+  });
+
+  test('Issue 9 receives the next deterministic document id', () {
+    expect(
+      AgentSecurityIncidentRoleInventoryMigrationExactPendingApprovalReader.deterministicApprovalIdForIssue(
+        binding,
+        issue: 9,
+      ),
+      'phase66-migration-859cda35c9591f00db5fec6bf5c36c7a',
+    );
+  });
+
+  test('Issue 9 cannot overwrite/reuse Issue 1 through Issue 8', () {
+    final ids = <String>[
+      for (var issue = 1; issue <= 9; issue++)
+        AgentSecurityIncidentRoleInventoryMigrationExactPendingApprovalReader.deterministicApprovalIdForIssue(
+          binding,
+          issue: issue,
+        ),
+    ];
+    expect(ids.toSet().length, 9);
+    for (var i = 0; i < 8; i++) {
+      expect(ids[8], isNot(ids[i]));
+    }
+  });
+
+  test('Issue 10 receives the next deterministic document id', () {
+    expect(
+      AgentSecurityIncidentRoleInventoryMigrationExactPendingApprovalReader.deterministicApprovalIdForIssue(
+        binding,
+        issue: 10,
+      ),
+      'phase66-migration-7c9862bb5560f365c0247e3370e2cc58',
+    );
+  });
+
+  test('Issue 10 cannot overwrite/reuse Issue 1 through Issue 9', () {
+    final ids = <String>[
+      for (var issue = 1; issue <= 10; issue++)
+        AgentSecurityIncidentRoleInventoryMigrationExactPendingApprovalReader.deterministicApprovalIdForIssue(
+          binding,
+          issue: issue,
+        ),
+    ];
+    expect(ids.toSet().length, 10);
+    for (var i = 0; i < 9; i++) {
+      expect(ids[9], isNot(ids[i]));
+    }
+  });
+}

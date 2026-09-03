@@ -1,0 +1,234 @@
+import 'dart:convert';
+
+import 'package:cloud_firestore/cloud_firestore.dart';
+
+import '../constants/agent_task_constants.dart';
+import '../models/agent_task.dart';
+import 'agent_task_queue.dart';
+
+// =========================================================
+// AI AGENT — FIRESTORE TASK REPOSITORY
+// =========================================================
+//
+// Stores queued tasks and uses a deterministic idempotency
+// document to prevent duplicate logical tasks.
+//
+// Worker lease operations will be handled separately.
+
+class AgentTaskRepository {
+  final FirebaseFirestore _firestore;
+
+  AgentTaskRepository({
+    FirebaseFirestore? firestore,
+  }) : _firestore = firestore ?? FirebaseFirestore.instance;
+
+  static const String _idempotencyCollectionPath =
+      'agent_task_idempotency';
+
+  CollectionReference<Map<String, dynamic>> get _tasks =>
+      _firestore.collection(AgentTaskCollection.tasks);
+
+  CollectionReference<Map<String, dynamic>> get _idempotency =>
+      _firestore.collection(_idempotencyCollectionPath);
+
+  Future<AgentTask> enqueue(AgentTask task) async {
+    task.validate();
+
+    if (task.status != AgentTaskStatus.queued) {
+      throw const AgentTaskQueueException(
+        code: 'invalid_initial_status',
+        message: 'A new task must start with queued status.',
+      );
+    }
+
+    final String idempotencyDocumentId =
+        _encodeIdempotencyKey(task.idempotencyKey);
+
+    final DocumentReference<Map<String, dynamic>> taskDocument =
+        _tasks.doc(task.taskId);
+
+    final DocumentReference<Map<String, dynamic>>
+        idempotencyDocument =
+        _idempotency.doc(idempotencyDocumentId);
+
+    return _firestore.runTransaction<AgentTask>(
+      (Transaction transaction) async {
+        final DocumentSnapshot<Map<String, dynamic>>
+            idempotencySnapshot =
+            await transaction.get(idempotencyDocument);
+
+        if (idempotencySnapshot.exists) {
+          final String existingTaskId =
+              _readRequiredString(
+            idempotencySnapshot.data()?['taskId'],
+            fieldName: 'taskId',
+          );
+
+          final DocumentSnapshot<Map<String, dynamic>>
+              existingTaskSnapshot =
+              await transaction.get(_tasks.doc(existingTaskId));
+
+          if (!existingTaskSnapshot.exists) {
+            throw const AgentTaskQueueException(
+              code: 'broken_idempotency_reference',
+              message:
+                  'Idempotency record points to a missing task.',
+            );
+          }
+
+          return AgentTask.fromMap(
+            existingTaskSnapshot.data()!,
+            documentId: existingTaskSnapshot.id,
+          );
+        }
+
+        final DocumentSnapshot<Map<String, dynamic>>
+            taskSnapshot =
+            await transaction.get(taskDocument);
+
+        if (taskSnapshot.exists) {
+          final AgentTask existingTask = AgentTask.fromMap(
+            taskSnapshot.data()!,
+            documentId: taskSnapshot.id,
+          );
+
+          if (existingTask.idempotencyKey !=
+              task.idempotencyKey) {
+            throw const AgentTaskQueueException(
+              code: 'task_id_conflict',
+              message:
+                  'Task ID already exists with another idempotency key.',
+            );
+          }
+
+          return existingTask;
+        }
+
+        transaction.set(taskDocument, task.toMap());
+
+        transaction.set(
+          idempotencyDocument,
+          <String, dynamic>{
+            'idempotencyKey': task.idempotencyKey,
+            'taskId': task.taskId,
+            'createdAt': Timestamp.fromDate(task.createdAt),
+          },
+        );
+
+        return task;
+      },
+    );
+  }
+
+  Future<AgentTask?> getTask(String taskId) async {
+    final String normalizedTaskId = taskId.trim();
+
+    if (normalizedTaskId.isEmpty) {
+      throw const AgentTaskQueueException(
+        code: 'invalid_task_id',
+        message: 'taskId is required.',
+      );
+    }
+
+    final DocumentSnapshot<Map<String, dynamic>> snapshot =
+        await _tasks.doc(normalizedTaskId).get();
+
+    if (!snapshot.exists) return null;
+
+    return AgentTask.fromMap(
+      snapshot.data()!,
+      documentId: snapshot.id,
+    );
+  }
+
+  Stream<AgentTask?> watchTask(String taskId) {
+    final String normalizedTaskId = taskId.trim();
+
+    if (normalizedTaskId.isEmpty) {
+      throw const AgentTaskQueueException(
+        code: 'invalid_task_id',
+        message: 'taskId is required.',
+      );
+    }
+
+    return _tasks.doc(normalizedTaskId).snapshots().map(
+      (DocumentSnapshot<Map<String, dynamic>> snapshot) {
+        if (!snapshot.exists) return null;
+
+        return AgentTask.fromMap(
+          snapshot.data()!,
+          documentId: snapshot.id,
+        );
+      },
+    );
+  }
+
+  Stream<List<AgentTask>> watchQueuedTasks({
+    int limit = 50,
+  }) {
+    if (limit < 1 || limit > 100) {
+      throw const AgentTaskQueueException(
+        code: 'invalid_limit',
+        message: 'Queue limit must be between 1 and 100.',
+      );
+    }
+
+    return _tasks
+        .where('status', isEqualTo: AgentTaskStatus.queued)
+        .orderBy('priorityRank', descending: true)
+        .orderBy('availableAt')
+        .limit(limit)
+        .snapshots()
+        .map(
+          (QuerySnapshot<Map<String, dynamic>> snapshot) =>
+              snapshot.docs
+                  .map(
+                    (QueryDocumentSnapshot<Map<String, dynamic>>
+                        document) =>
+                        AgentTask.fromMap(
+                      document.data(),
+                      documentId: document.id,
+                    ),
+                  )
+                  .toList(growable: false),
+        );
+  }
+
+  static String _encodeIdempotencyKey(String key) {
+    final String normalized = key.trim();
+
+    if (normalized.isEmpty) {
+      throw const AgentTaskQueueException(
+        code: 'invalid_idempotency_key',
+        message: 'idempotencyKey is required.',
+      );
+    }
+
+    final List<int> bytes = utf8.encode(normalized);
+
+    if (bytes.length > 900) {
+      throw const AgentTaskQueueException(
+        code: 'idempotency_key_too_long',
+        message:
+            'idempotencyKey must not exceed 900 UTF-8 bytes.',
+      );
+    }
+
+    return base64Url.encode(bytes).replaceAll('=', '');
+  }
+
+  static String _readRequiredString(
+    dynamic value, {
+    required String fieldName,
+  }) {
+    if (value is String && value.trim().isNotEmpty) {
+      return value.trim();
+    }
+
+    throw AgentTaskQueueException(
+      code: 'invalid_idempotency_record',
+      message:
+          'Idempotency record is missing $fieldName.',
+    );
+  }
+}

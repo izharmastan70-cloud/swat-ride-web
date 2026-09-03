@@ -1,0 +1,133 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
+
+import '../constants/agent_task_constants.dart';
+import '../models/agent_task.dart';
+import 'agent_task_queue.dart';
+
+// =========================================================
+// AI AGENT — EXPIRED LEASE RECOVERY
+// =========================================================
+//
+// Finds expired worker leases and safely moves tasks to:
+// - failed: retry remains available
+// - dead_letter: retry limit reached
+
+class AgentTaskRecoveryService {
+  final FirebaseFirestore _firestore;
+
+  AgentTaskRecoveryService({
+    FirebaseFirestore? firestore,
+  }) : _firestore = firestore ?? FirebaseFirestore.instance;
+
+  CollectionReference<Map<String, dynamic>> get _tasks =>
+      _firestore.collection(AgentTaskCollection.tasks);
+
+  Future<int> recoverExpiredLeases({
+    int limit = 50,
+  }) async {
+    if (limit < 1 || limit > 100) {
+      throw const AgentTaskQueueException(
+        code: 'invalid_limit',
+        message: 'Recovery limit must be between 1 and 100.',
+      );
+    }
+
+    final DateTime scanTime = DateTime.now().toUtc();
+
+    final QuerySnapshot<Map<String, dynamic>> snapshot =
+        await _tasks
+            .where(
+              'leaseExpiresAt',
+              isLessThanOrEqualTo: Timestamp.fromDate(scanTime),
+            )
+            .orderBy('leaseExpiresAt')
+            .limit(limit)
+            .get();
+
+    int recoveredCount = 0;
+
+    for (final QueryDocumentSnapshot<Map<String, dynamic>>
+        documentSnapshot in snapshot.docs) {
+      final bool recovered = await _recoverOne(
+        taskId: documentSnapshot.id,
+        scanTime: scanTime,
+      );
+
+      if (recovered) {
+        recoveredCount++;
+      }
+    }
+
+    return recoveredCount;
+  }
+
+  Future<bool> _recoverOne({
+    required String taskId,
+    required DateTime scanTime,
+  }) {
+    final DocumentReference<Map<String, dynamic>> document =
+        _tasks.doc(taskId);
+
+    return _firestore.runTransaction<bool>(
+      (Transaction transaction) async {
+        final DocumentSnapshot<Map<String, dynamic>> snapshot =
+            await transaction.get(document);
+
+        if (!snapshot.exists) return false;
+
+        final AgentTask task = AgentTask.fromMap(
+          snapshot.data()!,
+          documentId: snapshot.id,
+        );
+
+        final bool recoverableStatus =
+            task.status == AgentTaskStatus.leased ||
+            task.status == AgentTaskStatus.processing;
+
+        if (!recoverableStatus) return false;
+
+        final DateTime? leaseExpiry =
+            task.leaseExpiresAt?.toUtc();
+
+        if (leaseExpiry == null ||
+            leaseExpiry.isAfter(scanTime)) {
+          return false;
+        }
+
+        final DateTime now = DateTime.now().toUtc();
+        final bool retryLimitReached =
+            task.attemptCount >= task.maxAttempts;
+
+        final String nextStatus = retryLimitReached
+            ? AgentTaskStatus.deadLetter
+            : AgentTaskStatus.failed;
+
+        final DateTime nextAvailableAt = retryLimitReached
+            ? now
+            : now.add(const Duration(seconds: 30));
+
+        transaction.update(
+          document,
+          <String, dynamic>{
+            'status': nextStatus,
+            'availableAt': Timestamp.fromDate(nextAvailableAt),
+            'updatedAt': Timestamp.fromDate(now),
+            'completedAt': retryLimitReached
+                ? Timestamp.fromDate(now)
+                : null,
+            'leaseOwnerId': null,
+            'leaseToken': null,
+            'leaseExpiresAt': null,
+            'lastErrorCode': retryLimitReached
+                ? AgentTaskFailureCode.retryLimitReached
+                : AgentTaskFailureCode.leaseExpired,
+            'lastErrorMessage':
+                'Worker lease expired before task completion.',
+          },
+        );
+
+        return true;
+      },
+    );
+  }
+}

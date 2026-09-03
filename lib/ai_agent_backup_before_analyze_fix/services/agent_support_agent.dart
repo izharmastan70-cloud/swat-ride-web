@@ -1,0 +1,145 @@
+import '../constants/agent_support_constants.dart';
+import '../models/agent_ai_request.dart';
+import '../models/agent_ai_response.dart';
+import '../models/agent_master_settings.dart';
+import '../models/agent_role.dart';
+import '../models/agent_support_assessment.dart';
+import '../models/agent_support_draft.dart';
+import '../models/agent_support_request.dart';
+import 'agent_free_ai_router.dart';
+import 'agent_read_only_sanitizer.dart';
+import 'agent_support_faq_service.dart';
+import 'agent_support_policy.dart';
+
+// =========================================================
+// AI AGENT — SUPPORT AGENT
+// =========================================================
+//
+// Phase 11 = DRAFT-ONLY foundation.
+//
+// Safe flow:
+// Support Policy -> escalation check -> business-data check ->
+// deterministic FAQ fallback -> optional Free/Local AI draft.
+//
+// This service NEVER sends a reply.
+// It NEVER performs refund/payment/suspension/safety decisions.
+
+class AgentSupportAgent {
+  final AgentSupportPolicy policy;
+  final AgentSupportFaqService faqService;
+  final AgentFreeAiRouter aiRouter;
+  final AgentReadOnlySanitizer sanitizer;
+
+  AgentSupportAgent({
+    AgentSupportPolicy? policy,
+    AgentSupportFaqService? faqService,
+    AgentFreeAiRouter? aiRouter,
+    AgentReadOnlySanitizer? sanitizer,
+  })  : policy = policy ?? const AgentSupportPolicy(),
+        faqService = faqService ?? const AgentSupportFaqService(),
+        aiRouter = aiRouter ?? AgentFreeAiRouter(),
+        sanitizer = sanitizer ?? const AgentReadOnlySanitizer();
+
+  Future<AgentSupportDraft> draft({
+    required AgentMasterSettings settings,
+    required AgentRole supportRole,
+    required AgentSupportRequest request,
+  }) async {
+    request.validate();
+
+    final AgentSupportAssessment assessment =
+        policy.assess(request);
+
+    if (assessment.escalation != AgentSupportEscalation.none) {
+      return AgentSupportDraft(
+        requestId: request.requestId,
+        status: AgentSupportDraftStatus.escalationRequired,
+        replyText:
+            'This issue needs human review. I will not make a financial, '
+            'legal, fraud or safety decision automatically.',
+        intent: assessment.intent,
+        priority: assessment.priority,
+        escalation: assessment.escalation,
+        canAutoSendLater: false,
+        note: assessment.reason,
+      );
+    }
+
+    if (assessment.requiresBusinessData) {
+      return AgentSupportDraft(
+        requestId: request.requestId,
+        status: AgentSupportDraftStatus.needsContext,
+        replyText:
+            'The relevant SWAT RIDE module must provide verified read-only '
+            'data before I answer this request.',
+        intent: assessment.intent,
+        priority: assessment.priority,
+        escalation: assessment.escalation,
+        canAutoSendLater: false,
+        note: assessment.reason,
+      );
+    }
+
+    final String fallback = faqService.answer(
+      request.userMessage,
+    );
+
+    if (!settings.freeAiOperational &&
+        !settings.localAiEnabled) {
+      return AgentSupportDraft(
+        requestId: request.requestId,
+        status: AgentSupportDraftStatus.ready,
+        replyText: fallback,
+        intent: assessment.intent,
+        priority: assessment.priority,
+        escalation: assessment.escalation,
+        canAutoSendLater: assessment.safeForAutomaticReply,
+        note:
+            'Deterministic FAQ fallback used because no Free/Local AI is operational.',
+      );
+    }
+
+    final AgentAiRequest aiRequest = AgentAiRequest(
+      requestId: 'support_${request.requestId}',
+      roleId: supportRole.roleId,
+      purpose: 'support_faq_draft',
+      prompt:
+          'Draft a concise SWAT RIDE support reply. Do not invent booking, '
+          'payment, driver, order or user facts. If facts are missing, say '
+          'that verification is required. User message: ${request.userMessage}',
+      context: sanitizer.sanitizeMap(
+        <String, dynamic>{
+          'module': request.module,
+          'referenceId': request.referenceId,
+          'fallbackAnswer': fallback,
+          ...request.context,
+        },
+      ),
+      createdAt: DateTime.now(),
+    );
+
+    final AgentAiResponse response = await aiRouter.route(
+      settings: settings,
+      role: supportRole,
+      request: aiRequest,
+    );
+
+    final String reply =
+        response.isSuccess && response.text.trim().isNotEmpty
+            ? response.text.trim()
+            : fallback;
+
+    return AgentSupportDraft(
+      requestId: request.requestId,
+      status: AgentSupportDraftStatus.ready,
+      replyText: reply,
+      intent: assessment.intent,
+      priority: assessment.priority,
+      escalation: assessment.escalation,
+      canAutoSendLater: assessment.safeForAutomaticReply,
+      note: response.isSuccess
+          ? 'Free/Local AI draft prepared under deterministic support policy.'
+          : 'Safe FAQ fallback used; AI provider unavailable.',
+    );
+  }
+}

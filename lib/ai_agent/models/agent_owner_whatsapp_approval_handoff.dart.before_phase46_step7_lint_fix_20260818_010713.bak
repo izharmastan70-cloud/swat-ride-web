@@ -1,0 +1,187 @@
+import '../constants/agent_action_ids.dart';
+
+/// Non-executing, privacy-minimized consequential request envelope.
+///
+/// This object never grants business/admin mutation authority. It only binds
+/// one Owner WhatsApp request to one exact central approval scope.
+class AgentOwnerWhatsAppApprovalHandoff {
+  AgentOwnerWhatsAppApprovalHandoff({
+    required String requestId,
+    required String targetActionId,
+    required String controlArea,
+    required String principalUid,
+    required String conversationId,
+    required String senderBindingId,
+    required String sessionId,
+    required Map<String, dynamic> safeActionScope,
+    required DateTime strongReauthVerifiedAt,
+  }) : requestId = requestId.trim(),
+       targetActionId = targetActionId.trim(),
+       controlArea = controlArea.trim(),
+       principalUid = principalUid.trim(),
+       conversationId = conversationId.trim(),
+       senderBindingId = senderBindingId.trim(),
+       sessionId = sessionId.trim(),
+       safeActionScope = Map<String, dynamic>.unmodifiable(
+         Map<String, dynamic>.from(safeActionScope),
+       ),
+       strongReauthVerifiedAt = strongReauthVerifiedAt;
+
+  final String requestId;
+
+  /// Descriptive target requested by the Owner/Super Admin.
+  ///
+  /// This is NOT executed by Phase 46 Step 7.
+  final String targetActionId;
+
+  final String controlArea;
+
+  /// Existing authenticated Owner/Super Admin principal reference.
+  final String principalUid;
+
+  /// Provider-neutral channel/session binding identifiers.
+  final String conversationId;
+  final String senderBindingId;
+  final String sessionId;
+
+  /// Must contain only the minimum non-secret action parameters needed to
+  /// bind the human approval to one exact request.
+  final Map<String, dynamic> safeActionScope;
+
+  final DateTime strongReauthVerifiedAt;
+
+  static const Set<String> forbiddenScopeKeyFragments = <String>{
+    'password',
+    'passcode',
+    'otp',
+    'token',
+    'secret',
+    'apikey',
+    'api_key',
+    'authorization',
+    'cookie',
+    'cvv',
+    'cvc',
+    'cardnumber',
+    'card_number',
+    'pin',
+    'privatekey',
+    'private_key',
+  };
+
+  void validate() {
+    if (requestId.isEmpty ||
+        targetActionId.isEmpty ||
+        controlArea.isEmpty ||
+        principalUid.isEmpty ||
+        conversationId.isEmpty ||
+        senderBindingId.isEmpty ||
+        sessionId.isEmpty) {
+      throw const AgentOwnerWhatsAppApprovalHandoffException(
+        'Owner WhatsApp approval handoff identifiers cannot be empty.',
+      );
+    }
+
+    if (safeActionScope.isEmpty) {
+      throw const AgentOwnerWhatsAppApprovalHandoffException(
+        'Owner WhatsApp approval scope cannot be empty.',
+      );
+    }
+
+    _validateMap(safeActionScope);
+  }
+
+  Map<String, dynamic> toApprovalActionScope() {
+    validate();
+
+    return <String, dynamic>{
+      'phase': 46,
+      'purpose': 'owner_whatsapp_consequential_request',
+      'ownerWhatsAppRequestActionId':
+          AgentActionId.requestOwnerWhatsAppConsequentialAction,
+      'requestId': requestId,
+      'targetActionId': targetActionId,
+      'controlArea': controlArea,
+      'principalUid': principalUid,
+      'conversationId': conversationId,
+      'senderBindingId': senderBindingId,
+      'sessionId': sessionId,
+      'strongReauthVerifiedAt': strongReauthVerifiedAt
+          .toUtc()
+          .toIso8601String(),
+      'safeActionScope': Map<String, dynamic>.from(safeActionScope),
+
+      // Explicit authority boundary:
+      'businessMutationAuthorized': false,
+      'adminMutationAuthorized': false,
+      'paymentAuthorized': false,
+      'whatsappSendAuthorized': false,
+      'providerAuthorized': false,
+      'deploymentAuthorized': false,
+    };
+  }
+
+  static void _validateMap(Map<String, dynamic> value) {
+    for (final MapEntry<String, dynamic> entry in value.entries) {
+      final String normalizedKey = entry.key.trim().toLowerCase();
+
+      if (normalizedKey.isEmpty) {
+        throw const AgentOwnerWhatsAppApprovalHandoffException(
+          'Owner WhatsApp approval scope cannot contain an empty key.',
+        );
+      }
+
+      for (final String fragment in forbiddenScopeKeyFragments) {
+        if (normalizedKey.contains(fragment)) {
+          throw AgentOwnerWhatsAppApprovalHandoffException(
+            'Secret/payment credential-like scope key is forbidden: ${entry.key}',
+          );
+        }
+      }
+
+      _validateValue(entry.value);
+    }
+  }
+
+  static void _validateValue(dynamic value) {
+    if (value == null || value is String || value is bool || value is num) {
+      return;
+    }
+
+    if (value is Map) {
+      final Map<String, dynamic> nested = <String, dynamic>{};
+
+      for (final dynamic key in value.keys) {
+        if (key is! String) {
+          throw const AgentOwnerWhatsAppApprovalHandoffException(
+            'Owner WhatsApp approval scope map keys must be strings.',
+          );
+        }
+        nested[key] = value[key];
+      }
+
+      _validateMap(nested);
+      return;
+    }
+
+    if (value is Iterable) {
+      for (final dynamic item in value) {
+        _validateValue(item);
+      }
+      return;
+    }
+
+    throw AgentOwnerWhatsAppApprovalHandoffException(
+      'Unsupported Owner WhatsApp approval scope value type: ${value.runtimeType}',
+    );
+  }
+}
+
+class AgentOwnerWhatsAppApprovalHandoffException implements Exception {
+  final String message;
+
+  const AgentOwnerWhatsAppApprovalHandoffException(this.message);
+
+  @override
+  String toString() => 'AgentOwnerWhatsAppApprovalHandoffException: $message';
+}

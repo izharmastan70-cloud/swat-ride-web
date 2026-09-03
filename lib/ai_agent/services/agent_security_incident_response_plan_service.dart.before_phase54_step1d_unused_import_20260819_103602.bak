@@ -1,0 +1,175 @@
+import '../constants/agent_guardian_security_constants.dart';
+import '../constants/agent_incident_response_constants.dart';
+import '../constants/agent_incident_response_human_constants.dart';
+import '../constants/agent_incident_response_plan_constants.dart';
+import '../models/agent_security_incident_authoritative_handoff.dart';
+import '../models/agent_security_incident_human_assignment.dart';
+import '../models/agent_security_incident_record.dart';
+import '../models/agent_security_incident_response_plan.dart';
+import '../models/agent_security_incident_triage_decision.dart';
+
+class AgentSecurityIncidentResponsePlanService {
+  const AgentSecurityIncidentResponsePlanService();
+
+  AgentSecurityIncidentResponsePlan buildPlan({
+    required String planId,
+    required AgentSecurityIncidentRecord incident,
+    required AgentSecurityIncidentTriageDecision triage,
+    required DateTime generatedAt,
+    AgentSecurityIncidentHumanAssignment? humanAssignment,
+  }) {
+    incident.validateStructure();
+    triage.validateStructure();
+    humanAssignment?.validateStructure();
+
+    if (incident.incidentId != triage.incidentId ||
+        incident.sourceReferenceId != triage.sourceReferenceId) {
+      throw const AgentSecurityIncidentResponsePlanServiceException(
+        'Incident response plan inputs are not bound to one incident.',
+      );
+    }
+
+    final bool high = triage.incidentSeverity == AgentGuardianSeverity.high;
+
+    final bool critical =
+        triage.incidentSeverity == AgentGuardianSeverity.critical;
+
+    final bool humanRequired = triage.humanReviewRequired || high || critical;
+
+    final bool humanVerified =
+        humanAssignment != null &&
+        humanAssignment.incidentId == incident.incidentId &&
+        humanAssignment.status ==
+            AgentSecurityIncidentAssignmentStatus.acknowledged &&
+        humanAssignment.acknowledgedAt != null;
+
+    final bool insufficientHumanReview = humanRequired && !humanVerified;
+
+    final bool failClosed =
+        triage.failClosedRecommended || critical || insufficientHumanReview;
+
+    final String status = insufficientHumanReview
+        ? AgentSecurityIncidentResponsePlanStatus.blockedInsufficientHumanReview
+        : failClosed
+        ? AgentSecurityIncidentResponsePlanStatus.failClosedReviewRequired
+        : AgentSecurityIncidentResponsePlanStatus.readyForAuthoritativeReview;
+
+    final List<String> recommendations = <String>[
+      AgentSecurityIncidentRecommendationType.preserveSafeEvidence,
+      AgentSecurityIncidentRecommendationType.requirePermissionRecheck,
+      AgentSecurityIncidentRecommendationType.requireRuntimeGateRecheck,
+      if (humanRequired)
+        AgentSecurityIncidentRecommendationType.requireHumanSecurityReview,
+      if (high || critical)
+        AgentSecurityIncidentRecommendationType.restrictSensitiveActionPath,
+      if (high || critical)
+        AgentSecurityIncidentRecommendationType
+            .requireFreshIdentityVerification,
+      if (triage.failClosedRecommended || critical)
+        AgentSecurityIncidentRecommendationType.requireApprovalRecheck,
+      if (critical)
+        AgentSecurityIncidentRecommendationType.requireEmergencySecurityReview,
+      AgentSecurityIncidentRecommendationType.monitorRecoveryBeforeClosure,
+    ];
+
+    final List<String> reasons = <String>[
+      AgentSecurityIncidentResponseReason.incidentTriageBound,
+      AgentSecurityIncidentResponseReason.authoritativeChecksRequired,
+      AgentSecurityIncidentResponseReason.recommendationOnly,
+      AgentSecurityIncidentResponseReason.noExecutionAuthority,
+      if (humanVerified)
+        AgentSecurityIncidentResponseReason.humanAcknowledgementVerified,
+      if (high) AgentSecurityIncidentResponseReason.highRiskReview,
+      if (critical) AgentSecurityIncidentResponseReason.criticalRiskReview,
+      if (failClosed) AgentSecurityIncidentResponseReason.failClosedReview,
+    ];
+
+    final AgentSecurityIncidentResponsePlan plan =
+        AgentSecurityIncidentResponsePlan(
+          status: status,
+          planId: planId,
+          incidentId: incident.incidentId,
+          severity: triage.incidentSeverity,
+          failClosedRecommended: failClosed,
+          humanReviewVerified: humanVerified,
+          authoritativeChecksStillRequired: true,
+          generatedAt: generatedAt,
+          recommendationTypes: recommendations,
+          reasonCodes: reasons,
+        );
+
+    plan.validateStructure();
+    return plan;
+  }
+
+  AgentSecurityIncidentAuthoritativeHandoff prepareHandoff({
+    required String handoffId,
+    required AgentSecurityIncidentResponsePlan plan,
+    required DateTime preparedAt,
+  }) {
+    plan.validateStructure();
+
+    final bool blocked = plan.blocked;
+    final bool high = plan.severity == AgentGuardianSeverity.high;
+    final bool critical = plan.severity == AgentGuardianSeverity.critical;
+
+    final bool permissionRequired = true;
+    final bool runtimeRequired = true;
+    final bool approvalRequired =
+        plan.failClosedRecommended || high || critical;
+
+    final bool humanRequired = high || critical || plan.failClosedRecommended;
+
+    final bool emergencyReviewRequired = critical;
+
+    final AgentSecurityIncidentAuthoritativeHandoff handoff =
+        AgentSecurityIncidentAuthoritativeHandoff(
+          status: blocked
+              ? AgentSecurityIncidentAuthoritativeHandoffStatus.blocked
+              : AgentSecurityIncidentAuthoritativeHandoffStatus.prepared,
+          handoffId: handoffId,
+          plan: plan,
+          permissionEngineRequired: permissionRequired,
+          approvalEngineRequired: approvalRequired,
+          runtimeGateRequired: runtimeRequired,
+          emergencySecurityReviewRequired: emergencyReviewRequired,
+          humanSecurityReviewRequired: humanRequired,
+          failClosedRecommended: plan.failClosedRecommended,
+          authoritativeChecksStillPending: true,
+          preparedAt: preparedAt,
+        );
+
+    handoff.validateStructure();
+    return handoff;
+  }
+
+  bool get recommendationAndHandoffOnly => true;
+  bool get executesContainment => false;
+  bool get executesRemediation => false;
+  bool get executesRecoveryAction => false;
+  bool get invokesPermissionEngine => false;
+  bool get invokesApprovalEngine => false;
+  bool get invokesRuntimeGate => false;
+  bool get invokesEmergencyStop => false;
+  bool get bypassesAuthoritativeControls => false;
+  bool get consumesApproval => false;
+  bool get grantsPermission => false;
+  bool get marksRuntimeAllowed => false;
+  bool get invokesProvider => false;
+  bool get invokesTargetAgent => false;
+  bool get writesBusinessData => false;
+  bool get persistsPlan => false;
+  bool get persistsHandoff => false;
+  bool get autoClosesIncident => false;
+  bool get implementsPhase63PrivacyUi => false;
+}
+
+class AgentSecurityIncidentResponsePlanServiceException implements Exception {
+  const AgentSecurityIncidentResponsePlanServiceException(this.message);
+
+  final String message;
+
+  @override
+  String toString() =>
+      'AgentSecurityIncidentResponsePlanServiceException: $message';
+}

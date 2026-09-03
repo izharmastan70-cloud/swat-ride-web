@@ -1,0 +1,1524 @@
+import 'dart:async';
+
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/material.dart';
+
+import '../data/vehicle_data.dart';
+import '../models/ride_model.dart';
+import '../services/ride_arrival_reminder_service.dart';
+import '../services/off_platform_ride_report_service.dart';
+import '../services/ride_rating_service.dart';
+
+import '../feedback/models/feedback_model.dart';
+import '../feedback/screens/complaint_screen.dart';
+import '../feedback/screens/submit_feedback_screen.dart';
+import '../help/widgets/contextual_video_guide_button.dart';
+import '../services/ride_service.dart';
+
+import '../safety/models/safety_models.dart';
+import '../safety/screens/safety_center_screen.dart';
+
+class RideSearchingScreen extends StatefulWidget {
+  const RideSearchingScreen({super.key, required this.rideId});
+
+  final String rideId;
+
+  @override
+  State<RideSearchingScreen> createState() => _RideSearchingScreenState();
+}
+
+class _RideSearchingScreenState extends State<RideSearchingScreen>
+    with SingleTickerProviderStateMixin {
+  final RideService _rideService = RideService();
+  final RideRatingService _legacyRatingService = RideRatingService();
+
+  final OffPlatformRideReportService _offPlatformReportService =
+      OffPlatformRideReportService();
+  final RideArrivalReminderService _arrivalReminderService =
+      RideArrivalReminderService();
+  late final AnimationController _pulseController;
+  Timer? _expiryTimer;
+  Timer? _arrivalReminderTimer;
+  String? _scheduledArrivalReminderRideId;
+  final Set<String> _shownArrivalReminderRideIds = <String>{};
+  bool _isCancelling = false;
+  bool _expiryChecked = false;
+  bool _ratingSubmitted = false;
+  bool _allowPop = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _pulseController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1200),
+      lowerBound: 0.82,
+      upperBound: 1,
+    )..repeat(reverse: true);
+
+    _expiryTimer = Timer.periodic(
+      const Duration(seconds: 5),
+      (_) => _checkExpiry(),
+    );
+  }
+
+  Future<void> _checkExpiry() async {
+    if (_expiryChecked || !mounted) return;
+    try {
+      final bool expired = await _rideService.expireRideIfNeeded(widget.rideId);
+      if (expired) _expiryChecked = true;
+    } catch (_) {
+      // Firestore stream will keep retrying. Do not close the rider screen.
+    }
+  }
+
+  @override
+  void dispose() {
+    _expiryTimer?.cancel();
+    _arrivalReminderTimer?.cancel();
+    _pulseController.dispose();
+    super.dispose();
+  }
+
+  void _syncArrivalReminder(RideModel? ride) {
+    if (ride == null ||
+        ride.status != RideModel.rideStarted ||
+        ride.rideStartedAt == null ||
+        ride.estimatedMinutes <= 0) {
+      _arrivalReminderTimer?.cancel();
+      _arrivalReminderTimer = null;
+      _scheduledArrivalReminderRideId = null;
+      return;
+    }
+
+    if (_shownArrivalReminderRideIds.contains(ride.rideId) ||
+        _scheduledArrivalReminderRideId == ride.rideId) {
+      return;
+    }
+
+    _arrivalReminderTimer?.cancel();
+    _scheduledArrivalReminderRideId = ride.rideId;
+    final DateTime estimatedArrival = ride.rideStartedAt!.add(
+      Duration(minutes: ride.estimatedMinutes),
+    );
+    final DateTime reminderTime = estimatedArrival.subtract(
+      RideArrivalReminderService.reminderLeadTime,
+    );
+    final Duration delay = reminderTime.difference(DateTime.now());
+    _arrivalReminderTimer = Timer(
+      delay.isNegative ? Duration.zero : delay,
+      () => _showArrivalReminder(ride.rideId),
+    );
+  }
+
+  Future<void> _showArrivalReminder(String rideId) async {
+    if (!mounted || _shownArrivalReminderRideIds.contains(rideId)) return;
+    _shownArrivalReminderRideIds.add(rideId);
+    _scheduledArrivalReminderRideId = null;
+
+    try {
+      final bool claimed = await _arrivalReminderService.claimReminder(rideId);
+      if (!claimed || !mounted) return;
+      await showDialog<void>(
+        context: context,
+        barrierDismissible: false,
+        builder: (BuildContext dialogContext) => AlertDialog(
+          icon: const Icon(
+            Icons.location_on_rounded,
+            color: Color(0xFF087F5B),
+            size: 42,
+          ),
+          title: const Text(RideArrivalReminderService.title),
+          content: const Text(RideArrivalReminderService.message),
+          actions: <Widget>[
+            FilledButton.icon(
+              onPressed: () => Navigator.pop(dialogContext),
+              icon: const Icon(Icons.check_circle_outline_rounded),
+              label: const Text('I have checked'),
+            ),
+          ],
+        ),
+      );
+    } catch (_) {
+      // Production background FCM is enabled after backend setup.
+    }
+  }
+
+  Future<bool> _handleBack(RideModel? ride) async {
+    if (ride == null || ride.isFinished) return true;
+
+    final bool? leave = await showDialog<bool>(
+      context: context,
+      builder: (BuildContext dialogContext) => AlertDialog(
+        title: const Text('Ride is still active'),
+        content: const Text(
+          'Your ride will continue in the background. You can return to it '
+          'from My Rides.',
+        ),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Stay'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Leave screen'),
+          ),
+        ],
+      ),
+    );
+    return leave ?? false;
+  }
+
+  Future<String?> _showOffPlatformCancellationWarning() async {
+    final TextEditingController noteController = TextEditingController();
+    final bool? confirmed = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (BuildContext dialogContext) => AlertDialog(
+        icon: const Icon(Icons.shield_outlined, color: Colors.orange, size: 44),
+        title: const Text('Keep your ride protected'),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              const Text(
+                'Do not continue this trip outside SWAT RIDE. After '
+                'cancelling, live tracking, SOS, fare protection and '
+                'support may not be available.',
+              ),
+              const SizedBox(height: 12),
+              const Text(
+                'If the Driver asked you to cancel, report it here. You '
+                'will not be charged a Rider cancellation fee.',
+                style: TextStyle(fontWeight: FontWeight.w700),
+              ),
+              const SizedBox(height: 16),
+              TextField(
+                controller: noteController,
+                minLines: 2,
+                maxLines: 4,
+                maxLength: 300,
+                decoration: const InputDecoration(
+                  labelText: 'Optional details',
+                  hintText: 'What did the Driver say?',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+            ],
+          ),
+        ),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Keep Ride Active'),
+          ),
+          FilledButton.icon(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            icon: const Icon(Icons.report_outlined),
+            label: const Text('Cancel & Report'),
+          ),
+        ],
+      ),
+    );
+
+    final String note = noteController.text.trim();
+    noteController.dispose();
+    return confirmed == true ? note : null;
+  }
+
+  Widget _offPlatformSafetyCard() {
+    return const _NoticeCard(
+      icon: Icons.verified_user_outlined,
+      text:
+          'Keep this ride active in SWAT RIDE. If a Driver asks you to '
+          'cancel and travel outside the app, do not agree. Use Cancel ride '
+          'and select "Driver asked me to cancel" to report it.',
+      color: Color(0xFFDB7C00),
+    );
+  }
+
+  Future<void> _showCancellationSheet(RideModel ride) async {
+    if (_isCancelling || ride.status == RideModel.rideStarted) return;
+
+    final String? reason = await showModalBottomSheet<String>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (BuildContext sheetContext) {
+        const List<MapEntry<String, String>> reasons =
+            <MapEntry<String, String>>[
+              MapEntry<String, String>(
+                'driver_asked_to_cancel',
+                'Driver asked me to cancel',
+              ),
+              MapEntry<String, String>('plans_changed', 'My plans changed'),
+              MapEntry<String, String>(
+                'wrong_location',
+                'Wrong pickup or drop-off',
+              ),
+              MapEntry<String, String>('driver_too_far', 'Driver is too far'),
+              MapEntry<String, String>('wait_too_long', 'Waiting too long'),
+              MapEntry<String, String>('other', 'Other reason'),
+            ];
+
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                const Text(
+                  'Why are you cancelling?',
+                  style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800),
+                ),
+                const SizedBox(height: 10),
+                ...reasons.map(
+                  (MapEntry<String, String> item) => ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: const Icon(Icons.radio_button_unchecked),
+                    title: Text(item.value),
+                    onTap: () => Navigator.pop(sheetContext, item.key),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+
+    if (reason == null || !mounted) return;
+    if (reason == 'driver_asked_to_cancel') {
+      final String? offPlatformNote =
+          await _showOffPlatformCancellationWarning();
+      if (offPlatformNote == null || !mounted) return;
+
+      setState(() => _isCancelling = true);
+      try {
+        await _offPlatformReportService.reportDriverAskedToCancel(
+          rideId: ride.rideId,
+          riderNote: offPlatformNote,
+        );
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            backgroundColor: Color(0xFF087F5B),
+            content: Text(
+              'Ride cancelled safely. Your report was sent for Admin review '
+              'and no Rider cancellation fee was charged.',
+            ),
+          ),
+        );
+      } catch (error) {
+        if (mounted) {
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(SnackBar(content: Text(_friendlyError(error))));
+        }
+      } finally {
+        if (mounted) setState(() => _isCancelling = false);
+      }
+      return;
+    }
+    setState(() => _isCancelling = true);
+
+    try {
+      await _rideService.cancelRide(
+        ride.rideId,
+        reason: reason,
+        cancelledBy: 'rider',
+      );
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(_friendlyError(error))));
+      }
+    } finally {
+      if (mounted) setState(() => _isCancelling = false);
+    }
+  }
+
+  String _friendlyError(Object error) {
+    return error
+        .toString()
+        .replaceFirst('Exception: ', '')
+        .replaceFirst('FirebaseException: ', '');
+  }
+
+  void _openUniversalSafetyCenter(RideModel ride) {
+    final SafetyPersonSnapshot? driver = ride.hasDriver
+        ? SafetyPersonSnapshot(
+            userId: ride.driverId ?? '',
+            role: SafetyUserRole.normalDriver,
+            fullName: ride.driverName ?? '',
+            extraData: <String, dynamic>{
+              'vehicleType': ride.driverVehicleType ?? '',
+              'vehicleNumber': ride.driverVehicleNumber ?? '',
+            },
+          )
+        : null;
+
+    final SafetyVehicleSnapshot vehicle = SafetyVehicleSnapshot(
+      vehicleId: ride.vehicleId,
+      vehicleType: ride.driverVehicleType ?? ride.vehicleName,
+      vehicleNumber: ride.driverVehicleNumber ?? '',
+      vehicleModel: ride.vehicleName,
+    );
+
+    final SafetyLocation pickup = SafetyLocation(
+      latitude: ride.pickupLocation.latitude,
+      longitude: ride.pickupLocation.longitude,
+      address: ride.pickupLocation.address,
+      placeName: ride.pickupLocation.placeName,
+    );
+
+    final SafetyLocation destination = SafetyLocation(
+      latitude: ride.destinationLocation.latitude,
+      longitude: ride.destinationLocation.longitude,
+      address: ride.destinationLocation.address,
+      placeName: ride.destinationLocation.placeName,
+    );
+
+    SafetySourcePage sourcePage = SafetySourcePage.bookingDetails;
+
+    if (ride.status == RideModel.driverAssigned) {
+      sourcePage = SafetySourcePage.driverAssigned;
+    } else if (ride.status == RideModel.driverArriving ||
+        ride.status == RideModel.driverArrived) {
+      sourcePage = SafetySourcePage.driverArriving;
+    } else if (ride.status == RideModel.rideStarted) {
+      sourcePage = SafetySourcePage.activeRide;
+    }
+
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (BuildContext context) {
+          return SafetyCenterScreen(
+            contextData: SafetyContext(
+              serviceType: SafetyServiceType.normalRide,
+              referenceId: ride.rideId,
+              initiatedByUserId: ride.userId,
+              initiatedByRole: SafetyUserRole.customer,
+              sourcePage: sourcePage,
+              referenceStatus: ride.status,
+              primaryPerson: driver,
+              vehicle: vehicle,
+              pickupLocation: pickup,
+              destinationLocation: destination,
+              serviceTitle: 'SWAT RIDE',
+              serviceSubtitle: ride.hasDriver
+                  ? 'Ride with ${ride.driverName ?? 'your driver'}'
+                  : 'Ride request',
+              paymentMethod: ride.paymentMethod,
+              metadata: <String, dynamic>{
+                'distanceKm': ride.distanceKm,
+                'estimatedMinutes': ride.estimatedMinutes,
+                'estimatedFare': ride.estimatedFare,
+                'driverId': ride.driverId ?? '',
+                'vehicleId': ride.vehicleId,
+                'vehicleName': ride.vehicleName,
+
+                // This is the driver's latest location,
+                // NOT the customer's emergency GPS.
+                'driverLocation': ride.driverLocation?.toMap(),
+                'driverLocationAccuracy': ride.driverLocationAccuracy,
+                'driverSpeed': ride.driverSpeed,
+                'driverHeading': ride.driverHeading,
+              },
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return StreamBuilder<RideModel?>(
+      stream: _rideService.rideStream(widget.rideId),
+      builder: (BuildContext context, AsyncSnapshot<RideModel?> snapshot) {
+        final RideModel? ride = snapshot.data;
+
+        _syncArrivalReminder(ride);
+        return PopScope(
+          canPop: _allowPop || ride == null || ride.isFinished,
+          onPopInvokedWithResult: (bool didPop, Object? result) async {
+            if (didPop) return;
+
+            final bool shouldLeave = await _handleBack(ride);
+            if (!shouldLeave || !context.mounted) return;
+
+            setState(() => _allowPop = true);
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (context.mounted) {
+                Navigator.of(context).pop();
+              }
+            });
+          },
+          child: Scaffold(
+            backgroundColor: const Color(0xFFF5F6F8),
+            appBar: AppBar(
+              title: Text(_appBarTitle(ride)),
+              centerTitle: true,
+              backgroundColor: Colors.white,
+              surfaceTintColor: Colors.white,
+              actions: ride == null || ride.isFinished
+                  ? null
+                  : <Widget>[
+                      IconButton(
+                        tooltip: 'Safety & SOS',
+                        onPressed: () {
+                          _openUniversalSafetyCenter(ride);
+                        },
+                        icon: const Icon(Icons.shield_outlined),
+                      ),
+                    ],
+            ),
+            body: _buildBody(snapshot, ride),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildBody(AsyncSnapshot<RideModel?> snapshot, RideModel? ride) {
+    if (snapshot.connectionState == ConnectionState.waiting && ride == null) {
+      return const Center(child: CircularProgressIndicator());
+    }
+
+    if (snapshot.hasError) {
+      return _MessageState(
+        icon: Icons.cloud_off_rounded,
+        title: 'Connection problem',
+        message: 'Checking your ride again automatically.',
+        color: Colors.orange,
+      );
+    }
+
+    if (ride == null) {
+      return const _MessageState(
+        icon: Icons.search_off_rounded,
+        title: 'Ride not found',
+        message: 'This ride may have been removed or is not available.',
+        color: Colors.redAccent,
+      );
+    }
+
+    if (ride.status == RideModel.cancelled) {
+      return _closedRideView(ride, completed: false);
+    }
+
+    if (ride.status == RideModel.completed) {
+      return _closedRideView(ride, completed: true);
+    }
+
+    return SafeArea(
+      child: ListView(
+        padding: const EdgeInsets.all(16),
+        children: <Widget>[
+          _mapBypassCard(ride),
+          const SizedBox(height: 14),
+          if (ride.status == RideModel.searching)
+            _searchingCard(ride)
+          else
+            _driverCard(ride),
+
+          if (ride.status == RideModel.searching) ...<Widget>[
+            const SizedBox(height: 14),
+            ContextualVideoGuideButton(
+              module: 'ride',
+              feature: 'ride_searching',
+              intents: const <String>[
+                'driver_matching',
+                'find_driver',
+                'ride_searching',
+                'driver_assignment',
+                'cancel_search',
+              ],
+              label: 'Need Help? Watch Guide',
+            ),
+          ],
+
+          if (ride.hasDriver) ...<Widget>[
+            const SizedBox(height: 14),
+            _offPlatformSafetyCard(),
+          ],
+          if (_shouldShowRidePin(ride)) ...<Widget>[
+            const SizedBox(height: 14),
+            _rideStartPinCard(ride),
+          ],
+          const SizedBox(height: 14),
+          _routeCard(ride),
+          const SizedBox(height: 14),
+          _fareCard(ride),
+          const SizedBox(height: 18),
+          if (ride.status != RideModel.rideStarted)
+            OutlinedButton.icon(
+              onPressed: _isCancelling
+                  ? null
+                  : () => _showCancellationSheet(ride),
+              icon: _isCancelling
+                  ? const SizedBox.square(
+                      dimension: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.close_rounded),
+              label: Text(_isCancelling ? 'Cancelling...' : 'Cancel ride'),
+              style: OutlinedButton.styleFrom(
+                foregroundColor: Colors.redAccent,
+                minimumSize: const Size.fromHeight(52),
+                side: const BorderSide(color: Colors.redAccent),
+              ),
+            ),
+          if (ride.status == RideModel.rideStarted)
+            const _NoticeCard(
+              icon: Icons.route_rounded,
+              text: 'Ride is in progress. Cancellation is disabled.',
+              color: Color(0xFF0A8F5B),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _mapBypassCard(RideModel ride) {
+    final bool hasDriverLocation = ride.driverLocation != null;
+    return Container(
+      height: 210,
+      decoration: BoxDecoration(
+        color: const Color(0xFFE5F2ED),
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(color: const Color(0xFFC7E3D8)),
+      ),
+      child: Stack(
+        children: <Widget>[
+          Positioned.fill(
+            child: CustomPaint(painter: const _TestingMapPainter()),
+          ),
+          Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: <Widget>[
+                Icon(
+                  hasDriverLocation
+                      ? Icons.local_taxi_rounded
+                      : Icons.location_searching_rounded,
+                  size: 42,
+                  color: const Color(0xFF087F5B),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  hasDriverLocation
+                      ? 'Driver live location connected'
+                      : 'Route tracking ready',
+                  style: const TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  hasDriverLocation
+                      ? '${ride.driverLocation!.latitude.toStringAsFixed(5)}, '
+                            '${ride.driverLocation!.longitude.toStringAsFixed(5)}'
+                      : 'Google Map display paused until billing is enabled',
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(color: Color(0xFF53635D)),
+                ),
+              ],
+            ),
+          ),
+          const Positioned(left: 12, top: 12, child: _TestingBadge()),
+        ],
+      ),
+    );
+  }
+
+  Widget _searchingCard(RideModel ride) {
+    return _CardShell(
+      child: Row(
+        children: <Widget>[
+          ScaleTransition(
+            scale: _pulseController,
+            child: _vehicleAvatar(ride, radius: 33),
+          ),
+          const SizedBox(width: 16),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                const Text(
+                  'Finding your driver',
+                  style: TextStyle(fontSize: 19, fontWeight: FontWeight.w800),
+                ),
+                const SizedBox(height: 5),
+                Text(
+                  'Matching with nearby ${ride.vehicleName} drivers...',
+                  style: const TextStyle(color: Colors.black54),
+                ),
+                const SizedBox(height: 10),
+                const LinearProgressIndicator(
+                  minHeight: 5,
+                  borderRadius: BorderRadius.all(Radius.circular(5)),
+                  color: Color(0xFF087F5B),
+                  backgroundColor: Color(0xFFE1F7EE),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _driverCard(RideModel ride) {
+    return _CardShell(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Row(
+            children: <Widget>[
+              _vehicleAvatar(
+                ride,
+                radius: 31,
+                approvedImageUrl: ride.driverPrimaryImageUrl,
+              ),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: <Widget>[
+                    Text(
+                      ride.driverName ?? 'Your SWAT RIDE driver',
+                      style: const TextStyle(
+                        fontSize: 19,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      <String>[
+                        ride.driverVehicleType ?? ride.vehicleName,
+                        if ((ride.driverVehicleNumber ?? '').isNotEmpty)
+                          ride.driverVehicleNumber!,
+                      ].join(' ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢ '),
+                      style: const TextStyle(color: Colors.black54),
+                    ),
+                  ],
+                ),
+              ),
+              Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 11,
+                  vertical: 7,
+                ),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFFFF4D6),
+                  borderRadius: BorderRadius.circular(20),
+                ),
+                child: const Row(
+                  children: <Widget>[
+                    Icon(
+                      Icons.star_rounded,
+                      size: 17,
+                      color: Color(0xFFE8A000),
+                    ),
+                    SizedBox(width: 3),
+                    Text('New', style: TextStyle(fontWeight: FontWeight.w700)),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(13),
+            decoration: BoxDecoration(
+              color: _statusColor(ride.status).withValues(alpha: 0.1),
+              borderRadius: BorderRadius.circular(14),
+            ),
+            child: Row(
+              children: <Widget>[
+                Icon(
+                  _statusIcon(ride.status),
+                  color: _statusColor(ride.status),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    _statusText(ride.status),
+                    style: TextStyle(
+                      color: _statusColor(ride.status),
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 13),
+          Row(
+            children: <Widget>[
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: () => _comingSoon('Driver calling'),
+                  icon: const Icon(Icons.call_rounded),
+                  label: const Text('Call'),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: () => _comingSoon('Driver chat'),
+                  icon: const Icon(Icons.chat_bubble_outline_rounded),
+                  label: const Text('Chat'),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _vehicleAvatar(
+    RideModel ride, {
+    required double radius,
+    String? approvedImageUrl,
+  }) {
+    final String imagePath = VehicleData.rideVehicles
+        .where((vehicle) => vehicle.id == ride.vehicleId)
+        .map((vehicle) => vehicle.image)
+        .cast<String?>()
+        .firstWhere((image) => image != null, orElse: () => null) ??
+        'assets/images/swat_ride_logo.png';
+    final String? safeUrl = approvedImageUrl?.trim().isEmpty ?? true
+        ? null
+        : approvedImageUrl!.trim();
+
+    return CircleAvatar(
+      radius: radius,
+      backgroundColor: const Color(0xFFE1F7EE),
+      child: ClipOval(
+        child: safeUrl == null
+            ? Image.asset(
+                imagePath,
+                width: radius * 2,
+                height: radius * 2,
+                fit: BoxFit.cover,
+                errorBuilder: (_, _, _) => _vehicleIcon(radius),
+              )
+            : Image.network(
+                safeUrl,
+                width: radius * 2,
+                height: radius * 2,
+                fit: BoxFit.cover,
+                errorBuilder: (_, _, _) => Image.asset(
+                  imagePath,
+                  width: radius * 2,
+                  height: radius * 2,
+                  fit: BoxFit.cover,
+                  errorBuilder: (_, _, _) => _vehicleIcon(radius),
+                ),
+              ),
+      ),
+    );
+  }
+
+  Widget _vehicleIcon(double radius) => Icon(
+        Icons.local_taxi_rounded,
+        color: const Color(0xFF087F5B),
+        size: radius,
+      );
+
+  bool _shouldShowRidePin(RideModel ride) {
+    return ride.hasDriver &&
+        ride.hasRideStartPin &&
+        !ride.rideStartPinVerified &&
+        <String>{
+          RideModel.driverAssigned,
+          RideModel.driverArriving,
+          RideModel.driverArrived,
+        }.contains(ride.status);
+  }
+
+  Widget _rideStartPinCard(RideModel ride) {
+    final String pin = ride.rideStartPin!;
+
+    return Container(
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        gradient: const LinearGradient(
+          colors: <Color>[Color(0xFF0C8B63), Color(0xFF075A47)],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        borderRadius: BorderRadius.circular(20),
+        boxShadow: const <BoxShadow>[
+          BoxShadow(
+            color: Color(0x26075A47),
+            blurRadius: 16,
+            offset: Offset(0, 6),
+          ),
+        ],
+      ),
+      child: Column(
+        children: <Widget>[
+          const Row(
+            children: <Widget>[
+              Icon(Icons.lock_rounded, color: Colors.white),
+              SizedBox(width: 9),
+              Expanded(
+                child: Text(
+                  'Your Ride Start PIN',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 17,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+          SelectableText(
+            pin.split('').join('   '),
+            textAlign: TextAlign.center,
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 34,
+              fontWeight: FontWeight.w900,
+              letterSpacing: 2,
+            ),
+          ),
+          const SizedBox(height: 13),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(11),
+            decoration: BoxDecoration(
+              color: Colors.white.withValues(alpha: 0.13),
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: const Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                Icon(Icons.shield_outlined, color: Colors.white, size: 19),
+                SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    'Share this PIN only when your Driver has arrived. '
+                    'The ride cannot start without it.',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 12,
+                      height: 1.4,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _comingSoon(String feature) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('$feature will be connected in a later step.')),
+    );
+  }
+
+  Widget _routeCard(RideModel ride) {
+    return _CardShell(
+      child: Column(
+        children: <Widget>[
+          _LocationRow(
+            color: const Color(0xFF087F5B),
+            title: 'Pickup',
+            place: _placeText(
+              ride.pickupLocation.placeName,
+              ride.pickupLocation.address,
+            ),
+          ),
+          Container(
+            height: 24,
+            margin: const EdgeInsets.only(left: 7),
+            alignment: Alignment.centerLeft,
+            child: Container(width: 2, color: Colors.black12),
+          ),
+          _LocationRow(
+            color: Colors.redAccent,
+            title: 'Destination',
+            place: _placeText(
+              ride.destinationLocation.placeName,
+              ride.destinationLocation.address,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  String _placeText(String placeName, String address) {
+    if (placeName.trim().isNotEmpty) return placeName.trim();
+    if (address.trim().isNotEmpty) return address.trim();
+    return 'Location selected';
+  }
+
+  Widget _fareCard(RideModel ride) {
+    return _CardShell(
+      child: Column(
+        children: <Widget>[
+          _InfoRow(
+            icon: Icons.route_rounded,
+            label: 'Trip estimate',
+            value:
+                '${ride.distanceKm.toStringAsFixed(1)} km ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢ '
+                '${ride.estimatedMinutes} min',
+          ),
+          const Divider(height: 24),
+          _InfoRow(
+            icon: Icons.payments_outlined,
+            label: 'Payment',
+            value: _titleCase(ride.paymentMethod),
+          ),
+          const Divider(height: 24),
+          _InfoRow(
+            icon: Icons.receipt_long_rounded,
+            label: 'Estimated fare',
+            value: 'Rs ${ride.estimatedFare.toStringAsFixed(0)}',
+            valueColor: const Color(0xFF087F5B),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showMessage(String message) {
+    if (!mounted) {
+      return;
+    }
+
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(content: Text(message), behavior: SnackBarBehavior.floating),
+      );
+  }
+
+  Future<void> _openUniversalFeedback(RideModel ride) async {
+    if (_ratingSubmitted) {
+      return;
+    }
+
+    final user = FirebaseAuth.instance.currentUser;
+    final String reviewerId = user?.uid.trim() ?? '';
+    final String targetId = ride.driverId?.trim() ?? '';
+
+    if (reviewerId.isEmpty) {
+      _showMessage('Please sign in to rate your Driver.');
+      return;
+    }
+
+    if (targetId.isEmpty) {
+      _showMessage('Driver information is unavailable.');
+      return;
+    }
+
+    try {
+      final bool legacyRatingExists = await _legacyRatingService.hasRatedRide(
+        ride.rideId,
+      );
+
+      if (legacyRatingExists) {
+        if (!mounted) {
+          return;
+        }
+
+        setState(() {
+          _ratingSubmitted = true;
+        });
+
+        _showMessage('You already rated this ride.');
+        return;
+      }
+    } on Object {
+      // Universal feedback performs the final duplicate-review check.
+    }
+
+    if (!mounted) {
+      return;
+    }
+
+    final String? feedbackId = await Navigator.of(context).push<String>(
+      MaterialPageRoute<String>(
+        builder: (context) => SubmitFeedbackScreen(
+          serviceType: FeedbackServiceType.ride,
+          targetType: FeedbackTargetType.driver,
+          sourceId: ride.rideId,
+          sourceReference: 'Ride ${ride.rideId}',
+          reviewerId: reviewerId,
+          reviewerName: user?.displayName ?? '',
+          reviewerPhotoUrl: user?.photoURL ?? '',
+          targetId: targetId,
+          targetName: ride.driverName ?? 'SWAT RIDE Driver',
+          serviceCompleted: ride.status == RideModel.completed,
+        ),
+      ),
+    );
+
+    if (!mounted || feedbackId == null || feedbackId.trim().isEmpty) {
+      return;
+    }
+
+    setState(() {
+      _ratingSubmitted = true;
+    });
+  }
+
+  Future<void> _openRideComplaint(RideModel ride) async {
+    final user = FirebaseAuth.instance.currentUser;
+    final String reporterId = user?.uid.trim() ?? '';
+    final String targetId = ride.driverId?.trim() ?? '';
+
+    if (reporterId.isEmpty) {
+      _showMessage('Please sign in to create a complaint.');
+      return;
+    }
+
+    if (targetId.isEmpty) {
+      _showMessage('Driver information is unavailable.');
+      return;
+    }
+
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute<void>(
+        builder: (context) => ComplaintScreen(
+          serviceType: FeedbackServiceType.ride,
+          sourceId: ride.rideId,
+          sourceReference: 'Ride ${ride.rideId}',
+          reporterId: reporterId,
+          reporterName: user?.displayName ?? '',
+          targetType: FeedbackTargetType.driver,
+          targetId: targetId,
+          targetName: ride.driverName ?? 'SWAT RIDE Driver',
+        ),
+      ),
+    );
+  }
+
+  Widget _closedRideView(RideModel ride, {required bool completed}) {
+    final bool noDriver = ride.cancellationReason == 'no_driver_found';
+    return SafeArea(
+      child: Center(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: <Widget>[
+              Container(
+                width: 96,
+                height: 96,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: completed
+                      ? const Color(0xFFE1F7EE)
+                      : const Color(0xFFFFE7E7),
+                ),
+                child: Icon(
+                  completed
+                      ? Icons.check_rounded
+                      : noDriver
+                      ? Icons.search_off_rounded
+                      : Icons.close_rounded,
+                  size: 54,
+                  color: completed ? const Color(0xFF087F5B) : Colors.redAccent,
+                ),
+              ),
+              const SizedBox(height: 22),
+              Text(
+                completed
+                    ? 'Ride completed'
+                    : noDriver
+                    ? 'No driver found'
+                    : 'Ride cancelled',
+                textAlign: TextAlign.center,
+                style: const TextStyle(
+                  fontSize: 25,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+              const SizedBox(height: 9),
+              Text(
+                completed
+                    ? 'Thank you for riding with SWAT RIDE.'
+                    : noDriver
+                    ? 'No nearby driver accepted in time. Please try again.'
+                    : 'Your ride request has been cancelled.',
+                textAlign: TextAlign.center,
+                style: const TextStyle(fontSize: 15, color: Colors.black54),
+              ),
+              if (!completed &&
+                  !noDriver &&
+                  (ride.cancellationReason ?? '').isNotEmpty) ...<Widget>[
+                const SizedBox(height: 10),
+                Text(
+                  'Reason: ${_readableReason(ride.cancellationReason!)}',
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(fontWeight: FontWeight.w700),
+                ),
+              ],
+              const SizedBox(height: 28),
+              if (completed) ...<Widget>[
+                OutlinedButton.icon(
+                  onPressed: _ratingSubmitted
+                      ? null
+                      : () => _openUniversalFeedback(ride),
+                  icon: Icon(
+                    _ratingSubmitted
+                        ? Icons.check_circle_rounded
+                        : Icons.star_rounded,
+                  ),
+                  label: Text(
+                    _ratingSubmitted ? 'Driver rated' : 'Rate your Driver',
+                  ),
+                  style: OutlinedButton.styleFrom(
+                    minimumSize: const Size.fromHeight(52),
+                    foregroundColor: const Color(0xFFE8A000),
+                    side: const BorderSide(color: Color(0xFFE8A000)),
+                  ),
+                ),
+                const SizedBox(height: 11),
+                OutlinedButton.icon(
+                  onPressed: () => _openRideComplaint(ride),
+                  icon: const Icon(Icons.support_agent_rounded),
+                  label: const Text('Report a problem'),
+                  style: OutlinedButton.styleFrom(
+                    minimumSize: const Size.fromHeight(52),
+                    foregroundColor: const Color(0xFFD93025),
+                    side: const BorderSide(color: Color(0xFFD93025)),
+                  ),
+                ),
+                const SizedBox(height: 11),
+              ],
+              FilledButton(
+                onPressed: () => Navigator.of(context).pop(),
+                style: FilledButton.styleFrom(
+                  minimumSize: const Size.fromHeight(52),
+                  backgroundColor: const Color(0xFF087F5B),
+                ),
+                child: Text(completed ? 'Done' : 'Book another ride'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  String _appBarTitle(RideModel? ride) {
+    if (ride == null || ride.status == RideModel.searching) {
+      return 'Finding a driver';
+    }
+    if (ride.status == RideModel.completed) return 'Ride completed';
+    if (ride.status == RideModel.cancelled) return 'Ride closed';
+    return 'Your ride';
+  }
+
+  String _statusText(String status) {
+    switch (status) {
+      case RideModel.driverAssigned:
+        return 'Driver accepted your ride';
+      case RideModel.driverArriving:
+        return 'Driver is arriving at pickup';
+      case RideModel.driverArrived:
+        return 'Driver has arrived';
+      case RideModel.rideStarted:
+        return 'Your ride is in progress';
+      default:
+        return 'Ride status is updating';
+    }
+  }
+
+  IconData _statusIcon(String status) {
+    switch (status) {
+      case RideModel.driverArrived:
+        return Icons.pin_drop_rounded;
+      case RideModel.rideStarted:
+        return Icons.route_rounded;
+      default:
+        return Icons.local_taxi_rounded;
+    }
+  }
+
+  Color _statusColor(String status) {
+    return status == RideModel.driverArrived
+        ? const Color(0xFFDB7C00)
+        : const Color(0xFF087F5B);
+  }
+
+  String _readableReason(String reason) {
+    return reason.split('_').map(_titleCase).join(' ');
+  }
+
+  String _titleCase(String text) {
+    if (text.isEmpty) return text;
+    return '${text[0].toUpperCase()}${text.substring(1).toLowerCase()}';
+  }
+}
+
+class _CardShell extends StatelessWidget {
+  const _CardShell({required this.child});
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(17),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(20),
+        boxShadow: const <BoxShadow>[
+          BoxShadow(
+            color: Color(0x0D000000),
+            blurRadius: 16,
+            offset: Offset(0, 5),
+          ),
+        ],
+      ),
+      child: child,
+    );
+  }
+}
+
+class _LocationRow extends StatelessWidget {
+  const _LocationRow({
+    required this.color,
+    required this.title,
+    required this.place,
+  });
+
+  final Color color;
+  final String title;
+  final String place;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: <Widget>[
+        Container(
+          width: 16,
+          height: 16,
+          margin: const EdgeInsets.only(top: 3),
+          decoration: BoxDecoration(
+            color: color,
+            shape: BoxShape.circle,
+            border: Border.all(color: Colors.white, width: 3),
+            boxShadow: <BoxShadow>[
+              BoxShadow(color: color.withValues(alpha: 0.25), blurRadius: 5),
+            ],
+          ),
+        ),
+        const SizedBox(width: 13),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              Text(
+                title,
+                style: const TextStyle(fontSize: 12, color: Colors.black45),
+              ),
+              const SizedBox(height: 2),
+              Text(place, style: const TextStyle(fontWeight: FontWeight.w700)),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _InfoRow extends StatelessWidget {
+  const _InfoRow({
+    required this.icon,
+    required this.label,
+    required this.value,
+    this.valueColor,
+  });
+
+  final IconData icon;
+  final String label;
+  final String value;
+  final Color? valueColor;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: <Widget>[
+        Icon(icon, size: 21, color: Colors.black54),
+        const SizedBox(width: 10),
+        Expanded(
+          child: Text(label, style: const TextStyle(color: Colors.black54)),
+        ),
+        Text(
+          value,
+          style: TextStyle(
+            fontWeight: FontWeight.w800,
+            color: valueColor ?? Colors.black87,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _NoticeCard extends StatelessWidget {
+  const _NoticeCard({
+    required this.icon,
+    required this.text,
+    required this.color,
+  });
+
+  final IconData icon;
+  final String text;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(15),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.1),
+        borderRadius: BorderRadius.circular(14),
+      ),
+      child: Row(
+        children: <Widget>[
+          Icon(icon, color: color),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              text,
+              style: TextStyle(color: color, fontWeight: FontWeight.w700),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _MessageState extends StatelessWidget {
+  const _MessageState({
+    required this.icon,
+    required this.title,
+    required this.message,
+    required this.color,
+  });
+
+  final IconData icon;
+  final String title;
+  final String message;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(28),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            Icon(icon, size: 68, color: color),
+            const SizedBox(height: 16),
+            Text(
+              title,
+              textAlign: TextAlign.center,
+              style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w900),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              message,
+              textAlign: TextAlign.center,
+              style: const TextStyle(color: Colors.black54),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _TestingBadge extends StatelessWidget {
+  const _TestingBadge();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.94),
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: const Text(
+        'MAP TEST MODE',
+        style: TextStyle(
+          fontSize: 10,
+          fontWeight: FontWeight.w900,
+          color: Color(0xFF087F5B),
+        ),
+      ),
+    );
+  }
+}
+
+class _TestingMapPainter extends CustomPainter {
+  const _TestingMapPainter();
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final Paint road = Paint()
+      ..color = Colors.white.withValues(alpha: 0.68)
+      ..strokeWidth = 15
+      ..style = PaintingStyle.stroke;
+    final Paint smallRoad = Paint()
+      ..color = Colors.white.withValues(alpha: 0.45)
+      ..strokeWidth = 7
+      ..style = PaintingStyle.stroke;
+
+    final Path first = Path()
+      ..moveTo(-20, size.height * 0.72)
+      ..quadraticBezierTo(
+        size.width * 0.35,
+        size.height * 0.2,
+        size.width + 20,
+        size.height * 0.44,
+      );
+    final Path second = Path()
+      ..moveTo(size.width * 0.12, -10)
+      ..quadraticBezierTo(
+        size.width * 0.54,
+        size.height * 0.55,
+        size.width * 0.82,
+        size.height + 10,
+      );
+    final Path third = Path()
+      ..moveTo(-10, size.height * 0.25)
+      ..lineTo(size.width + 10, size.height * 0.82);
+
+    canvas.drawPath(first, road);
+    canvas.drawPath(second, smallRoad);
+    canvas.drawPath(third, smallRoad);
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+}

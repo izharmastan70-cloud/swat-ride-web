@@ -1,0 +1,1227 @@
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/material.dart';
+
+import '../models/feedback_model.dart';
+import '../models/feedback_reply_model.dart';
+import '../services/feedback_service.dart';
+
+class ReviewDetailsScreen extends StatefulWidget {
+  final String feedbackId;
+  final FeedbackService? feedbackService;
+
+  /// Replies must already be filtered according to the current user's access.
+  /// A customer should receive public replies and their own private support replies.
+  final List<FeedbackReplyModel> replies;
+
+  final VoidCallback? onReportReview;
+  final ValueChanged<FeedbackReplyModel>? onReportReply;
+  final VoidCallback? onCreateComplaint;
+
+  const ReviewDetailsScreen({
+    super.key,
+    required this.feedbackId,
+    this.feedbackService,
+    this.replies = const <FeedbackReplyModel>[],
+    this.onReportReview,
+    this.onReportReply,
+    this.onCreateComplaint,
+  });
+
+  @override
+  State<ReviewDetailsScreen> createState() => _ReviewDetailsScreenState();
+}
+
+class _ReviewDetailsScreenState extends State<ReviewDetailsScreen> {
+  late final FeedbackService _feedbackService;
+
+  @override
+  void initState() {
+    super.initState();
+    _feedbackService = widget.feedbackService ?? FeedbackService();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFFF4F5F6),
+      appBar: AppBar(
+        title: const Text(
+          'Review details',
+          style: TextStyle(fontWeight: FontWeight.w800),
+        ),
+        centerTitle: false,
+        backgroundColor: Colors.white,
+        foregroundColor: const Color(0xFF202124),
+        elevation: 0,
+        surfaceTintColor: Colors.white,
+      ),
+      body: StreamBuilder<FeedbackModel?>(
+        stream: _feedbackService.watchFeedbackById(widget.feedbackId),
+        builder: (context, snapshot) {
+          if (snapshot.connectionState == ConnectionState.waiting &&
+              !snapshot.hasData) {
+            return const Center(
+              child: CircularProgressIndicator(color: Color(0xFF111315)),
+            );
+          }
+
+          if (snapshot.hasError) {
+            return _MessageView(
+              icon: Icons.cloud_off_rounded,
+              title: 'Review could not be loaded',
+              message: 'Please check your connection and try again.',
+              onRetry: () {
+                setState(() {});
+              },
+            );
+          }
+
+          final review = snapshot.data;
+
+          if (review == null) {
+            return const _MessageView(
+              icon: Icons.rate_review_outlined,
+              title: 'Review not found',
+              message:
+                  'This review may have been removed or is no longer available.',
+            );
+          }
+
+          return _ReviewDetailsBody(
+            review: review,
+            replies: widget.replies,
+            feedbackService: _feedbackService,
+            currentUserId: FirebaseAuth.instance.currentUser?.uid.trim() ?? '',
+            onReportReview: widget.onReportReview,
+            onReportReply: widget.onReportReply,
+            onCreateComplaint: widget.onCreateComplaint,
+          );
+        },
+      ),
+    );
+  }
+}
+
+class _ReviewDetailsBody extends StatelessWidget {
+  final FeedbackModel review;
+  final List<FeedbackReplyModel> replies;
+  final FeedbackService feedbackService;
+  final String currentUserId;
+  final VoidCallback? onReportReview;
+  final ValueChanged<FeedbackReplyModel>? onReportReply;
+  final VoidCallback? onCreateComplaint;
+
+  const _ReviewDetailsBody({
+    required this.review,
+    required this.replies,
+    required this.feedbackService,
+    required this.currentUserId,
+    required this.onReportReview,
+    required this.onReportReply,
+    required this.onCreateComplaint,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final activeReplies =
+        replies.where((reply) => !reply.isDeleted).toList(growable: false)
+          ..sort((first, second) {
+            return first.createdAt.compareTo(second.createdAt);
+          });
+
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
+      children: <Widget>[
+        _ReviewHeaderCard(review: review),
+        const SizedBox(height: 12),
+        _ServiceInformationCard(review: review),
+        if (review.tags.isNotEmpty) ...<Widget>[
+          const SizedBox(height: 12),
+          _TagsCard(tags: review.tags),
+        ],
+        const SizedBox(height: 12),
+        _VisibilityAndStatusCard(review: review),
+        if (review.isPublic) ...<Widget>[
+          const SizedBox(height: 12),
+          _HelpfulReviewCard(
+            review: review,
+            feedbackService: feedbackService,
+            currentUserId: currentUserId,
+          ),
+        ],
+        if (activeReplies.isNotEmpty) ...<Widget>[
+          const SizedBox(height: 12),
+          _RepliesCard(replies: activeReplies, onReportReply: onReportReply),
+        ],
+        if (onReportReview != null || onCreateComplaint != null) ...<Widget>[
+          const SizedBox(height: 12),
+          _ReviewActionsCard(
+            rating: review.rating,
+            onReportReview: onReportReview,
+            onCreateComplaint: onCreateComplaint,
+          ),
+        ],
+      ],
+    );
+  }
+}
+
+class _ReviewHeaderCard extends StatelessWidget {
+  final FeedbackModel review;
+
+  const _ReviewHeaderCard({required this.review});
+
+  @override
+  Widget build(BuildContext context) {
+    final targetName = review.targetName.trim().isEmpty
+        ? review.targetType.displayName
+        : review.targetName.trim();
+
+    return Container(
+      padding: const EdgeInsets.all(18),
+      decoration: _cardDecoration(),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              _TargetAvatar(name: targetName, photoUrl: review.targetPhotoUrl),
+              const SizedBox(width: 13),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: <Widget>[
+                    Text(
+                      targetName,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: Color(0xFF202124),
+                        fontSize: 18,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      '${review.serviceType.displayName} Ã¢â‚¬Â¢ '
+                      '${review.targetType.displayName}',
+                      style: const TextStyle(
+                        color: Color(0xFF777C85),
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              if (review.isVerified)
+                const _SmallBadge(
+                  icon: Icons.verified_rounded,
+                  label: 'Verified',
+                  color: Color(0xFF188038),
+                ),
+            ],
+          ),
+          const SizedBox(height: 18),
+          _ReadOnlyStars(rating: review.rating),
+          const SizedBox(height: 8),
+          Text(
+            _ratingText(review.rating),
+            style: const TextStyle(
+              color: Color(0xFF202124),
+              fontSize: 16,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+          if (review.comment.trim().isNotEmpty) ...<Widget>[
+            const SizedBox(height: 14),
+            Text(
+              review.comment.trim(),
+              style: const TextStyle(
+                color: Color(0xFF3C4043),
+                fontSize: 15,
+                height: 1.5,
+              ),
+            ),
+          ],
+          const SizedBox(height: 14),
+          Text(
+            _formatDateTime(review.updatedAt ?? review.createdAt),
+            style: const TextStyle(
+              color: Color(0xFF8A8F98),
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          if (review.updatedAt != null)
+            const Padding(
+              padding: EdgeInsets.only(top: 3),
+              child: Text(
+                'Edited',
+                style: TextStyle(
+                  color: Color(0xFF8A8F98),
+                  fontSize: 11,
+                  fontStyle: FontStyle.italic,
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ServiceInformationCard extends StatelessWidget {
+  final FeedbackModel review;
+
+  const _ServiceInformationCard({required this.review});
+
+  @override
+  Widget build(BuildContext context) {
+    final reference = review.sourceReference.trim().isEmpty
+        ? review.sourceId.trim()
+        : review.sourceReference.trim();
+
+    return Container(
+      padding: const EdgeInsets.all(18),
+      decoration: _cardDecoration(),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          const _SectionTitle(
+            icon: Icons.receipt_long_outlined,
+            title: 'Service information',
+          ),
+          const SizedBox(height: 14),
+          _InformationRow(
+            label: 'Service',
+            value: review.serviceType.displayName,
+          ),
+          const SizedBox(height: 11),
+          _InformationRow(label: 'Rated', value: review.targetType.displayName),
+          if (reference.isNotEmpty) ...<Widget>[
+            const SizedBox(height: 11),
+            _InformationRow(label: 'Reference', value: reference),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _TagsCard extends StatelessWidget {
+  final List<String> tags;
+
+  const _TagsCard({required this.tags});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(18),
+      decoration: _cardDecoration(),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          const _SectionTitle(
+            icon: Icons.sell_outlined,
+            title: 'Selected tags',
+          ),
+          const SizedBox(height: 14),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: tags
+                .map((tag) {
+                  return Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 8,
+                    ),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFF0F1F2),
+                      borderRadius: BorderRadius.circular(99),
+                    ),
+                    child: Text(
+                      tag,
+                      style: const TextStyle(
+                        color: Color(0xFF555960),
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  );
+                })
+                .toList(growable: false),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _VisibilityAndStatusCard extends StatelessWidget {
+  final FeedbackModel review;
+
+  const _VisibilityAndStatusCard({required this.review});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(18),
+      decoration: _cardDecoration(),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          const _SectionTitle(
+            icon: Icons.admin_panel_settings_outlined,
+            title: 'Review status',
+          ),
+          const SizedBox(height: 14),
+          _StatusRow(
+            icon: _visibilityIcon(review.visibility),
+            label: 'Visibility',
+            value: _visibilityLabel(review.visibility),
+            color: const Color(0xFF1A73E8),
+          ),
+          const SizedBox(height: 12),
+          _StatusRow(
+            icon: _statusIcon(review.status),
+            label: 'Moderation',
+            value: _statusLabel(review.status),
+            color: _statusColor(review.status),
+          ),
+          if (review.isFlagged) ...<Widget>[
+            const SizedBox(height: 12),
+            const _StatusRow(
+              icon: Icons.flag_outlined,
+              label: 'Review check',
+              value: 'Under admin review',
+              color: Color(0xFFB06000),
+            ),
+          ],
+          if (review.moderationReason.trim().isNotEmpty) ...<Widget>[
+            const SizedBox(height: 14),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(13),
+              decoration: BoxDecoration(
+                color: const Color(0xFFFFF7E8),
+                borderRadius: BorderRadius.circular(14),
+              ),
+              child: Text(
+                review.moderationReason.trim(),
+                style: const TextStyle(
+                  color: Color(0xFF795500),
+                  fontSize: 13,
+                  height: 1.4,
+                ),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _HelpfulReviewCard extends StatefulWidget {
+  final FeedbackModel review;
+  final FeedbackService feedbackService;
+  final String currentUserId;
+
+  const _HelpfulReviewCard({
+    required this.review,
+    required this.feedbackService,
+    required this.currentUserId,
+  });
+
+  @override
+  State<_HelpfulReviewCard> createState() => _HelpfulReviewCardState();
+}
+
+class _HelpfulReviewCardState extends State<_HelpfulReviewCard> {
+  bool _busy = false;
+
+  Future<void> _toggleHelpful() async {
+    final String userId = widget.currentUserId.trim();
+
+    if (_busy ||
+        userId.isEmpty ||
+        widget.review.reviewerId.trim() == userId ||
+        !widget.review.isPublic) {
+      return;
+    }
+
+    setState(() {
+      _busy = true;
+    });
+
+    try {
+      final bool marked = await widget.feedbackService.toggleHelpful(
+        feedbackId: widget.review.id,
+        userId: userId,
+      );
+
+      if (!mounted) {
+        return;
+      }
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            marked ? 'Marked as helpful.' : 'Helpful mark removed.',
+          ),
+        ),
+      );
+    } on FeedbackOperationException catch (error) {
+      if (!mounted) {
+        return;
+      }
+
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(error.message)));
+    } catch (_) {
+      if (!mounted) {
+        return;
+      }
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Could not update Helpful right now.')),
+      );
+    } finally {
+      if (mounted) {
+        setState(() {
+          _busy = false;
+        });
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final String userId = widget.currentUserId.trim();
+
+    final bool isOwnReview =
+        userId.isNotEmpty && widget.review.reviewerId.trim() == userId;
+
+    final bool canVote =
+        userId.isNotEmpty && !isOwnReview && widget.review.isPublic;
+
+    final int helpfulCount = widget.review.helpfulCount;
+
+    final String countLabel = helpfulCount == 1
+        ? '1 person found this review helpful'
+        : '$helpfulCount people found this review helpful';
+
+    final Stream<bool> helpfulStream = canVote
+        ? widget.feedbackService.watchHelpfulState(
+            feedbackId: widget.review.id,
+            userId: userId,
+          )
+        : Stream<bool>.value(false);
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: const Color(0xFFE5E7EA)),
+      ),
+      child: StreamBuilder<bool>(
+        stream: helpfulStream,
+        initialData: false,
+        builder: (BuildContext context, AsyncSnapshot<bool> snapshot) {
+          final bool isMarked = snapshot.data ?? false;
+
+          return Row(
+            children: <Widget>[
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: <Widget>[
+                    const Row(
+                      children: <Widget>[
+                        Icon(
+                          Icons.thumb_up_alt_outlined,
+                          size: 20,
+                          color: Color(0xFF202124),
+                        ),
+                        SizedBox(width: 8),
+                        Text(
+                          'Helpful',
+                          style: TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.w800,
+                            color: Color(0xFF202124),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      countLabel,
+                      style: const TextStyle(
+                        fontSize: 13,
+                        height: 1.35,
+                        color: Color(0xFF6A6F75),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 12),
+              OutlinedButton.icon(
+                onPressed: canVote && !_busy ? _toggleHelpful : null,
+                icon: _busy
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : Icon(
+                        isMarked
+                            ? Icons.thumb_up_alt_rounded
+                            : Icons.thumb_up_alt_outlined,
+                        size: 18,
+                      ),
+                label: Text(isOwnReview ? 'Your review' : 'Helpful'),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: const Color(0xFF202124),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 14,
+                    vertical: 12,
+                  ),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+}
+
+class _RepliesCard extends StatelessWidget {
+  final List<FeedbackReplyModel> replies;
+  final ValueChanged<FeedbackReplyModel>? onReportReply;
+
+  const _RepliesCard({required this.replies, required this.onReportReply});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(18),
+      decoration: _cardDecoration(),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          _SectionTitle(
+            icon: Icons.forum_outlined,
+            title: replies.length == 1
+                ? 'Response'
+                : '${replies.length} responses',
+          ),
+          const SizedBox(height: 6),
+          ...replies.map((reply) {
+            return _ReplyItem(
+              reply: reply,
+              onReport: onReportReply == null
+                  ? null
+                  : () => onReportReply!(reply),
+            );
+          }),
+        ],
+      ),
+    );
+  }
+}
+
+class _ReplyItem extends StatelessWidget {
+  final FeedbackReplyModel reply;
+  final VoidCallback? onReport;
+
+  const _ReplyItem({required this.reply, required this.onReport});
+
+  @override
+  Widget build(BuildContext context) {
+    final author = reply.authorName.trim().isEmpty
+        ? _replyAuthorLabel(reply.authorType)
+        : reply.authorName.trim();
+
+    final isPrivate = reply.replyType == FeedbackReplyType.privateSupport;
+
+    return Padding(
+      padding: const EdgeInsets.only(top: 12),
+      child: Container(
+        padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(
+          color: isPrivate ? const Color(0xFFEFF6FF) : const Color(0xFFF6F7F8),
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(
+            color: isPrivate
+                ? const Color(0xFFD2E3FC)
+                : const Color(0xFFE6E8EB),
+          ),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Row(
+              children: <Widget>[
+                CircleAvatar(
+                  radius: 17,
+                  backgroundColor: isPrivate
+                      ? const Color(0xFF1A73E8)
+                      : const Color(0xFF111315),
+                  child: Icon(
+                    isPrivate
+                        ? Icons.support_agent_rounded
+                        : Icons.storefront_outlined,
+                    size: 18,
+                    color: Colors.white,
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: <Widget>[
+                      Text(
+                        author,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: Color(0xFF202124),
+                          fontSize: 14,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                      Text(
+                        isPrivate
+                            ? 'Private support response'
+                            : 'Public response',
+                        style: const TextStyle(
+                          color: Color(0xFF777C85),
+                          fontSize: 11,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                if (onReport != null)
+                  IconButton(
+                    onPressed: onReport,
+                    tooltip: 'Report response',
+                    icon: const Icon(Icons.flag_outlined, size: 19),
+                    color: const Color(0xFF777C85),
+                    visualDensity: VisualDensity.compact,
+                  ),
+              ],
+            ),
+            const SizedBox(height: 11),
+            Text(
+              reply.message,
+              style: const TextStyle(
+                color: Color(0xFF3C4043),
+                fontSize: 14,
+                height: 1.45,
+              ),
+            ),
+            const SizedBox(height: 9),
+            Text(
+              _formatDateTime(reply.updatedAt ?? reply.createdAt),
+              style: const TextStyle(color: Color(0xFF8A8F98), fontSize: 11),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _ReviewActionsCard extends StatelessWidget {
+  final int rating;
+  final VoidCallback? onReportReview;
+  final VoidCallback? onCreateComplaint;
+
+  const _ReviewActionsCard({
+    required this.rating,
+    required this.onReportReview,
+    required this.onCreateComplaint,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(18),
+      decoration: _cardDecoration(),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          const _SectionTitle(
+            icon: Icons.help_outline_rounded,
+            title: 'Need help?',
+          ),
+          if (rating <= 2 && onCreateComplaint != null) ...<Widget>[
+            const SizedBox(height: 10),
+            const Text(
+              'Your rating indicates a serious problem. You can open a '
+              'separate complaint ticket for admin support.',
+              style: TextStyle(
+                color: Color(0xFF777C85),
+                fontSize: 13,
+                height: 1.4,
+              ),
+            ),
+          ],
+          const SizedBox(height: 14),
+          if (onCreateComplaint != null)
+            SizedBox(
+              width: double.infinity,
+              child: FilledButton.icon(
+                onPressed: onCreateComplaint,
+                icon: const Icon(Icons.support_agent_rounded),
+                label: const Text('Open complaint'),
+                style: FilledButton.styleFrom(
+                  backgroundColor: const Color(0xFF111315),
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(vertical: 14),
+                ),
+              ),
+            ),
+          if (onCreateComplaint != null && onReportReview != null)
+            const SizedBox(height: 8),
+          if (onReportReview != null)
+            SizedBox(
+              width: double.infinity,
+              child: OutlinedButton.icon(
+                onPressed: onReportReview,
+                icon: const Icon(Icons.flag_outlined),
+                label: const Text('Report this review'),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: const Color(0xFFD93025),
+                  side: const BorderSide(color: Color(0xFFF1C7C4)),
+                  padding: const EdgeInsets.symmetric(vertical: 14),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ReadOnlyStars extends StatelessWidget {
+  final int rating;
+
+  const _ReadOnlyStars({required this.rating});
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: List<Widget>.generate(5, (index) {
+        final selected = index < rating;
+
+        return Padding(
+          padding: const EdgeInsets.only(right: 4),
+          child: Icon(
+            selected ? Icons.star_rounded : Icons.star_outline_rounded,
+            size: 28,
+            color: selected ? const Color(0xFFFFB300) : const Color(0xFFBDC1C6),
+          ),
+        );
+      }),
+    );
+  }
+}
+
+class _TargetAvatar extends StatelessWidget {
+  final String name;
+  final String photoUrl;
+
+  const _TargetAvatar({required this.name, required this.photoUrl});
+
+  @override
+  Widget build(BuildContext context) {
+    final initial = name.trim().isEmpty
+        ? '?'
+        : name.trim().substring(0, 1).toUpperCase();
+
+    return CircleAvatar(
+      radius: 27,
+      backgroundColor: const Color(0xFFE8EAED),
+      foregroundImage: photoUrl.trim().isEmpty
+          ? null
+          : NetworkImage(photoUrl.trim()),
+      onForegroundImageError: photoUrl.trim().isEmpty
+          ? null
+          : (exception, stackTrace) {},
+      child: Text(
+        initial,
+        style: const TextStyle(
+          color: Color(0xFF3C4043),
+          fontSize: 19,
+          fontWeight: FontWeight.w800,
+        ),
+      ),
+    );
+  }
+}
+
+class _SmallBadge extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final Color color;
+
+  const _SmallBadge({
+    required this.icon,
+    required this.label,
+    required this.color,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.10),
+        borderRadius: BorderRadius.circular(99),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: <Widget>[
+          Icon(icon, size: 14, color: color),
+          const SizedBox(width: 4),
+          Text(
+            label,
+            style: TextStyle(
+              color: color,
+              fontSize: 10,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _SectionTitle extends StatelessWidget {
+  final IconData icon;
+  final String title;
+
+  const _SectionTitle({required this.icon, required this.title});
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: <Widget>[
+        Icon(icon, size: 21, color: const Color(0xFF555960)),
+        const SizedBox(width: 9),
+        Expanded(
+          child: Text(
+            title,
+            style: const TextStyle(
+              color: Color(0xFF202124),
+              fontSize: 15,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _InformationRow extends StatelessWidget {
+  final String label;
+  final String value;
+
+  const _InformationRow({required this.label, required this.value});
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: <Widget>[
+        SizedBox(
+          width: 92,
+          child: Text(
+            label,
+            style: const TextStyle(
+              color: Color(0xFF8A8F98),
+              fontSize: 13,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ),
+        Expanded(
+          child: Text(
+            value,
+            textAlign: TextAlign.right,
+            style: const TextStyle(
+              color: Color(0xFF3C4043),
+              fontSize: 13,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _StatusRow extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final String value;
+  final Color color;
+
+  const _StatusRow({
+    required this.icon,
+    required this.label,
+    required this.value,
+    required this.color,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: <Widget>[
+        Container(
+          width: 35,
+          height: 35,
+          decoration: BoxDecoration(
+            color: color.withValues(alpha: 0.10),
+            borderRadius: BorderRadius.circular(11),
+          ),
+          child: Icon(icon, size: 19, color: color),
+        ),
+        const SizedBox(width: 11),
+        Expanded(
+          child: Text(
+            label,
+            style: const TextStyle(
+              color: Color(0xFF777C85),
+              fontSize: 13,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ),
+        Text(
+          value,
+          style: TextStyle(
+            color: color,
+            fontSize: 13,
+            fontWeight: FontWeight.w800,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _MessageView extends StatelessWidget {
+  final IconData icon;
+  final String title;
+  final String message;
+  final VoidCallback? onRetry;
+
+  const _MessageView({
+    required this.icon,
+    required this.title,
+    required this.message,
+    this.onRetry,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(28),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            Icon(icon, size: 58, color: const Color(0xFF9AA0A6)),
+            const SizedBox(height: 17),
+            Text(
+              title,
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                color: Color(0xFF202124),
+                fontSize: 20,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+            const SizedBox(height: 7),
+            Text(
+              message,
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                color: Color(0xFF777C85),
+                fontSize: 14,
+                height: 1.4,
+              ),
+            ),
+            if (onRetry != null) ...<Widget>[
+              const SizedBox(height: 17),
+              FilledButton(
+                onPressed: onRetry,
+                style: FilledButton.styleFrom(
+                  backgroundColor: const Color(0xFF111315),
+                ),
+                child: const Text('Try again'),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+BoxDecoration _cardDecoration() {
+  return BoxDecoration(
+    color: Colors.white,
+    borderRadius: BorderRadius.circular(22),
+    border: Border.all(color: const Color(0xFFE7E9EC)),
+    boxShadow: const <BoxShadow>[
+      BoxShadow(color: Color(0x0A000000), blurRadius: 14, offset: Offset(0, 5)),
+    ],
+  );
+}
+
+String _ratingText(int rating) {
+  switch (rating) {
+    case 5:
+      return 'Excellent';
+    case 4:
+      return 'Very good';
+    case 3:
+      return 'Good';
+    case 2:
+      return 'Needs improvement';
+    case 1:
+      return 'Poor experience';
+    default:
+      return 'Not rated';
+  }
+}
+
+String _visibilityLabel(FeedbackVisibility visibility) {
+  switch (visibility) {
+    case FeedbackVisibility.public:
+      return 'Public';
+    case FeedbackVisibility.private:
+      return 'Private';
+    case FeedbackVisibility.anonymous:
+      return 'Anonymous';
+  }
+}
+
+IconData _visibilityIcon(FeedbackVisibility visibility) {
+  switch (visibility) {
+    case FeedbackVisibility.public:
+      return Icons.public_rounded;
+    case FeedbackVisibility.private:
+      return Icons.lock_outline_rounded;
+    case FeedbackVisibility.anonymous:
+      return Icons.visibility_off_outlined;
+  }
+}
+
+String _statusLabel(FeedbackStatus status) {
+  switch (status) {
+    case FeedbackStatus.published:
+      return 'Published';
+    case FeedbackStatus.pendingModeration:
+      return 'In review';
+    case FeedbackStatus.hidden:
+      return 'Hidden';
+    case FeedbackStatus.removed:
+      return 'Removed';
+    case FeedbackStatus.flagged:
+      return 'Flagged';
+  }
+}
+
+IconData _statusIcon(FeedbackStatus status) {
+  switch (status) {
+    case FeedbackStatus.published:
+      return Icons.check_circle_outline_rounded;
+    case FeedbackStatus.pendingModeration:
+      return Icons.schedule_rounded;
+    case FeedbackStatus.hidden:
+      return Icons.visibility_off_outlined;
+    case FeedbackStatus.removed:
+      return Icons.delete_outline_rounded;
+    case FeedbackStatus.flagged:
+      return Icons.flag_outlined;
+  }
+}
+
+Color _statusColor(FeedbackStatus status) {
+  switch (status) {
+    case FeedbackStatus.published:
+      return const Color(0xFF188038);
+    case FeedbackStatus.pendingModeration:
+      return const Color(0xFFF29900);
+    case FeedbackStatus.hidden:
+      return const Color(0xFF5F6368);
+    case FeedbackStatus.removed:
+      return const Color(0xFFD93025);
+    case FeedbackStatus.flagged:
+      return const Color(0xFFB06000);
+  }
+}
+
+String _replyAuthorLabel(FeedbackReplyAuthorType authorType) {
+  switch (authorType) {
+    case FeedbackReplyAuthorType.driver:
+      return 'Driver';
+    case FeedbackReplyAuthorType.foodRider:
+      return 'Food Rider';
+    case FeedbackReplyAuthorType.restaurantOwner:
+      return 'Restaurant';
+    case FeedbackReplyAuthorType.hotelOwner:
+      return 'Hotel';
+    case FeedbackReplyAuthorType.tourGuide:
+      return 'Tour Guide';
+    case FeedbackReplyAuthorType.tourismDriver:
+      return 'Tourism Driver';
+    case FeedbackReplyAuthorType.cargoDriver:
+      return 'Cargo Driver';
+    case FeedbackReplyAuthorType.parcelRider:
+      return 'Parcel Rider';
+    case FeedbackReplyAuthorType.studentRideDriver:
+      return 'Student Ride Driver';
+    case FeedbackReplyAuthorType.admin:
+      return 'SWAT RIDE Admin';
+    case FeedbackReplyAuthorType.supportAgent:
+      return 'SWAT RIDE Support';
+    case FeedbackReplyAuthorType.system:
+      return 'SWAT RIDE';
+    case FeedbackReplyAuthorType.other:
+      return 'Service Partner';
+  }
+}
+
+String _formatDateTime(DateTime value) {
+  final local = value.toLocal();
+  final day = local.day.toString().padLeft(2, '0');
+  final month = local.month.toString().padLeft(2, '0');
+  final year = local.year.toString();
+  final hourValue = local.hour % 12 == 0 ? 12 : local.hour % 12;
+  final hour = hourValue.toString().padLeft(2, '0');
+  final minute = local.minute.toString().padLeft(2, '0');
+  final period = local.hour >= 12 ? 'PM' : 'AM';
+
+  return '$day/$month/$year Ã¢â‚¬Â¢ $hour:$minute $period';
+}

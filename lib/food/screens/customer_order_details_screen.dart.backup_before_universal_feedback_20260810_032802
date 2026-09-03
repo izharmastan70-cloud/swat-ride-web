@@ -1,0 +1,979 @@
+// lib/food/screens/customer_order_details_screen.dart
+// =============================================================
+// SWAT RIDE - FOOD DELIVERY
+// Customer Food Order Details Screen
+//
+// Connected with:
+// - FoodOrderModel
+// - FoodOrderService
+//
+// Features:
+// - Live Firestore order updates
+// - Complete order summary
+// - Price breakdown
+// - Delivery address
+// - Rider information
+// - Order timeline
+// - Active-order tracking button
+//
+// Paid map rendering and online payment execution remain bypassed.
+// =============================================================
+
+import 'package:flutter/material.dart';
+
+import '../models/food_order_model.dart';
+import '../services/food_order_service.dart';
+
+class CustomerOrderDetailsScreen extends StatefulWidget {
+  const CustomerOrderDetailsScreen({
+    required this.order,
+    super.key,
+  });
+
+  final FoodOrderModel order;
+
+  @override
+  State<CustomerOrderDetailsScreen> createState() =>
+      _CustomerOrderDetailsScreenState();
+}
+
+class _CustomerOrderDetailsScreenState
+    extends State<CustomerOrderDetailsScreen> {
+  static const Color yellow = Color(0xFFFFD60A);
+  static const Color background = Color(0xFF0D0D0D);
+  static const Color cardColor = Color(0xFF1A1A1A);
+
+  final FoodOrderService _orderService =
+      FoodOrderService();
+
+  void _openTracking(
+    FoodOrderModel order,
+  ) {
+    Navigator.pushNamed(
+      context,
+      '/food_live_order_tracking',
+      arguments: order,
+    );
+  }
+
+  bool _isActiveOrder(
+    FoodOrderStatus status,
+  ) {
+    return status == FoodOrderStatus.pending ||
+        status == FoodOrderStatus.accepted ||
+        status == FoodOrderStatus.preparing ||
+        status == FoodOrderStatus.readyForPickup ||
+        status == FoodOrderStatus.pickedUp ||
+        status == FoodOrderStatus.onTheWay;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: background,
+      appBar: AppBar(
+        backgroundColor: background,
+        title: const Text(
+          'Order Details',
+          style: TextStyle(
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+      ),
+      body: StreamBuilder<FoodOrderModel?>(
+        stream: _orderService.watchOrderById(
+          widget.order.orderId,
+        ),
+        initialData: widget.order,
+        builder: (
+          BuildContext context,
+          AsyncSnapshot<FoodOrderModel?> snapshot,
+        ) {
+          if (snapshot.connectionState ==
+                  ConnectionState.waiting &&
+              !snapshot.hasData) {
+            return const Center(
+              child: CircularProgressIndicator(
+                color: yellow,
+              ),
+            );
+          }
+
+          if (snapshot.hasError) {
+            return const Center(
+              child: Padding(
+                padding: EdgeInsets.all(30),
+                child: Text(
+                  'Unable to load order details. Check Firestore connection and rules.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    color: Colors.grey,
+                    height: 1.5,
+                  ),
+                ),
+              ),
+            );
+          }
+
+          final FoodOrderModel? order =
+              snapshot.data;
+
+          if (order == null) {
+            return const Center(
+              child: Text(
+                'Food order was not found.',
+                style: TextStyle(
+                  color: Colors.grey,
+                ),
+              ),
+            );
+          }
+
+          return ListView(
+            padding: const EdgeInsets.fromLTRB(
+              16,
+              16,
+              16,
+              30,
+            ),
+            children: <Widget>[
+              _buildStatusCard(order),
+              const SizedBox(height: 16),
+              _buildOrderInfoCard(order),
+              const SizedBox(height: 16),
+              _buildItemsCard(order),
+              const SizedBox(height: 16),
+              _buildPriceCard(order),
+              const SizedBox(height: 16),
+              _buildAddressCard(order),
+              const SizedBox(height: 16),
+              _buildRiderCard(order),
+              const SizedBox(height: 16),
+              _buildTimelineCard(order),
+              const SizedBox(height: 20),
+              if (_isActiveOrder(order.status))
+                SizedBox(
+                  width: double.infinity,
+                  height: 54,
+                  child: ElevatedButton.icon(
+                    onPressed: () =>
+                        _openTracking(order),
+                    icon: const Icon(
+                      Icons.route,
+                    ),
+                    label: const Text(
+                      'Track Order Live',
+                      style: TextStyle(
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: yellow,
+                      foregroundColor: Colors.black,
+                      shape: RoundedRectangleBorder(
+                        borderRadius:
+                            BorderRadius.circular(15),
+                      ),
+                    ),
+                  ),
+                ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _buildStatusCard(
+    FoodOrderModel order,
+  ) {
+    final Color color =
+        _statusColor(order.status);
+
+    return Container(
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        color: cardColor,
+        borderRadius: BorderRadius.circular(21),
+        border: Border.all(
+          color: color.withValues(alpha: 0.65),
+        ),
+      ),
+      child: Row(
+        children: <Widget>[
+          CircleAvatar(
+            radius: 29,
+            backgroundColor:
+                color.withValues(alpha: 0.15),
+            child: Icon(
+              _statusIcon(order.status),
+              color: color,
+              size: 31,
+            ),
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment:
+                  CrossAxisAlignment.start,
+              children: <Widget>[
+                const Text(
+                  'Current status',
+                  style: TextStyle(
+                    color: Colors.grey,
+                    fontSize: 12,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  _statusText(order.status),
+                  style: const TextStyle(
+                    fontSize: 20,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  _statusDescription(order.status),
+                  style: const TextStyle(
+                    color: Colors.grey,
+                    fontSize: 11,
+                    height: 1.35,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildOrderInfoCard(
+    FoodOrderModel order,
+  ) {
+    return _sectionCard(
+      title: 'Order Information',
+      icon: Icons.receipt_long_outlined,
+      children: <Widget>[
+        _InfoRow(
+          label: 'Order ID',
+          value: order.orderId,
+        ),
+        const Divider(color: Colors.white12),
+        _InfoRow(
+          label: 'Restaurant ID',
+          value: order.restaurantId,
+        ),
+        const Divider(color: Colors.white12),
+        _InfoRow(
+          label: 'Created',
+          value: _dateTimeText(
+            order.createdAt,
+          ),
+        ),
+        const Divider(color: Colors.white12),
+        _InfoRow(
+          label: 'Last updated',
+          value: _dateTimeText(
+            order.updatedAt,
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildItemsCard(
+    FoodOrderModel order,
+  ) {
+    return _sectionCard(
+      title: 'Ordered Items',
+      icon: Icons.fastfood_outlined,
+      children: <Widget>[
+        ...order.items.map(
+          (dynamic item) {
+            final String name =
+                _readString(item, 'name');
+
+            final int quantity =
+                _readInt(item, 'quantity');
+
+            final double total =
+                _readDouble(
+              item,
+              'totalPrice',
+              fallbackKey: 'total',
+            );
+
+            final String variantName =
+                _readString(
+              item,
+              'variantName',
+            );
+
+            final List<String> addOns =
+                _readStringList(
+              item,
+              'addOnNames',
+              fallbackKey: 'addons',
+            );
+
+            return Container(
+              margin:
+                  const EdgeInsets.only(bottom: 10),
+              padding: const EdgeInsets.all(13),
+              decoration: BoxDecoration(
+                color: const Color(0xFF252525),
+                borderRadius:
+                    BorderRadius.circular(14),
+              ),
+              child: Column(
+                crossAxisAlignment:
+                    CrossAxisAlignment.start,
+                children: <Widget>[
+                  Row(
+                    children: <Widget>[
+                      Expanded(
+                        child: Text(
+                          name.isEmpty
+                              ? 'Food item'
+                              : name,
+                          style: const TextStyle(
+                            fontWeight:
+                                FontWeight.bold,
+                          ),
+                        ),
+                      ),
+                      Text(
+                        'x$quantity',
+                        style: const TextStyle(
+                          color: yellow,
+                          fontWeight:
+                              FontWeight.bold,
+                        ),
+                      ),
+                    ],
+                  ),
+                  if (variantName.isNotEmpty) ...<Widget>[
+                    const SizedBox(height: 5),
+                    Text(
+                      'Variant: $variantName',
+                      style: const TextStyle(
+                        color: Colors.grey,
+                        fontSize: 11,
+                      ),
+                    ),
+                  ],
+                  if (addOns.isNotEmpty) ...<Widget>[
+                    const SizedBox(height: 5),
+                    Text(
+                      'Extras: ${addOns.join(', ')}',
+                      style: const TextStyle(
+                        color: Colors.grey,
+                        fontSize: 11,
+                      ),
+                    ),
+                  ],
+                  const SizedBox(height: 7),
+                  Text(
+                    'Rs. ${total.toStringAsFixed(0)}',
+                    style: const TextStyle(
+                      color: yellow,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ],
+              ),
+            );
+          },
+        ),
+      ],
+    );
+  }
+
+  Widget _buildPriceCard(
+    FoodOrderModel order,
+  ) {
+    return _sectionCard(
+      title: 'Payment Summary',
+      icon: Icons.payments_outlined,
+      children: <Widget>[
+        _InfoRow(
+          label: 'Items total',
+          value:
+              'Rs. ${order.itemsTotal.toStringAsFixed(0)}',
+        ),
+        const Divider(color: Colors.white12),
+        _InfoRow(
+          label: 'Delivery fee',
+          value:
+              'Rs. ${order.deliveryFee.toStringAsFixed(0)}',
+        ),
+        const Divider(color: Colors.white12),
+        _InfoRow(
+          label: 'Service fee',
+          value:
+              'Rs. ${order.serviceFee.toStringAsFixed(0)}',
+        ),
+        const Divider(color: Colors.white12),
+        _InfoRow(
+          label: 'Discount',
+          value:
+              '- Rs. ${order.discount.toStringAsFixed(0)}',
+        ),
+        const Divider(color: Colors.white12),
+        _InfoRow(
+          label: 'Grand total',
+          value:
+              'Rs. ${order.grandTotal.toStringAsFixed(0)}',
+          highlight: true,
+        ),
+        const Divider(color: Colors.white12),
+        _InfoRow(
+          label: 'Payment method',
+          value: order.paymentMethod.name,
+        ),
+      ],
+    );
+  }
+
+  Widget _buildAddressCard(
+    FoodOrderModel order,
+  ) {
+    return _sectionCard(
+      title: 'Delivery Address',
+      icon: Icons.location_on_outlined,
+      children: <Widget>[
+        Text(
+          order.deliveryAddress.fullAddress,
+          style: const TextStyle(
+            height: 1.45,
+          ),
+        ),
+        const SizedBox(height: 12),
+        const Text(
+          'Paid map rendering is temporarily bypassed. The saved delivery address remains part of the real order.',
+          style: TextStyle(
+            color: Colors.grey,
+            fontSize: 11,
+            height: 1.4,
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildRiderCard(
+    FoodOrderModel order,
+  ) {
+    final bool hasRider =
+        order.riderId.trim().isNotEmpty;
+
+    return _sectionCard(
+      title: 'Delivery Rider',
+      icon: Icons.delivery_dining,
+      children: <Widget>[
+        _InfoRow(
+          label: 'Rider',
+          value: hasRider
+              ? order.riderId
+              : 'Not assigned yet',
+        ),
+        if (hasRider) ...<Widget>[
+          const Divider(color: Colors.white12),
+          _InfoRow(
+            label: 'Latitude',
+            value: order.riderLatitude == 0
+                ? 'Waiting for location'
+                : order.riderLatitude
+                    .toStringAsFixed(6),
+          ),
+          const Divider(color: Colors.white12),
+          _InfoRow(
+            label: 'Longitude',
+            value: order.riderLongitude == 0
+                ? 'Waiting for location'
+                : order.riderLongitude
+                    .toStringAsFixed(6),
+          ),
+        ],
+      ],
+    );
+  }
+
+  Widget _buildTimelineCard(
+    FoodOrderModel order,
+  ) {
+    final List<_TimelineStep> steps =
+        <_TimelineStep>[
+      _TimelineStep(
+        title: 'Order placed',
+        icon: Icons.receipt_long_outlined,
+        completed: true,
+      ),
+      _TimelineStep(
+        title: 'Restaurant accepted',
+        icon: Icons.check_circle_outline,
+        completed: _statusReached(
+          order.status,
+          FoodOrderStatus.accepted,
+        ),
+      ),
+      _TimelineStep(
+        title: 'Preparing food',
+        icon: Icons.soup_kitchen_outlined,
+        completed: _statusReached(
+          order.status,
+          FoodOrderStatus.preparing,
+        ),
+      ),
+      _TimelineStep(
+        title: 'Ready for pickup',
+        icon: Icons.shopping_bag_outlined,
+        completed: _statusReached(
+          order.status,
+          FoodOrderStatus.readyForPickup,
+        ),
+      ),
+      _TimelineStep(
+        title: 'Picked up',
+        icon: Icons.delivery_dining,
+        completed: _statusReached(
+          order.status,
+          FoodOrderStatus.pickedUp,
+        ),
+      ),
+      _TimelineStep(
+        title: 'On the way',
+        icon: Icons.route,
+        completed: _statusReached(
+          order.status,
+          FoodOrderStatus.onTheWay,
+        ),
+      ),
+      _TimelineStep(
+        title: 'Delivered',
+        icon: Icons.task_alt,
+        completed:
+            order.status ==
+            FoodOrderStatus.delivered,
+      ),
+    ];
+
+    return _sectionCard(
+      title: 'Order Timeline',
+      icon: Icons.timeline,
+      children: <Widget>[
+        ...List<Widget>.generate(
+          steps.length,
+          (int index) {
+            final _TimelineStep step =
+                steps[index];
+
+            return Row(
+              crossAxisAlignment:
+                  CrossAxisAlignment.start,
+              children: <Widget>[
+                Column(
+                  children: <Widget>[
+                    CircleAvatar(
+                      radius: 17,
+                      backgroundColor:
+                          step.completed
+                              ? yellow
+                              : const Color(
+                                  0xFF2A2A2A,
+                                ),
+                      child: Icon(
+                        step.icon,
+                        color: step.completed
+                            ? Colors.black
+                            : Colors.grey,
+                        size: 18,
+                      ),
+                    ),
+                    if (index < steps.length - 1)
+                      Container(
+                        width: 2,
+                        height: 30,
+                        color: step.completed
+                            ? yellow
+                            : Colors.white12,
+                      ),
+                  ],
+                ),
+                const SizedBox(width: 11),
+                Padding(
+                  padding:
+                      const EdgeInsets.only(top: 7),
+                  child: Text(
+                    step.title,
+                    style: TextStyle(
+                      color: step.completed
+                          ? Colors.white
+                          : Colors.grey,
+                      fontWeight: step.completed
+                          ? FontWeight.bold
+                          : FontWeight.normal,
+                    ),
+                  ),
+                ),
+              ],
+            );
+          },
+        ),
+        if (order.status ==
+            FoodOrderStatus.cancelled) ...<Widget>[
+          const SizedBox(height: 10),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(13),
+            decoration: BoxDecoration(
+              color: Colors.red.withValues(
+                alpha: 0.12,
+              ),
+              borderRadius:
+                  BorderRadius.circular(14),
+            ),
+            child: const Text(
+              'This order was cancelled.',
+              style: TextStyle(
+                color: Colors.redAccent,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+
+  bool _statusReached(
+    FoodOrderStatus current,
+    FoodOrderStatus target,
+  ) {
+    const List<FoodOrderStatus> order =
+        <FoodOrderStatus>[
+      FoodOrderStatus.pending,
+      FoodOrderStatus.accepted,
+      FoodOrderStatus.preparing,
+      FoodOrderStatus.readyForPickup,
+      FoodOrderStatus.pickedUp,
+      FoodOrderStatus.onTheWay,
+      FoodOrderStatus.delivered,
+    ];
+
+    if (current ==
+        FoodOrderStatus.cancelled) {
+      return false;
+    }
+
+    return order.indexOf(current) >=
+        order.indexOf(target);
+  }
+
+  Widget _sectionCard({
+    required String title,
+    required IconData icon,
+    required List<Widget> children,
+  }) {
+    return Container(
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: cardColor,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(
+          color: Colors.white10,
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment:
+            CrossAxisAlignment.start,
+        children: <Widget>[
+          Row(
+            children: <Widget>[
+              Icon(
+                icon,
+                color: yellow,
+              ),
+              const SizedBox(width: 10),
+              Text(
+                title,
+                style: const TextStyle(
+                  fontSize: 17,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+          ...children,
+        ],
+      ),
+    );
+  }
+
+  String _dateTimeText(
+    DateTime value,
+  ) {
+    final String day =
+        value.day.toString().padLeft(2, '0');
+
+    final String month =
+        value.month.toString().padLeft(2, '0');
+
+    final String hour =
+        value.hour.toString().padLeft(2, '0');
+
+    final String minute =
+        value.minute.toString().padLeft(2, '0');
+
+    return '$day/$month/${value.year} $hour:$minute';
+  }
+
+  String _statusText(
+    FoodOrderStatus status,
+  ) {
+    switch (status) {
+      case FoodOrderStatus.pending:
+        return 'Order Pending';
+      case FoodOrderStatus.accepted:
+        return 'Order Accepted';
+      case FoodOrderStatus.preparing:
+        return 'Preparing Food';
+      case FoodOrderStatus.readyForPickup:
+        return 'Ready for Pickup';
+      case FoodOrderStatus.pickedUp:
+        return 'Picked Up';
+      case FoodOrderStatus.onTheWay:
+        return 'On The Way';
+      case FoodOrderStatus.delivered:
+        return 'Delivered';
+      case FoodOrderStatus.cancelled:
+        return 'Cancelled';
+    }
+  }
+
+  String _statusDescription(
+    FoodOrderStatus status,
+  ) {
+    switch (status) {
+      case FoodOrderStatus.pending:
+        return 'Waiting for the restaurant to accept your order.';
+      case FoodOrderStatus.accepted:
+        return 'The restaurant has accepted your order.';
+      case FoodOrderStatus.preparing:
+        return 'Your food is currently being prepared.';
+      case FoodOrderStatus.readyForPickup:
+        return 'Your food is ready for the delivery rider.';
+      case FoodOrderStatus.pickedUp:
+        return 'The delivery rider has picked up your order.';
+      case FoodOrderStatus.onTheWay:
+        return 'Your order is on the way.';
+      case FoodOrderStatus.delivered:
+        return 'Your order has been delivered successfully.';
+      case FoodOrderStatus.cancelled:
+        return 'This order was cancelled.';
+    }
+  }
+
+  IconData _statusIcon(
+    FoodOrderStatus status,
+  ) {
+    switch (status) {
+      case FoodOrderStatus.pending:
+        return Icons.hourglass_top;
+      case FoodOrderStatus.accepted:
+        return Icons.check_circle_outline;
+      case FoodOrderStatus.preparing:
+        return Icons.soup_kitchen_outlined;
+      case FoodOrderStatus.readyForPickup:
+        return Icons.shopping_bag_outlined;
+      case FoodOrderStatus.pickedUp:
+        return Icons.delivery_dining;
+      case FoodOrderStatus.onTheWay:
+        return Icons.route;
+      case FoodOrderStatus.delivered:
+        return Icons.task_alt;
+      case FoodOrderStatus.cancelled:
+        return Icons.cancel_outlined;
+    }
+  }
+
+  Color _statusColor(
+    FoodOrderStatus status,
+  ) {
+    switch (status) {
+      case FoodOrderStatus.pending:
+        return yellow;
+      case FoodOrderStatus.accepted:
+      case FoodOrderStatus.preparing:
+        return Colors.orangeAccent;
+      case FoodOrderStatus.readyForPickup:
+      case FoodOrderStatus.pickedUp:
+      case FoodOrderStatus.onTheWay:
+        return Colors.lightBlueAccent;
+      case FoodOrderStatus.delivered:
+        return Colors.greenAccent;
+      case FoodOrderStatus.cancelled:
+        return Colors.redAccent;
+    }
+  }
+
+  String _readString(
+    dynamic source,
+    String key,
+  ) {
+    if (source is Map) {
+      return source[key]?.toString() ?? '';
+    }
+
+    try {
+      final dynamic value =
+          source.toMap();
+
+      if (value is Map) {
+        return value[key]?.toString() ?? '';
+      }
+    } catch (_) {
+      // Fallback for typed order item models.
+    }
+
+    return '';
+  }
+
+  int _readInt(
+    dynamic source,
+    String key,
+  ) {
+    final String value =
+        _readString(source, key);
+
+    return int.tryParse(value) ?? 0;
+  }
+
+  double _readDouble(
+    dynamic source,
+    String key, {
+    String? fallbackKey,
+  }) {
+    String value =
+        _readString(source, key);
+
+    if (value.isEmpty &&
+        fallbackKey != null) {
+      value = _readString(
+        source,
+        fallbackKey,
+      );
+    }
+
+    return double.tryParse(value) ?? 0;
+  }
+
+  List<String> _readStringList(
+    dynamic source,
+    String key, {
+    String? fallbackKey,
+  }) {
+    dynamic value;
+
+    if (source is Map) {
+      value = source[key];
+
+      if (value == null &&
+          fallbackKey != null) {
+        value = source[fallbackKey];
+      }
+    } else {
+      try {
+        final dynamic map =
+            source.toMap();
+
+        if (map is Map) {
+          value = map[key];
+
+          if (value == null &&
+              fallbackKey != null) {
+            value = map[fallbackKey];
+          }
+        }
+      } catch (_) {
+        return const <String>[];
+      }
+    }
+
+    if (value is! List) {
+      return const <String>[];
+    }
+
+    return value
+        .map(
+          (dynamic item) =>
+              item.toString().trim(),
+        )
+        .where(
+          (String item) => item.isNotEmpty,
+        )
+        .toList();
+  }
+}
+
+class _InfoRow extends StatelessWidget {
+  const _InfoRow({
+    required this.label,
+    required this.value,
+    this.highlight = false,
+  });
+
+  static const Color yellow = Color(0xFFFFD60A);
+
+  final String label;
+  final String value;
+  final bool highlight;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      crossAxisAlignment:
+          CrossAxisAlignment.start,
+      children: <Widget>[
+        Expanded(
+          child: Text(
+            label,
+            style: const TextStyle(
+              color: Colors.grey,
+            ),
+          ),
+        ),
+        const SizedBox(width: 12),
+        Flexible(
+          child: Text(
+            value.trim().isEmpty
+                ? '—'
+                : value,
+            textAlign: TextAlign.right,
+            style: TextStyle(
+              color: highlight
+                  ? yellow
+                  : Colors.white,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _TimelineStep {
+  const _TimelineStep({
+    required this.title,
+    required this.icon,
+    required this.completed,
+  });
+
+  final String title;
+  final IconData icon;
+  final bool completed;
+}

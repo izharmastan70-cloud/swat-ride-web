@@ -1,0 +1,669 @@
+// lib/food/restaurant_partner/screens/restaurant_partner_settings_screen.dart
+// =============================================================
+// SWAT RIDE - FOOD DELIVERY
+// Restaurant Partner Settings Screen
+//
+// Connected with:
+// - RestaurantPartnerModel
+// - RestaurantPartnerService
+// - Cloud Firestore
+//
+// Firebase Storage and payment gateway are not required here.
+// =============================================================
+
+import 'package:flutter/material.dart';
+
+import '../models/restaurant_partner_model.dart';
+import '../services/restaurant_partner_service.dart';
+
+class RestaurantPartnerSettingsScreen extends StatefulWidget {
+  const RestaurantPartnerSettingsScreen({required this.partner, super.key});
+
+  final RestaurantPartnerModel partner;
+
+  @override
+  State<RestaurantPartnerSettingsScreen> createState() =>
+      _RestaurantPartnerSettingsScreenState();
+}
+
+class _RestaurantPartnerSettingsScreenState
+    extends State<RestaurantPartnerSettingsScreen> {
+  static const Color yellow = Color(0xFFFFD60A);
+  static const Color background = Color(0xFF0D0D0D);
+  static const Color cardColor = Color(0xFF1A1A1A);
+  static const Color fieldColor = Color(0xFF252525);
+
+  final GlobalKey<FormState> _formKey = GlobalKey<FormState>();
+
+  final RestaurantPartnerService _service = RestaurantPartnerService();
+
+  late final TextEditingController _minimumOrderController;
+  late final TextEditingController _deliveryFeeController;
+  late final TextEditingController _deliveryRadiusController;
+  late final TextEditingController _openingController;
+  late final TextEditingController _closingController;
+  late final TextEditingController _preparationTimeController;
+
+  late bool _restaurantOpen;
+  late bool _autoAcceptOrders;
+
+  late bool _orderNotifications;
+  late bool _settlementNotifications;
+  late bool _adminNotifications;
+
+  late bool _acceptsCash;
+  late bool _acceptsWallet;
+  late bool _acceptsJazzCash;
+  late bool _acceptsEasypaisa;
+  late bool _acceptsCard;
+
+  bool _isSaving = false;
+
+  RestaurantPartnerModel get partner => widget.partner;
+
+  @override
+  void initState() {
+    super.initState();
+
+    _restaurantOpen = partner.isActive;
+    _autoAcceptOrders = false;
+
+    _orderNotifications = true;
+    _settlementNotifications = true;
+    _adminNotifications = true;
+
+    _acceptsCash = partner.acceptsCash;
+    _acceptsWallet = partner.acceptsWallet;
+    _acceptsJazzCash = partner.acceptsJazzCash;
+    _acceptsEasypaisa = partner.acceptsEasypaisa;
+    _acceptsCard = false;
+
+    _minimumOrderController = TextEditingController(
+      text: partner.minimumOrderAmount.toStringAsFixed(0),
+    );
+    _deliveryFeeController = TextEditingController(
+      text: partner.deliveryFee.toStringAsFixed(0),
+    );
+    _deliveryRadiusController = TextEditingController(
+      text: partner.deliveryRadiusKm.toStringAsFixed(1),
+    );
+    _openingController = TextEditingController(text: partner.openingTime);
+    _closingController = TextEditingController(text: partner.closingTime);
+    _preparationTimeController = TextEditingController(text: '25');
+
+    _loadLatestSettings();
+  }
+
+  Future<void> _loadLatestSettings() async {
+    try {
+      final RestaurantPartnerModel? latest = await _service.getPartnerById(
+        partner.partnerId,
+      );
+
+      if (latest == null || !mounted) {
+        return;
+      }
+
+      setState(() {
+        _restaurantOpen = latest.isActive;
+
+        _minimumOrderController.text = latest.minimumOrderAmount
+            .toStringAsFixed(0);
+        _deliveryFeeController.text = latest.deliveryFee.toStringAsFixed(0);
+        _deliveryRadiusController.text = latest.deliveryRadiusKm
+            .toStringAsFixed(1);
+        _openingController.text = latest.openingTime;
+        _closingController.text = latest.closingTime;
+
+        _acceptsCash = latest.acceptsCash;
+        _acceptsWallet = latest.acceptsWallet;
+        _acceptsJazzCash = latest.acceptsJazzCash;
+        _acceptsEasypaisa = latest.acceptsEasypaisa;
+      });
+    } on RestaurantPartnerServiceException catch (error) {
+      _showMessage(error.message);
+    }
+  }
+
+  @override
+  void dispose() {
+    _minimumOrderController.dispose();
+    _deliveryFeeController.dispose();
+    _deliveryRadiusController.dispose();
+    _openingController.dispose();
+    _closingController.dispose();
+    _preparationTimeController.dispose();
+    super.dispose();
+  }
+
+  void _showMessage(String message) {
+    if (!mounted) {
+      return;
+    }
+
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  String? _required(String? value, String name) {
+    if (value == null || value.trim().isEmpty) {
+      return 'Please enter $name';
+    }
+
+    return null;
+  }
+
+  String? _moneyValidator(String? value, String name) {
+    final String? requiredError = _required(value, name);
+
+    if (requiredError != null) {
+      return requiredError;
+    }
+
+    final double? amount = double.tryParse(value!.trim());
+
+    if (amount == null || amount < 0) {
+      return 'Enter a valid $name';
+    }
+
+    return null;
+  }
+
+  String? _positiveValidator(String? value, String name) {
+    final String? requiredError = _required(value, name);
+
+    if (requiredError != null) {
+      return requiredError;
+    }
+
+    final double? amount = double.tryParse(value!.trim());
+
+    if (amount == null || amount <= 0) {
+      return '$name must be greater than 0';
+    }
+
+    return null;
+  }
+
+  Future<void> _saveSettings() async {
+    if (_isSaving) {
+      return;
+    }
+
+    final bool valid = _formKey.currentState?.validate() ?? false;
+
+    if (!valid) {
+      return;
+    }
+
+    if (!_acceptsCash &&
+        !_acceptsWallet &&
+        !_acceptsJazzCash &&
+        !_acceptsEasypaisa &&
+        !_acceptsCard) {
+      _showMessage('Enable at least one payment method.');
+      return;
+    }
+
+    setState(() {
+      _isSaving = true;
+    });
+
+    try {
+      final double minimumOrder = double.parse(
+        _minimumOrderController.text.trim(),
+      );
+      final double deliveryFee = double.parse(
+        _deliveryFeeController.text.trim(),
+      );
+      final double deliveryRadius = double.parse(
+        _deliveryRadiusController.text.trim(),
+      );
+      final int preparationTime = int.parse(
+        _preparationTimeController.text.trim(),
+      );
+
+      await _service.updatePartnerFields(
+        partnerId: partner.partnerId,
+        fields: <String, dynamic>{
+          'openingTime': _openingController.text.trim(),
+          'closingTime': _closingController.text.trim(),
+          'minimumOrderAmount': minimumOrder,
+          'deliveryFee': deliveryFee,
+          'deliveryRadiusKm': deliveryRadius,
+          'acceptsCash': _acceptsCash,
+          'acceptsWallet': _acceptsWallet,
+          'acceptsJazzCash': _acceptsJazzCash,
+          'acceptsEasypaisa': _acceptsEasypaisa,
+
+          // Extra partner settings. These are safe
+          // Firestore fields even if an older model
+          // does not read them yet.
+          'acceptsCard': _acceptsCard,
+          'autoAcceptOrders': _autoAcceptOrders,
+          'defaultPreparationTimeMinutes': preparationTime,
+          'orderNotificationsEnabled': _orderNotifications,
+          'settlementNotificationsEnabled': _settlementNotifications,
+          'adminNotificationsEnabled': _adminNotifications,
+        },
+      );
+
+      if (partner.restaurantId.trim().isNotEmpty) {
+        await _service.setRestaurantOpenStatus(
+          partnerId: partner.partnerId,
+          isOpen: _restaurantOpen,
+        );
+      }
+
+      _showMessage('Restaurant settings saved successfully.');
+    } on RestaurantPartnerServiceException catch (error) {
+      _showMessage(error.message);
+    } catch (error) {
+      _showMessage('Unable to save settings: $error');
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isSaving = false;
+        });
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: background,
+      appBar: AppBar(
+        backgroundColor: background,
+        title: const Text(
+          'Restaurant Settings',
+          style: TextStyle(fontWeight: FontWeight.bold),
+        ),
+      ),
+      body: SafeArea(
+        child: Form(
+          key: _formKey,
+          child: ListView(
+            padding: const EdgeInsets.fromLTRB(16, 16, 16, 30),
+            children: <Widget>[
+              _buildBusinessSection(),
+              const SizedBox(height: 16),
+              _buildPaymentSection(),
+              const SizedBox(height: 16),
+              _buildNotificationSection(),
+              const SizedBox(height: 16),
+              _buildAdminControlledSection(),
+              const SizedBox(height: 22),
+              SizedBox(
+                width: double.infinity,
+                height: 56,
+                child: ElevatedButton.icon(
+                  onPressed: _isSaving ? null : _saveSettings,
+                  icon: _isSaving
+                      ? const SizedBox(
+                          width: 20,
+                          height: 20,
+                          child: CircularProgressIndicator(
+                            color: Colors.black,
+                            strokeWidth: 2,
+                          ),
+                        )
+                      : const Icon(Icons.save_outlined),
+                  label: Text(
+                    _isSaving ? 'Saving...' : 'Save Settings',
+                    style: const TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: yellow,
+                    foregroundColor: Colors.black,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(16),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildBusinessSection() {
+    return _section(
+      title: 'Business Settings',
+      icon: Icons.storefront_outlined,
+      children: <Widget>[
+        SwitchListTile(
+          contentPadding: EdgeInsets.zero,
+          value: _restaurantOpen,
+          onChanged: _isSaving
+              ? null
+              : (bool value) {
+                  setState(() {
+                    _restaurantOpen = value;
+                  });
+                },
+          activeThumbColor: yellow,
+          title: const Text('Restaurant Open'),
+          subtitle: const Text(
+            'Customers can place orders when enabled.',
+            style: TextStyle(color: Colors.grey, fontSize: 12),
+          ),
+        ),
+        SwitchListTile(
+          contentPadding: EdgeInsets.zero,
+          value: _autoAcceptOrders,
+          onChanged: _isSaving
+              ? null
+              : (bool value) {
+                  setState(() {
+                    _autoAcceptOrders = value;
+                  });
+                },
+          activeThumbColor: yellow,
+          title: const Text('Auto Accept Orders'),
+          subtitle: const Text(
+            'Automatically accept incoming food orders.',
+            style: TextStyle(color: Colors.grey, fontSize: 12),
+          ),
+        ),
+        const SizedBox(height: 10),
+        _field(
+          controller: _openingController,
+          label: 'Opening Time',
+          hint: '09:00',
+          icon: Icons.schedule,
+          validator: (String? value) => _required(value, 'opening time'),
+        ),
+        const SizedBox(height: 12),
+        _field(
+          controller: _closingController,
+          label: 'Closing Time',
+          hint: '23:00',
+          icon: Icons.schedule_outlined,
+          validator: (String? value) => _required(value, 'closing time'),
+        ),
+        const SizedBox(height: 12),
+        _field(
+          controller: _preparationTimeController,
+          label: 'Default Preparation Time (Minutes)',
+          hint: '25',
+          icon: Icons.timer_outlined,
+          keyboardType: TextInputType.number,
+          validator: (String? value) =>
+              _positiveValidator(value, 'preparation time'),
+        ),
+        const SizedBox(height: 12),
+        _field(
+          controller: _minimumOrderController,
+          label: 'Minimum Order (Rs.)',
+          hint: '300',
+          icon: Icons.shopping_cart_outlined,
+          keyboardType: const TextInputType.numberWithOptions(decimal: true),
+          validator: (String? value) => _moneyValidator(value, 'minimum order'),
+        ),
+        const SizedBox(height: 12),
+        _field(
+          controller: _deliveryFeeController,
+          label: 'Delivery Fee (Rs.)',
+          hint: '100',
+          icon: Icons.delivery_dining,
+          keyboardType: const TextInputType.numberWithOptions(decimal: true),
+          validator: (String? value) => _moneyValidator(value, 'delivery fee'),
+        ),
+        const SizedBox(height: 12),
+        _field(
+          controller: _deliveryRadiusController,
+          label: 'Delivery Radius (KM)',
+          hint: '10',
+          icon: Icons.route_outlined,
+          keyboardType: const TextInputType.numberWithOptions(decimal: true),
+          validator: (String? value) =>
+              _positiveValidator(value, 'delivery radius'),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildPaymentSection() {
+    return _section(
+      title: 'Payment Methods',
+      icon: Icons.payments_outlined,
+      children: <Widget>[
+        _checkTile(
+          title: 'Cash',
+          value: _acceptsCash,
+          onChanged: (bool value) {
+            setState(() {
+              _acceptsCash = value;
+            });
+          },
+        ),
+        _checkTile(
+          title: 'SWAT RIDE Wallet',
+          value: _acceptsWallet,
+          onChanged: (bool value) {
+            setState(() {
+              _acceptsWallet = value;
+            });
+          },
+        ),
+        _checkTile(
+          title: 'JazzCash',
+          value: _acceptsJazzCash,
+          onChanged: (bool value) {
+            setState(() {
+              _acceptsJazzCash = value;
+            });
+          },
+        ),
+        _checkTile(
+          title: 'Easypaisa',
+          value: _acceptsEasypaisa,
+          onChanged: (bool value) {
+            setState(() {
+              _acceptsEasypaisa = value;
+            });
+          },
+        ),
+        _checkTile(
+          title: 'Card',
+          value: _acceptsCard,
+          onChanged: (bool value) {
+            setState(() {
+              _acceptsCard = value;
+            });
+          },
+        ),
+        const SizedBox(height: 6),
+        const Text(
+          'Admin can disable a payment method globally. '
+          'Real online payment processing remains bypassed until enabled.',
+          style: TextStyle(color: Colors.grey, fontSize: 11, height: 1.4),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildNotificationSection() {
+    return _section(
+      title: 'Notifications',
+      icon: Icons.notifications_outlined,
+      children: <Widget>[
+        _switchTile(
+          title: 'Order Notifications',
+          value: _orderNotifications,
+          onChanged: (bool value) {
+            setState(() {
+              _orderNotifications = value;
+            });
+          },
+        ),
+        _switchTile(
+          title: 'Settlement Notifications',
+          value: _settlementNotifications,
+          onChanged: (bool value) {
+            setState(() {
+              _settlementNotifications = value;
+            });
+          },
+        ),
+        _switchTile(
+          title: 'Admin Notifications',
+          value: _adminNotifications,
+          onChanged: (bool value) {
+            setState(() {
+              _adminNotifications = value;
+            });
+          },
+        ),
+      ],
+    );
+  }
+
+  Widget _buildAdminControlledSection() {
+    return _section(
+      title: 'Admin Controlled',
+      icon: Icons.admin_panel_settings_outlined,
+      children: <Widget>[
+        _readOnlyRow(
+          label: 'Approval Status',
+          value: partner.applicationStatus.displayName,
+        ),
+        const Divider(color: Colors.white12),
+        _readOnlyRow(
+          label: 'Commission',
+          value: '${partner.commissionPercentage.toStringAsFixed(1)}%',
+        ),
+        const Divider(color: Colors.white12),
+        _readOnlyRow(label: 'Partner ID', value: partner.partnerId),
+        const SizedBox(height: 10),
+        const Text(
+          'Approval, suspension and commission are controlled only by Food Admin.',
+          style: TextStyle(color: Colors.grey, fontSize: 11, height: 1.4),
+        ),
+      ],
+    );
+  }
+
+  Widget _section({
+    required String title,
+    required IconData icon,
+    required List<Widget> children,
+  }) {
+    return Container(
+      padding: const EdgeInsets.all(17),
+      decoration: BoxDecoration(
+        color: cardColor,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: Colors.white10),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Row(
+            children: <Widget>[
+              Icon(icon, color: yellow),
+              const SizedBox(width: 9),
+              Text(
+                title,
+                style: const TextStyle(
+                  fontSize: 17,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 15),
+          ...children,
+        ],
+      ),
+    );
+  }
+
+  Widget _field({
+    required TextEditingController controller,
+    required String label,
+    required String hint,
+    required IconData icon,
+    required String? Function(String?) validator,
+    TextInputType keyboardType = TextInputType.text,
+  }) {
+    return TextFormField(
+      controller: controller,
+      enabled: !_isSaving,
+      keyboardType: keyboardType,
+      validator: validator,
+      autovalidateMode: AutovalidateMode.onUserInteraction,
+      decoration: InputDecoration(
+        labelText: label,
+        hintText: hint,
+        prefixIcon: Icon(icon, color: yellow),
+        filled: true,
+        fillColor: fieldColor,
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(15),
+          borderSide: BorderSide.none,
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(15),
+          borderSide: const BorderSide(color: yellow),
+        ),
+      ),
+    );
+  }
+
+  Widget _checkTile({
+    required String title,
+    required bool value,
+    required ValueChanged<bool> onChanged,
+  }) {
+    return CheckboxListTile(
+      contentPadding: EdgeInsets.zero,
+      value: value,
+      onChanged: _isSaving
+          ? null
+          : (bool? selected) {
+              onChanged(selected ?? false);
+            },
+      activeColor: yellow,
+      controlAffinity: ListTileControlAffinity.leading,
+      title: Text(title),
+    );
+  }
+
+  Widget _switchTile({
+    required String title,
+    required bool value,
+    required ValueChanged<bool> onChanged,
+  }) {
+    return SwitchListTile(
+      contentPadding: EdgeInsets.zero,
+      value: value,
+      onChanged: _isSaving ? null : onChanged,
+      activeThumbColor: yellow,
+      title: Text(title),
+    );
+  }
+
+  Widget _readOnlyRow({required String label, required String value}) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: <Widget>[
+        Expanded(
+          child: Text(label, style: const TextStyle(color: Colors.grey)),
+        ),
+        const SizedBox(width: 12),
+        Flexible(
+          child: Text(
+            value.trim().isEmpty ? 'ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â' : value,
+            textAlign: TextAlign.right,
+            style: const TextStyle(fontWeight: FontWeight.bold),
+          ),
+        ),
+      ],
+    );
+  }
+}

@@ -1,0 +1,1382 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:qr_flutter/qr_flutter.dart';
+import 'package:url_launcher/url_launcher.dart';
+
+import 'hotel_booking_details_screen.dart';
+import 'hotel_review_screen.dart';
+
+class MyHotelBookingsScreen extends StatefulWidget {
+  const MyHotelBookingsScreen({super.key});
+
+  @override
+  State<MyHotelBookingsScreen> createState() =>
+      _MyHotelBookingsScreenState();
+}
+
+class _MyHotelBookingsScreenState
+    extends State<MyHotelBookingsScreen> {
+  static const Color yellow = Color(0xFFFFD60A);
+  static const Color darkCard = Color(0xFF1A1A1A);
+  static const Color darkBackground = Color(0xFF0D0D0D);
+
+  final FirebaseFirestore _firestore =
+      FirebaseFirestore.instance;
+  final TextEditingController _searchController =
+      TextEditingController();
+
+  String _selectedFilter = 'all';
+  String _searchText = '';
+  String _workingBookingId = '';
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final User? user =
+        FirebaseAuth.instance.currentUser;
+
+    return Scaffold(
+      backgroundColor: darkBackground,
+      appBar: AppBar(
+        backgroundColor: darkBackground,
+        elevation: 0,
+        iconTheme:
+            const IconThemeData(color: Colors.white),
+        title: const Text(
+          'My Hotel Bookings',
+          style: TextStyle(
+            color: Colors.white,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+      ),
+      body: user == null
+          ? _messageState(
+              icon: Icons.lock_outline,
+              title: 'Login Required',
+              message:
+                  'Please log in to view your hotel bookings.',
+            )
+          : SafeArea(
+              child: StreamBuilder<
+                  QuerySnapshot<Map<String, dynamic>>>(
+                stream: _firestore
+                    .collection('hotel_bookings')
+                    .where(
+                      'userId',
+                      isEqualTo: user.uid,
+                    )
+                    .snapshots(),
+                builder: (context, snapshot) {
+                  if (snapshot.connectionState ==
+                      ConnectionState.waiting) {
+                    return const Center(
+                      child: CircularProgressIndicator(
+                        color: yellow,
+                      ),
+                    );
+                  }
+
+                  if (snapshot.hasError) {
+                    return _messageState(
+                      icon: Icons.error_outline,
+                      title:
+                          'Unable to Load Bookings',
+                      message:
+                          snapshot.error.toString(),
+                    );
+                  }
+
+                  final documents =
+                      snapshot.data?.docs ??
+                          <QueryDocumentSnapshot<
+                              Map<String, dynamic>>>[];
+
+                  documents.sort(
+                    (a, b) => _readDateTime(
+                      b.data()['createdAt'],
+                    ).compareTo(
+                      _readDateTime(
+                        a.data()['createdAt'],
+                      ),
+                    ),
+                  );
+
+                  final filtered =
+                      _filterBookings(documents);
+
+                  return RefreshIndicator(
+                    color: yellow,
+                    backgroundColor: darkCard,
+                    onRefresh: () async {
+                      await _firestore
+                          .collection(
+                            'hotel_bookings',
+                          )
+                          .where(
+                            'userId',
+                            isEqualTo: user.uid,
+                          )
+                          .get();
+                    },
+                    child: ListView(
+                      padding:
+                          const EdgeInsets.fromLTRB(
+                        16,
+                        16,
+                        16,
+                        30,
+                      ),
+                      children: [
+                        _summaryCard(documents),
+                        const SizedBox(height: 16),
+                        _searchBox(),
+                        const SizedBox(height: 12),
+                        _filterChips(),
+                        const SizedBox(height: 18),
+                        if (filtered.isEmpty)
+                          _messageState(
+                            icon: Icons
+                                .book_online_outlined,
+                            title:
+                                'No Hotel Bookings',
+                            message: _emptyMessage(),
+                          )
+                        else
+                          ...filtered.map(
+                            _bookingCard,
+                          ),
+                      ],
+                    ),
+                  );
+                },
+              ),
+            ),
+    );
+  }
+
+  Widget _summaryCard(
+    List<QueryDocumentSnapshot<
+            Map<String, dynamic>>>
+        documents,
+  ) {
+    int active = 0;
+    int upcoming = 0;
+    int completed = 0;
+    final DateTime now = DateTime.now();
+
+    for (final document in documents) {
+      final data = document.data();
+      final status =
+          data['bookingStatus']?.toString() ??
+              'pending';
+      final checkIn =
+          _readDateTime(data['checkIn']);
+
+      if (_isActive(status)) {
+        active++;
+      } else if (_isUpcomingStatus(status) &&
+          checkIn.isAfter(now)) {
+        upcoming++;
+      } else if (_isCompleted(status)) {
+        completed++;
+      }
+    }
+
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: darkCard,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(
+          color: yellow.withValues(alpha: 0.22),
+        ),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: _summaryItem(
+              icon: Icons.hotel_outlined,
+              title: 'Total',
+              value: '${documents.length}',
+            ),
+          ),
+          Expanded(
+            child: _summaryItem(
+              icon: Icons.login,
+              title: 'Active',
+              value: '$active',
+            ),
+          ),
+          Expanded(
+            child: _summaryItem(
+              icon: Icons.event_available,
+              title: 'Upcoming',
+              value: '$upcoming',
+            ),
+          ),
+          Expanded(
+            child: _summaryItem(
+              icon: Icons.task_alt,
+              title: 'Completed',
+              value: '$completed',
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _summaryItem({
+    required IconData icon,
+    required String title,
+    required String value,
+  }) {
+    return Column(
+      children: [
+        Icon(icon, color: yellow, size: 23),
+        const SizedBox(height: 6),
+        Text(
+          value,
+          style: const TextStyle(
+            color: Colors.white,
+            fontSize: 18,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+        const SizedBox(height: 3),
+        Text(
+          title,
+          style: const TextStyle(
+            color: Colors.grey,
+            fontSize: 9,
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _searchBox() {
+    return TextField(
+      controller: _searchController,
+      onChanged: (value) {
+        setState(() {
+          _searchText = value;
+        });
+      },
+      style: const TextStyle(color: Colors.white),
+      decoration: InputDecoration(
+        hintText:
+            'Search hotel, room or booking ID...',
+        hintStyle:
+            const TextStyle(color: Colors.grey),
+        prefixIcon:
+            const Icon(Icons.search, color: yellow),
+        suffixIcon: _searchText.isEmpty
+            ? null
+            : IconButton(
+                onPressed: () {
+                  _searchController.clear();
+                  setState(() {
+                    _searchText = '';
+                  });
+                },
+                icon: const Icon(
+                  Icons.close,
+                  color: Colors.grey,
+                ),
+              ),
+        filled: true,
+        fillColor: darkCard,
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(15),
+          borderSide: BorderSide.none,
+        ),
+      ),
+    );
+  }
+
+  Widget _filterChips() {
+    const filters = <String>[
+      'all',
+      'upcoming',
+      'active',
+      'completed',
+      'cancelled',
+    ];
+
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      child: Row(
+        children: filters.map((filter) {
+          final bool selected =
+              _selectedFilter == filter;
+
+          return Padding(
+            padding:
+                const EdgeInsets.only(right: 8),
+            child: ChoiceChip(
+              selected: selected,
+              label: Text(_filterLabel(filter)),
+              selectedColor:
+                  yellow.withValues(alpha: 0.25),
+              checkmarkColor: yellow,
+              labelStyle: TextStyle(
+                color: selected
+                    ? Colors.white
+                    : Colors.grey,
+                fontWeight: FontWeight.bold,
+              ),
+              onSelected: (_) {
+                setState(() {
+                  _selectedFilter = filter;
+                });
+              },
+            ),
+          );
+        }).toList(),
+      ),
+    );
+  }
+
+  Widget _bookingCard(
+    QueryDocumentSnapshot<Map<String, dynamic>>
+        document,
+  ) {
+    final data = document.data();
+    final String bookingId =
+        (data['bookingId'] ?? document.id)
+            .toString();
+    final String hotelName =
+        data['hotelName']?.toString() ?? 'Hotel';
+    final String roomName =
+        data['roomName']?.toString() ??
+            data['roomType']?.toString() ??
+            'Selected Room';
+    final String status =
+        data['bookingStatus']?.toString() ??
+            'pending';
+    final String paymentStatus =
+        data['paymentStatus']?.toString() ??
+            'pending';
+    final DateTime checkIn =
+        _readDateTime(data['checkIn']);
+    final DateTime checkOut =
+        _readDateTime(data['checkOut']);
+    final double totalAmount =
+        _readNumber(data['totalAmount']);
+    final int rooms =
+        _readInt(data['rooms'], fallback: 1);
+    final int adults =
+        _readInt(data['adults']);
+    final int children =
+        _readInt(data['children']);
+    final int guests = adults + children > 0
+        ? adults + children
+        : _readInt(
+            data['guests'],
+            fallback: 1,
+          );
+    final Color statusColor =
+        _statusColor(status);
+    final bool working =
+        _workingBookingId == document.id;
+    final bool canCancel =
+        _canCancel(status, checkIn);
+    final bool canShowQr =
+        _canShowQr(data, status);
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.all(15),
+      decoration: BoxDecoration(
+        color: darkCard,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(
+          color:
+              statusColor.withValues(alpha: 0.28),
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment:
+            CrossAxisAlignment.start,
+        children: [
+          InkWell(
+            onTap: () {
+              final booking = <String, dynamic>{
+                ...data,
+                'id': document.id,
+                'bookingId': bookingId,
+              };
+
+              Navigator.push(
+                context,
+                MaterialPageRoute<void>(
+                  builder: (context) =>
+                      HotelBookingDetailsScreen(
+                    booking: booking,
+                  ),
+                ),
+              );
+            },
+            child: Row(
+              children: [
+                Container(
+                  width: 52,
+                  height: 52,
+                  decoration: BoxDecoration(
+                    color: yellow.withValues(
+                      alpha: 0.11,
+                    ),
+                    borderRadius:
+                        BorderRadius.circular(14),
+                  ),
+                  child: const Icon(
+                    Icons.hotel_outlined,
+                    color: yellow,
+                    size: 28,
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment:
+                        CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        hotelName,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 16,
+                          fontWeight:
+                              FontWeight.bold,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        roomName,
+                        style: const TextStyle(
+                          color: Colors.grey,
+                          fontSize: 11,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                _statusBadge(status),
+              ],
+            ),
+          ),
+          const SizedBox(height: 14),
+          _detailRow(
+            'Booking ID',
+            _shortId(bookingId),
+          ),
+          _detailRow(
+            'Check-in',
+            _formatDate(checkIn),
+          ),
+          _detailRow(
+            'Check-out',
+            _formatDate(checkOut),
+          ),
+          _detailRow(
+            'Guests / Rooms',
+            '$guests guest(s) • $rooms room(s)',
+          ),
+          _detailRow(
+            'Payment',
+            _statusLabel(paymentStatus),
+          ),
+          _detailRow(
+            'Total',
+            totalAmount <= 0
+                ? 'Not available'
+                : 'PKR ${_formatMoney(totalAmount)}',
+          ),
+          const SizedBox(height: 10),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              if (canShowQr)
+                _actionButton(
+                  icon: Icons.qr_code_2,
+                  label: 'Check-in QR',
+                  onPressed: working
+                      ? null
+                      : () => _showQrDialog(
+                            document,
+                          ),
+                ),
+              _actionButton(
+                icon: Icons.copy,
+                label: 'Copy ID',
+                onPressed: () =>
+                    _copyBookingId(bookingId),
+              ),
+              if (_hotelPhone(data).isNotEmpty)
+                _actionButton(
+                  icon: Icons.call_outlined,
+                  label: 'Call Hotel',
+                  onPressed: () =>
+                      _callHotel(data),
+                ),
+              if (_hotelPhone(data).isNotEmpty)
+                _actionButton(
+                  icon: Icons.chat_outlined,
+                  label: 'WhatsApp',
+                  onPressed: () =>
+                      _openWhatsApp(data),
+                ),
+              _actionButton(
+                icon: Icons.timeline,
+                label: 'Timeline',
+                onPressed: () =>
+                    _showTimeline(data),
+              ),
+              if (_isCompleted(status))
+                _actionButton(
+                  icon: Icons.star_outline,
+                  label: 'Write / View Review',
+                  onPressed: working
+                      ? null
+                      : () {
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute<void>(
+                              builder: (context) =>
+                                  HotelReviewScreen(
+                                hotelId:
+                                    data['hotelId']
+                                            ?.toString() ??
+                                        '',
+                                bookingId:
+                                    bookingId,
+                                hotelName:
+                                    hotelName,
+                                customerName:
+                                    data['guestName']
+                                            ?.toString() ??
+                                        FirebaseAuth
+                                            .instance
+                                            .currentUser
+                                            ?.displayName ??
+                                        '',
+                              ),
+                            ),
+                          );
+                        },
+                ),
+              if (canCancel)
+                _actionButton(
+                  icon: Icons.cancel_outlined,
+                  label: working
+                      ? 'Cancelling...'
+                      : 'Cancel',
+                  foregroundColor:
+                      Colors.redAccent,
+                  onPressed: working
+                      ? null
+                      : () => _cancelBooking(
+                            document,
+                          ),
+                ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _actionButton({
+    required IconData icon,
+    required String label,
+    required VoidCallback? onPressed,
+    Color foregroundColor = yellow,
+  }) {
+    return OutlinedButton.icon(
+      onPressed: onPressed,
+      icon: Icon(icon, size: 18),
+      label: Text(label),
+      style: OutlinedButton.styleFrom(
+        foregroundColor: foregroundColor,
+        side: BorderSide(
+          color: foregroundColor.withValues(
+            alpha: 0.7,
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _showQrDialog(
+    QueryDocumentSnapshot<Map<String, dynamic>>
+        document,
+  ) async {
+    final data = document.data();
+    final String bookingId =
+        (data['bookingId'] ?? document.id)
+            .toString();
+    final String qrPayload =
+        data['qrPayload']?.toString() ?? '';
+    final String pin =
+        data['verificationPin']?.toString() ??
+            '';
+
+    if (qrPayload.isEmpty || pin.isEmpty) {
+      _showMessage(
+        'Secure QR or verification PIN is not available for this older booking.',
+        isError: true,
+      );
+      return;
+    }
+
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          backgroundColor: darkCard,
+          title: const Text(
+            'Secure Hotel Check-in',
+            style: TextStyle(
+              color: Colors.white,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  color: Colors.white,
+                  padding: const EdgeInsets.all(12),
+                  child: QrImageView(
+                    data: qrPayload,
+                    size: 220,
+                    backgroundColor: Colors.white,
+                  ),
+                ),
+                const SizedBox(height: 14),
+                _dialogRow(
+                  'Booking ID',
+                  bookingId,
+                ),
+                _dialogRow(
+                  'Manual PIN',
+                  pin,
+                ),
+                const SizedBox(height: 8),
+                const Text(
+                  'Show this QR to authorized hotel staff. If camera scanning is unavailable, staff can enter the Booking ID and 6-digit PIN manually.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    color: Colors.grey,
+                    fontSize: 11,
+                    height: 1.4,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton.icon(
+              onPressed: () {
+                Clipboard.setData(
+                  ClipboardData(
+                    text: bookingId,
+                  ),
+                );
+                _showMessage(
+                  'Booking ID copied.',
+                );
+              },
+              icon: const Icon(Icons.copy),
+              label:
+                  const Text('Copy Booking ID'),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                Navigator.pop(dialogContext);
+              },
+              style: ElevatedButton.styleFrom(
+                backgroundColor: yellow,
+                foregroundColor: Colors.black,
+              ),
+              child: const Text('Done'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  Future<void> _cancelBooking(
+    QueryDocumentSnapshot<Map<String, dynamic>>
+        document,
+  ) async {
+    final TextEditingController reasonController =
+        TextEditingController();
+
+    final bool? confirmed =
+        await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          backgroundColor: darkCard,
+          title: const Text(
+            'Cancel Hotel Booking',
+            style: TextStyle(
+              color: Colors.white,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          content: TextField(
+            controller: reasonController,
+            maxLines: 3,
+            style: const TextStyle(
+              color: Colors.white,
+            ),
+            decoration: const InputDecoration(
+              hintText:
+                  'Reason (optional)',
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () {
+                Navigator.pop(
+                  dialogContext,
+                  false,
+                );
+              },
+              child: const Text('Keep Booking'),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                Navigator.pop(
+                  dialogContext,
+                  true,
+                );
+              },
+              style: ElevatedButton.styleFrom(
+                backgroundColor:
+                    Colors.redAccent,
+              ),
+              child:
+                  const Text('Cancel Booking'),
+            ),
+          ],
+        );
+      },
+    );
+
+    if (confirmed != true) {
+      reasonController.dispose();
+      return;
+    }
+
+    setState(() {
+      _workingBookingId = document.id;
+    });
+
+    try {
+      await document.reference.set(
+        <String, dynamic>{
+          'bookingStatus': 'cancelled',
+          'cancellationReason':
+              reasonController.text.trim(),
+          'cancelledBy': FirebaseAuth
+                  .instance.currentUser?.uid ??
+              '',
+          'cancelledAt':
+              FieldValue.serverTimestamp(),
+          'qrIsActive': false,
+          'verificationPinIsActive': false,
+          'updatedAt':
+              FieldValue.serverTimestamp(),
+        },
+        SetOptions(merge: true),
+      );
+
+      _showMessage(
+        'Hotel booking cancelled.',
+      );
+    } catch (error) {
+      _showMessage(
+        'Unable to cancel booking: $error',
+        isError: true,
+      );
+    } finally {
+      reasonController.dispose();
+      if (mounted) {
+        setState(() {
+          _workingBookingId = '';
+        });
+      }
+    }
+  }
+
+  Future<void> _callHotel(
+    Map<String, dynamic> data,
+  ) async {
+    final String phone =
+        _hotelPhone(data).replaceAll(' ', '');
+
+    final Uri uri = Uri(
+      scheme: 'tel',
+      path: phone,
+    );
+
+    if (!await launchUrl(uri)) {
+      _showMessage(
+        'Unable to open phone dialer.',
+        isError: true,
+      );
+    }
+  }
+
+  Future<void> _openWhatsApp(
+    Map<String, dynamic> data,
+  ) async {
+    String phone = _hotelPhone(data)
+        .replaceAll(RegExp(r'\D'), '');
+
+    if (phone.startsWith('0')) {
+      phone = '92${phone.substring(1)}';
+    }
+
+    final Uri uri = Uri.parse(
+      'https://wa.me/$phone?text=${Uri.encodeComponent('Hello, I am contacting you about my SWAT RIDE hotel booking.')}',
+    );
+
+    if (!await launchUrl(
+      uri,
+      mode: LaunchMode.externalApplication,
+    )) {
+      _showMessage(
+        'Unable to open WhatsApp.',
+        isError: true,
+      );
+    }
+  }
+
+  void _showTimeline(
+    Map<String, dynamic> data,
+  ) {
+    final String status =
+        data['bookingStatus']?.toString() ??
+            'pending';
+
+    const steps = <String>[
+      'pending_hotel_confirmation',
+      'confirmed',
+      'checked_in',
+      'completed',
+    ];
+
+    int currentIndex =
+        steps.indexOf(status);
+
+    if (status == 'pending') {
+      currentIndex = 0;
+    } else if (status == 'active' ||
+        status == 'in_stay') {
+      currentIndex = 2;
+    } else if (status == 'checked_out') {
+      currentIndex = 3;
+    }
+
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: darkCard,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(
+          top: Radius.circular(24),
+        ),
+      ),
+      builder: (sheetContext) {
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.all(20),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text(
+                  'Booking Timeline',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 19,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(height: 18),
+                for (int index = 0;
+                    index < steps.length;
+                    index++)
+                  ListTile(
+                    leading: Icon(
+                      index <= currentIndex
+                          ? Icons.check_circle
+                          : Icons
+                              .radio_button_unchecked,
+                      color: index <= currentIndex
+                          ? yellow
+                          : Colors.grey,
+                    ),
+                    title: Text(
+                      _statusLabel(steps[index]),
+                      style: TextStyle(
+                        color: index <= currentIndex
+                            ? Colors.white
+                            : Colors.grey,
+                      ),
+                    ),
+                  ),
+                if (status == 'cancelled' ||
+                    status == 'rejected')
+                  ListTile(
+                    leading: const Icon(
+                      Icons.cancel,
+                      color: Colors.redAccent,
+                    ),
+                    title: Text(
+                      _statusLabel(status),
+                      style: const TextStyle(
+                        color: Colors.redAccent,
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  void _copyBookingId(
+    String bookingId,
+  ) {
+    Clipboard.setData(
+      ClipboardData(text: bookingId),
+    );
+    _showMessage('Booking ID copied.');
+  }
+
+  bool _canCancel(
+    String status,
+    DateTime checkIn,
+  ) {
+    return (status == 'pending' ||
+            status ==
+                'pending_hotel_confirmation' ||
+            status == 'confirmed') &&
+        checkIn.isAfter(DateTime.now());
+  }
+
+  bool _canShowQr(
+    Map<String, dynamic> data,
+    String status,
+  ) {
+    return data['qrIsActive'] == true &&
+        (status == 'confirmed' ||
+            status == 'pending' ||
+            status ==
+                'pending_hotel_confirmation');
+  }
+
+  String _hotelPhone(
+    Map<String, dynamic> data,
+  ) {
+    return data['hotelPhone']?.toString() ??
+        data['phone']?.toString() ??
+        '';
+  }
+
+  Widget _statusBadge(String status) {
+    final Color color =
+        _statusColor(status);
+
+    return Container(
+      padding: const EdgeInsets.symmetric(
+        horizontal: 9,
+        vertical: 5,
+      ),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.13),
+        borderRadius: BorderRadius.circular(18),
+      ),
+      child: Text(
+        _statusLabel(status),
+        style: TextStyle(
+          color: color,
+          fontSize: 9,
+          fontWeight: FontWeight.bold,
+        ),
+      ),
+    );
+  }
+
+  Widget _detailRow(
+    String title,
+    String value,
+  ) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 7),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              title,
+              style: const TextStyle(
+                color: Colors.grey,
+                fontSize: 11,
+              ),
+            ),
+          ),
+          const SizedBox(width: 10),
+          Flexible(
+            child: Text(
+              value,
+              textAlign: TextAlign.right,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 11,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _dialogRow(
+    String title,
+    String value,
+  ) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              title,
+              style: const TextStyle(
+                color: Colors.grey,
+                fontSize: 12,
+              ),
+            ),
+          ),
+          Flexible(
+            child: SelectableText(
+              value,
+              textAlign: TextAlign.right,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 12,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  List<QueryDocumentSnapshot<Map<String, dynamic>>>
+      _filterBookings(
+    List<QueryDocumentSnapshot<
+            Map<String, dynamic>>>
+        documents,
+  ) {
+    final String search =
+        _searchText.trim().toLowerCase();
+    final DateTime now = DateTime.now();
+
+    return documents.where((document) {
+      final data = document.data();
+      final String status =
+          data['bookingStatus']?.toString() ??
+              'pending';
+      final DateTime checkIn =
+          _readDateTime(data['checkIn']);
+      final String hotelName =
+          data['hotelName']
+                  ?.toString()
+                  .toLowerCase() ??
+              '';
+      final String roomName =
+          data['roomName']
+                  ?.toString()
+                  .toLowerCase() ??
+              data['roomType']
+                  ?.toString()
+                  .toLowerCase() ??
+              '';
+      final String bookingId =
+          (data['bookingId'] ?? document.id)
+              .toString()
+              .toLowerCase();
+
+      final bool searchMatch =
+          search.isEmpty ||
+              hotelName.contains(search) ||
+              roomName.contains(search) ||
+              bookingId.contains(search);
+
+      bool filterMatch = true;
+
+      if (_selectedFilter == 'active') {
+        filterMatch = _isActive(status);
+      } else if (_selectedFilter ==
+          'upcoming') {
+        filterMatch =
+            _isUpcomingStatus(status) &&
+                checkIn.isAfter(now);
+      } else if (_selectedFilter ==
+          'completed') {
+        filterMatch =
+            _isCompleted(status);
+      } else if (_selectedFilter ==
+          'cancelled') {
+        filterMatch =
+            status == 'cancelled' ||
+                status == 'rejected';
+      }
+
+      return searchMatch && filterMatch;
+    }).toList();
+  }
+
+  bool _isActive(String status) {
+    return status == 'checked_in' ||
+        status == 'active' ||
+        status == 'in_stay';
+  }
+
+  bool _isUpcomingStatus(String status) {
+    return status == 'pending' ||
+        status ==
+            'pending_hotel_confirmation' ||
+        status == 'confirmed';
+  }
+
+  bool _isCompleted(String status) {
+    return status == 'completed' ||
+        status == 'checked_out';
+  }
+
+  Widget _messageState({
+    required IconData icon,
+    required String title,
+    required String message,
+  }) {
+    return Center(
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.all(22),
+        decoration: BoxDecoration(
+          color: darkCard,
+          borderRadius: BorderRadius.circular(18),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, color: yellow, size: 46),
+            const SizedBox(height: 14),
+            Text(
+              title,
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              message,
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                color: Colors.grey,
+                height: 1.5,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  String _emptyMessage() {
+    switch (_selectedFilter) {
+      case 'active':
+        return 'No active hotel stay found.';
+      case 'upcoming':
+        return 'No upcoming hotel booking found.';
+      case 'completed':
+        return 'No completed hotel booking found.';
+      case 'cancelled':
+        return 'No cancelled hotel booking found.';
+      default:
+        return 'Your hotel bookings will appear here after booking confirmation.';
+    }
+  }
+
+  String _filterLabel(String filter) {
+    switch (filter) {
+      case 'upcoming':
+        return 'Upcoming';
+      case 'active':
+        return 'Active';
+      case 'completed':
+        return 'Completed';
+      case 'cancelled':
+        return 'Cancelled';
+      default:
+        return 'All';
+    }
+  }
+
+  Color _statusColor(String status) {
+    switch (status) {
+      case 'confirmed':
+      case 'checked_in':
+      case 'active':
+      case 'in_stay':
+      case 'completed':
+      case 'checked_out':
+        return Colors.green;
+      case 'cancelled':
+      case 'rejected':
+        return Colors.red;
+      case 'pending':
+      case 'pending_hotel_confirmation':
+        return Colors.orange;
+      default:
+        return yellow;
+    }
+  }
+
+  String _statusLabel(String status) {
+    switch (status) {
+      case 'pending_hotel_confirmation':
+      case 'pending':
+        return 'Pending';
+      case 'confirmed':
+        return 'Confirmed';
+      case 'checked_in':
+      case 'active':
+      case 'in_stay':
+        return 'Checked In';
+      case 'completed':
+      case 'checked_out':
+        return 'Completed';
+      case 'cancelled':
+        return 'Cancelled';
+      case 'rejected':
+        return 'Rejected';
+      case 'paid':
+        return 'Paid';
+      case 'cash_pending':
+        return 'Cash Pending';
+      case 'testing_bypassed':
+        return 'Testing Bypassed';
+      default:
+        return status;
+    }
+  }
+
+  int _readInt(
+    dynamic value, {
+    int fallback = 0,
+  }) {
+    if (value is int) return value;
+    if (value is num) return value.toInt();
+    return int.tryParse(
+          value?.toString() ?? '',
+        ) ??
+        fallback;
+  }
+
+  double _readNumber(dynamic value) {
+    if (value is num) return value.toDouble();
+    return double.tryParse(
+          value?.toString() ?? '',
+        ) ??
+        0;
+  }
+
+  DateTime _readDateTime(dynamic value) {
+    if (value is Timestamp) {
+      return value.toDate();
+    }
+    if (value is DateTime) return value;
+    if (value is String) {
+      return DateTime.tryParse(value) ??
+          DateTime.fromMillisecondsSinceEpoch(
+            0,
+          );
+    }
+    return DateTime.fromMillisecondsSinceEpoch(
+      0,
+    );
+  }
+
+  String _formatDate(DateTime value) {
+    if (value.millisecondsSinceEpoch == 0) {
+      return 'Not available';
+    }
+    final String day =
+        value.day.toString().padLeft(2, '0');
+    final String month =
+        value.month.toString().padLeft(2, '0');
+    return '$day/$month/${value.year}';
+  }
+
+  String _formatMoney(double amount) {
+    return amount
+        .toStringAsFixed(0)
+        .replaceAllMapped(
+          RegExp(
+            r'\B(?=(\d{3})+(?!\d))',
+          ),
+          (match) => ',',
+        );
+  }
+
+  String _shortId(String id) {
+    if (id.length <= 10) {
+      return id.toUpperCase();
+    }
+    return id
+        .substring(0, 10)
+        .toUpperCase();
+  }
+
+  void _showMessage(
+    String message, {
+    bool isError = false,
+  }) {
+    if (!mounted) return;
+
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Text(message),
+          backgroundColor:
+              isError ? Colors.red : darkCard,
+        ),
+      );
+  }
+}

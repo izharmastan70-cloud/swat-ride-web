@@ -1,0 +1,188 @@
+import 'package:flutter_test/flutter_test.dart';
+import 'package:swat_ride/ai_agent/models/agent_security_incident_idempotency_receipt.dart';
+import 'package:swat_ride/ai_agent/models/agent_security_incident_persistence_implementation_state.dart';
+import 'package:swat_ride/ai_agent/models/agent_security_incident_persistence_write_authorization.dart';
+
+void main() {
+  final DateTime issued = DateTime.utc(2026, 8, 26, 17);
+  final DateTime expires = DateTime.utc(2026, 8, 26, 17, 5);
+
+  AgentSecurityIncidentPersistenceWriteAuthorization authorization({
+    String idempotencyKey = 'idem.security.001',
+    String operation = AgentSecurityIncidentPersistenceOperation.create,
+    String actorRef = 'owner.safe.ref',
+  }) {
+    return AgentSecurityIncidentPersistenceWriteAuthorization(
+      operation: operation,
+      incidentId: 'incident.001',
+      actorRole: AgentSecurityIncidentPersistenceActorRole.owner,
+      actorRef: actorRef,
+      idempotencyKey: idempotencyKey,
+      issuedAtUtc: issued,
+      expiresAtUtc: expires,
+      freshTrustedIdentityVerified: true,
+      permissionGranted: true,
+      sensitiveApprovalVerified: true,
+      runtimeGateAllowed: true,
+      immutableAuditReady: true,
+    );
+  }
+
+  AgentSecurityIncidentIdempotencyReceipt receipt({
+    String requestBinding = '{"status":"OPEN"}',
+  }) {
+    final auth = authorization();
+
+    return AgentSecurityIncidentIdempotencyReceipt(
+      idempotencyKey: auth.idempotencyKey,
+      incidentId: auth.incidentId,
+      operation: auth.operation,
+      actorRole: auth.actorRole,
+      actorRef: auth.actorRef,
+      requestBinding: requestBinding,
+      authorizationIssuedAtUtc: auth.issuedAtUtc,
+      committedStatus: AgentSecurityIncidentIdempotencyReceipt.committed,
+    );
+  }
+
+  test('same idempotency key and exact binding is an idempotent replay', () {
+    final auth = authorization();
+    final value = receipt();
+
+    expect(
+      value.matches(
+        authorization: auth,
+        expectedIncidentId: auth.incidentId,
+        expectedRequestBinding: '{"status":"OPEN"}',
+      ),
+      isTrue,
+    );
+  });
+
+  test('same idempotency key with changed request binding is collision', () {
+    final auth = authorization();
+    final value = receipt();
+
+    expect(
+      value.matches(
+        authorization: auth,
+        expectedIncidentId: auth.incidentId,
+        expectedRequestBinding: '{"status":"CLOSED"}',
+      ),
+      isFalse,
+    );
+  });
+
+  test('same idempotency key cannot silently bind another operation', () {
+    final value = receipt();
+    final changed = authorization(
+      operation: AgentSecurityIncidentPersistenceOperation.lifecycleUpdate,
+    );
+
+    expect(
+      value.matches(
+        authorization: changed,
+        expectedIncidentId: changed.incidentId,
+        expectedRequestBinding: '{"status":"OPEN"}',
+      ),
+      isFalse,
+    );
+  });
+
+  test('same idempotency key cannot silently bind another actor', () {
+    final value = receipt();
+    final changed = authorization(actorRef: 'another.owner.ref');
+
+    expect(
+      value.matches(
+        authorization: changed,
+        expectedIncidentId: changed.incidentId,
+        expectedRequestBinding: '{"status":"OPEN"}',
+      ),
+      isFalse,
+    );
+  });
+
+  test('receipt round trip preserves immutable binding', () {
+    final original = receipt();
+    final restored = AgentSecurityIncidentIdempotencyReceipt.fromMap(
+      original.toMap(),
+    );
+
+    expect(restored.idempotencyKey, original.idempotencyKey);
+    expect(restored.incidentId, original.incidentId);
+    expect(restored.operation, original.operation);
+    expect(restored.actorRole, original.actorRole);
+    expect(restored.actorRef, original.actorRef);
+    expect(restored.requestBinding, original.requestBinding);
+    expect(restored.committedStatus, original.committedStatus);
+  });
+
+  test('invalid committed status fails closed', () {
+    final auth = authorization();
+
+    expect(
+      () => AgentSecurityIncidentIdempotencyReceipt(
+        idempotencyKey: auth.idempotencyKey,
+        incidentId: auth.incidentId,
+        operation: auth.operation,
+        actorRole: auth.actorRole,
+        actorRef: auth.actorRef,
+        requestBinding: '{"status":"OPEN"}',
+        authorizationIssuedAtUtc: auth.issuedAtUtc,
+        committedStatus: 'PENDING',
+      ),
+      throwsA(isA<AgentSecurityIncidentIdempotencyReceiptException>()),
+    );
+  });
+
+  test('offline replay hardening implementation is recorded', () {
+    expect(
+      AgentSecurityIncidentPersistenceImplementationState
+          .persistentIdempotencyReplayProtectionImplemented,
+      isTrue,
+    );
+  });
+
+  test('Step1I-N subsequently deployed replay-protection rules', () {
+    expect(
+      AgentSecurityIncidentPersistenceImplementationState
+          .persistentIdempotencyReplayRulesDeployed,
+      isTrue,
+    );
+    expect(
+      AgentSecurityIncidentPersistenceImplementationState
+          .runtimeActivationBlockedByReplayProtectionRulesPending,
+      isFalse,
+    );
+  });
+
+  test('runtime and production persistence remain inactive', () {
+    expect(
+      AgentSecurityIncidentPersistenceImplementationState
+          .repositoryRuntimeAttached,
+      isFalse,
+    );
+    expect(
+      AgentSecurityIncidentPersistenceImplementationState
+          .liveCollectionActivated,
+      isFalse,
+    );
+    expect(
+      AgentSecurityIncidentPersistenceImplementationState
+          .productionPersistenceActive,
+      isFalse,
+    );
+  });
+
+  test('SUGGEST_ONLY and AUTO remain unauthorized', () {
+    expect(
+      AgentSecurityIncidentPersistenceImplementationState.authorizesSuggestOnly,
+      isFalse,
+    );
+    expect(
+      AgentSecurityIncidentPersistenceImplementationState.authorizesAuto,
+      isFalse,
+    );
+  });
+}

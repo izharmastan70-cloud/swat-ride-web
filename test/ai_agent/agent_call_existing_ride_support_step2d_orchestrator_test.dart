@@ -1,0 +1,407 @@
+import 'package:flutter_test/flutter_test.dart';
+
+import 'package:swat_ride/ai_agent/constants/agent_call_constants.dart';
+import 'package:swat_ride/ai_agent/data/initial_agent_roles_seed.dart';
+import 'package:swat_ride/ai_agent/models/agent_call_existing_ride_support_contract.dart';
+import 'package:swat_ride/ai_agent/models/agent_call_existing_ride_support_orchestration.dart';
+import 'package:swat_ride/ai_agent/models/agent_master_settings.dart';
+import 'package:swat_ride/ai_agent/models/agent_role.dart';
+import 'package:swat_ride/ai_agent/services/agent_call_existing_ride_read_support_service.dart';
+import 'package:swat_ride/ai_agent/services/agent_call_existing_ride_support_orchestrator.dart';
+
+class _FakeReadGateway implements AgentCallExistingRideReadGateway {
+  _FakeReadGateway({this.found = true, this.throwOnRead = false});
+
+  final bool found;
+  final bool throwOnRead;
+  int calls = 0;
+
+  @override
+  Future<AgentCallExistingRideReadEvidence> readAuthorizedExistingRide({
+    required AgentCallExistingRideSupportRequest request,
+    required DateTime now,
+  }) async {
+    calls += 1;
+
+    if (throwOnRead) {
+      throw StateError('test gateway failure');
+    }
+
+    if (!found) {
+      return AgentCallExistingRideReadEvidence(
+        status: AgentCallExistingRideReadStatus.notFound,
+        code: 'TEST_NOT_FOUND',
+        verificationSource:
+            AgentCallExistingRideReadEvidence.trustedVerificationSource,
+        callSessionId: request.callSessionId,
+        requestedBy: request.requestedBy,
+        trustedCallerReferenceId: request.trustedCallerReferenceId,
+        trustedContactReferenceId: request.trustedContactReferenceId,
+        trustedRideReferenceId: request.trustedRideReferenceId,
+        verifiedAt: now,
+        expiresAt: now.add(const Duration(minutes: 1)),
+      );
+    }
+
+    return AgentCallExistingRideReadEvidence(
+      status: AgentCallExistingRideReadStatus.found,
+      code: 'TEST_FOUND',
+      verificationSource:
+          AgentCallExistingRideReadEvidence.trustedVerificationSource,
+      callSessionId: request.callSessionId,
+      requestedBy: request.requestedBy,
+      trustedCallerReferenceId: request.trustedCallerReferenceId,
+      trustedContactReferenceId: request.trustedContactReferenceId,
+      trustedRideReferenceId: request.trustedRideReferenceId,
+      verifiedAt: now,
+      expiresAt: now.add(const Duration(minutes: 1)),
+      snapshot: AgentCallExistingRideSupportSnapshot(
+        trustedRideReferenceId: request.trustedRideReferenceId,
+        rideStatus: 'driver_arriving',
+        vehicleName: 'Car',
+        driverAssigned: true,
+        driverDisplayName: 'Driver A',
+        driverVehicleType: 'Sedan',
+        driverVehicleNumber: 'SWAT-123',
+        estimatedFare: 650,
+        paymentStatus: 'pending',
+        observedAt: now,
+      ),
+    );
+  }
+}
+
+AgentRole _callRole() {
+  return buildInitialAgentRoles().firstWhere(
+    (AgentRole role) => role.roleId == 'call_agent',
+  );
+}
+
+AgentMasterSettings _settings({
+  bool masterEnabled = true,
+  bool callAgentEnabled = true,
+}) {
+  final DateTime now = DateTime.utc(2026, 8, 18, 9);
+
+  return AgentMasterSettings(
+    masterEnabled: masterEnabled,
+    emergencyReadOnly: false,
+    freeAiEnabled: true,
+    localAiEnabled: false,
+    paidCodeAiEnabled: false,
+    callAgentEnabled: callAgentEnabled,
+    approvalEngineEnabled: true,
+    auditLoggingEnabled: true,
+    monthlyPaidCodeBudgetRs: 0,
+    paidCodeBudgetUsedRs: 0,
+    emergencyActivatedAt: null,
+    emergencyActivatedBy: '',
+    emergencyReason: '',
+    createdAt: now,
+    updatedAt: null,
+  );
+}
+
+AgentCallExistingRideSupportRequest _request({String caller = 'caller-ref-1'}) {
+  return AgentCallExistingRideSupportRequest(
+    callSessionId: 'call-session-1',
+    requestedBy: 'trusted-call-actor-1',
+    trustedCallerReferenceId: caller,
+    trustedContactReferenceId: 'contact-ref-1',
+    trustedRideReferenceId: 'ride-ref-1',
+    intent: AgentCallExistingRideSupportIntent.status,
+  );
+}
+
+AgentCallExistingRideSupportOrchestrator _orchestrator(
+  _FakeReadGateway gateway,
+) {
+  return AgentCallExistingRideSupportOrchestrator(
+    readSupportService: AgentCallExistingRideReadSupportService(
+      gateway: gateway,
+    ),
+  );
+}
+
+void main() {
+  group('Phase 49 Stage 2 Step 2D orchestrator + safe escalation', () {
+    final DateTime now = DateTime.utc(2026, 8, 18, 9);
+
+    test('normal authorized trusted Ride read answers at AI level', () async {
+      final _FakeReadGateway gateway = _FakeReadGateway();
+      final orchestrator = _orchestrator(gateway);
+
+      final result = await orchestrator.handle(
+        settings: _settings(),
+        role: _callRole(),
+        request: _request(),
+        now: now,
+      );
+
+      expect(result.answered, isTrue);
+      expect(result.escalationRecommended, isFalse);
+      expect(result.escalationLevel, AgentCallEscalationLevel.ai);
+      expect(result.supportResult?.snapshot?.rideStatus, 'driver_arriving');
+      expect(gateway.calls, 1);
+    });
+
+    test(
+      'failed trusted authorization does not read Ride and recommends human support',
+      () async {
+        final _FakeReadGateway gateway = _FakeReadGateway();
+        final orchestrator = _orchestrator(gateway);
+
+        final result = await orchestrator.handle(
+          settings: _settings(),
+          role: _callRole(),
+          request: _request(caller: ''),
+          now: now,
+        );
+
+        expect(result.escalated, isTrue);
+        expect(result.authorizationAllowed, isFalse);
+        expect(result.readAttempted, isFalse);
+        expect(result.supportResult, isNull);
+        expect(result.escalationLevel, AgentCallEscalationLevel.humanSupport);
+        expect(gateway.calls, 0);
+      },
+    );
+
+    test(
+      'Call Agent master OFF does not read Ride and recommends human support',
+      () async {
+        final _FakeReadGateway gateway = _FakeReadGateway();
+        final orchestrator = _orchestrator(gateway);
+
+        final result = await orchestrator.handle(
+          settings: _settings(callAgentEnabled: false),
+          role: _callRole(),
+          request: _request(),
+          now: now,
+        );
+
+        expect(result.escalated, isTrue);
+        expect(result.readAttempted, isFalse);
+        expect(result.escalationLevel, AgentCallEscalationLevel.humanSupport);
+        expect(gateway.calls, 0);
+      },
+    );
+
+    test(
+      'trusted read unavailable recommends human support without snapshot',
+      () async {
+        final _FakeReadGateway gateway = _FakeReadGateway(found: false);
+        final orchestrator = _orchestrator(gateway);
+
+        final result = await orchestrator.handle(
+          settings: _settings(),
+          role: _callRole(),
+          request: _request(),
+          now: now,
+        );
+
+        expect(result.escalated, isTrue);
+        expect(result.authorizationAllowed, isTrue);
+        expect(result.readAttempted, isTrue);
+        expect(result.supportResult, isNull);
+        expect(result.escalationLevel, AgentCallEscalationLevel.humanSupport);
+        expect(gateway.calls, 1);
+      },
+    );
+
+    test(
+      'gateway exception recommends human support and exposes no Ride snapshot',
+      () async {
+        final _FakeReadGateway gateway = _FakeReadGateway(throwOnRead: true);
+        final orchestrator = _orchestrator(gateway);
+
+        final result = await orchestrator.handle(
+          settings: _settings(),
+          role: _callRole(),
+          request: _request(),
+          now: now,
+        );
+
+        expect(result.escalated, isTrue);
+        expect(result.escalationLevel, AgentCallEscalationLevel.humanSupport);
+        expect(result.supportResult, isNull);
+        expect(gateway.calls, 1);
+      },
+    );
+
+    test('payment dispute routes Manager/Admin without reading Ride', () async {
+      final _FakeReadGateway gateway = _FakeReadGateway();
+      final orchestrator = _orchestrator(gateway);
+
+      final result = await orchestrator.handle(
+        settings: _settings(),
+        role: _callRole(),
+        request: _request(),
+        now: now,
+        concern: const AgentCallExistingRideConcern(
+          kind: AgentCallExistingRideConcernKind.paymentDispute,
+        ),
+      );
+
+      expect(result.escalated, isTrue);
+      expect(result.readAttempted, isFalse);
+      expect(result.escalationLevel, AgentCallEscalationLevel.managerAdmin);
+      expect(gateway.calls, 0);
+    });
+
+    test('emergency routes Manager/Admin without reading Ride', () async {
+      final _FakeReadGateway gateway = _FakeReadGateway();
+      final orchestrator = _orchestrator(gateway);
+
+      final result = await orchestrator.handle(
+        settings: _settings(),
+        role: _callRole(),
+        request: _request(),
+        now: now,
+        concern: const AgentCallExistingRideConcern(
+          kind: AgentCallExistingRideConcernKind.emergency,
+        ),
+      );
+
+      expect(result.escalated, isTrue);
+      expect(result.readAttempted, isFalse);
+      expect(result.escalationLevel, AgentCallEscalationLevel.managerAdmin);
+      expect(gateway.calls, 0);
+    });
+
+    test('critical concern routes Owner without reading Ride', () async {
+      final _FakeReadGateway gateway = _FakeReadGateway();
+      final orchestrator = _orchestrator(gateway);
+
+      final result = await orchestrator.handle(
+        settings: _settings(),
+        role: _callRole(),
+        request: _request(),
+        now: now,
+        concern: const AgentCallExistingRideConcern(critical: true),
+      );
+
+      expect(result.escalated, isTrue);
+      expect(result.readAttempted, isFalse);
+      expect(result.escalationLevel, AgentCallEscalationLevel.owner);
+      expect(gateway.calls, 0);
+    });
+
+    test('legal and fraud concerns route Owner without Ride read', () async {
+      for (final String kind in <String>[
+        AgentCallExistingRideConcernKind.legal,
+        AgentCallExistingRideConcernKind.fraud,
+      ]) {
+        final _FakeReadGateway gateway = _FakeReadGateway();
+        final orchestrator = _orchestrator(gateway);
+
+        final result = await orchestrator.handle(
+          settings: _settings(),
+          role: _callRole(),
+          request: _request(),
+          now: now,
+          concern: AgentCallExistingRideConcern(kind: kind),
+        );
+
+        expect(result.escalationLevel, AgentCallEscalationLevel.owner);
+        expect(result.readAttempted, isFalse);
+        expect(gateway.calls, 0);
+      }
+    });
+
+    test('serious normal concern routes Manager/Admin', () async {
+      final _FakeReadGateway gateway = _FakeReadGateway();
+      final orchestrator = _orchestrator(gateway);
+
+      final result = await orchestrator.handle(
+        settings: _settings(),
+        role: _callRole(),
+        request: _request(),
+        now: now,
+        concern: const AgentCallExistingRideConcern(serious: true),
+      );
+
+      expect(result.escalated, isTrue);
+      expect(result.escalationLevel, AgentCallEscalationLevel.managerAdmin);
+      expect(result.readAttempted, isFalse);
+      expect(gateway.calls, 0);
+    });
+
+    test('invalid concern blocks without reading Ride', () async {
+      final _FakeReadGateway gateway = _FakeReadGateway();
+      final orchestrator = _orchestrator(gateway);
+
+      final result = await orchestrator.handle(
+        settings: _settings(),
+        role: _callRole(),
+        request: _request(),
+        now: now,
+        concern: const AgentCallExistingRideConcern(kind: 'UNKNOWN'),
+      );
+
+      expect(result.blocked, isTrue);
+      expect(result.readAttempted, isFalse);
+      expect(result.escalationRecommended, isFalse);
+      expect(gateway.calls, 0);
+    });
+
+    test('concern only affects escalation and never grants Ride authority', () {
+      const concern = AgentCallExistingRideConcern(
+        kind: AgentCallExistingRideConcernKind.emergency,
+        serious: true,
+      );
+
+      expect(concern.grantsRideReadAuthority, isFalse);
+      expect(concern.grantsRideWriteAuthority, isFalse);
+    });
+
+    test('orchestrator never executes transfer or business mutation', () {
+      final orchestrator = _orchestrator(_FakeReadGateway());
+
+      expect(orchestrator.escalationIsRecommendationOnly, isTrue);
+      expect(orchestrator.executesTransferAction, isFalse);
+      expect(orchestrator.requiresTransferPermissionForRecommendation, isFalse);
+
+      expect(orchestrator.concernCanGrantRideReadAuthority, isFalse);
+      expect(orchestrator.concernCanGrantRideWriteAuthority, isFalse);
+      expect(orchestrator.transcriptCanGrantAuthority, isFalse);
+      expect(orchestrator.voiceCanGrantAuthority, isFalse);
+      expect(orchestrator.rawPhoneCanGrantAuthority, isFalse);
+
+      expect(orchestrator.writesRide, isFalse);
+      expect(orchestrator.cancelsRide, isFalse);
+      expect(orchestrator.reassignsDriver, isFalse);
+      expect(orchestrator.changesPayment, isFalse);
+      expect(orchestrator.issuesRefund, isFalse);
+      expect(orchestrator.changesFare, isFalse);
+
+      expect(orchestrator.invokesFirestoreDirectly, isFalse);
+      expect(orchestrator.invokesFirebaseAuthDirectly, isFalse);
+      expect(orchestrator.invokesRideServiceDirectly, isFalse);
+      expect(orchestrator.invokesTelephonyProvider, isFalse);
+      expect(orchestrator.sendsSms, isFalse);
+    });
+
+    test(
+      'safe result map explicitly reports no transfer/write execution',
+      () async {
+        final result = await _orchestrator(_FakeReadGateway()).handle(
+          settings: _settings(),
+          role: _callRole(),
+          request: _request(),
+          now: now,
+        );
+
+        final map = result.toSafeMap();
+
+        expect(map['transferExecuted'], isFalse);
+        expect(map['rideWritePerformed'], isFalse);
+        expect(map['rideCancelled'], isFalse);
+        expect(map['driverReassigned'], isFalse);
+        expect(map['paymentChanged'], isFalse);
+        expect(map['refundIssued'], isFalse);
+        expect(map['fareChanged'], isFalse);
+      },
+    );
+  });
+}

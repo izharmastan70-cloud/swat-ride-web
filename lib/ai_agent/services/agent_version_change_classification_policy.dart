@@ -1,0 +1,70 @@
+import '../constants/agent_versioning_constants.dart';
+import '../models/agent_version_change_classification.dart';
+
+class AgentVersionChangeClassificationPolicy {
+  const AgentVersionChangeClassificationPolicy();
+
+  AgentVersionChangeClassification classify(String changeType) {
+    if (!AgentVersionChangeType.values.contains(changeType)) {
+      throw const FormatException('Unknown Agent version change type.');
+    }
+
+    if (AgentVersionChangeType.protectedAuthorityValues.contains(changeType)) {
+      return AgentVersionChangeClassification(
+        changeType: changeType,
+        risk: AgentVersionChangeRisk.blockedProtectedAuthority,
+        versionable: false,
+        offlineEvaluationRequired: false,
+        humanApprovalRequired: true,
+        securityReviewRequired: true,
+      );
+    }
+
+    switch (changeType) {
+      case AgentVersionChangeType.behaviorPrompt:
+      case AgentVersionChangeType.modelOrProvider:
+      case AgentVersionChangeType.orchestrationStrategy:
+        return AgentVersionChangeClassification(
+          changeType: changeType,
+          risk: AgentVersionChangeRisk.high,
+          versionable: true,
+          offlineEvaluationRequired: true,
+          humanApprovalRequired: true,
+          securityReviewRequired: true,
+        );
+
+      case AgentVersionChangeType.toolSelectionPolicy:
+      case AgentVersionChangeType.knowledgeReference:
+        return AgentVersionChangeClassification(
+          changeType: changeType,
+          risk: AgentVersionChangeRisk.medium,
+          versionable: true,
+          offlineEvaluationRequired: true,
+          humanApprovalRequired: true,
+          securityReviewRequired:
+              changeType == AgentVersionChangeType.toolSelectionPolicy,
+        );
+
+      case AgentVersionChangeType.outputFormatting:
+        return AgentVersionChangeClassification(
+          changeType: changeType,
+          risk: AgentVersionChangeRisk.low,
+          versionable: true,
+          offlineEvaluationRequired: true,
+          humanApprovalRequired: false,
+          securityReviewRequired: false,
+        );
+    }
+
+    throw StateError('Unreachable Agent version change type.');
+  }
+
+  bool get grantsPermission => false;
+  bool get consumesApproval => false;
+  bool get trainsModel => false;
+  bool get mutatesPrompt => false;
+  bool get changesProviderPolicy => false;
+  bool get changesCostLimits => false;
+  bool get activatesProduction => false;
+  bool get deploysVersion => false;
+}

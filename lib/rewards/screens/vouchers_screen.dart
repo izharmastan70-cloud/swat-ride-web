@@ -1,0 +1,703 @@
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+
+import '../models/reward_point_model.dart';
+import '../models/voucher_model.dart';
+import '../services/reward_service.dart';
+import '../services/voucher_service.dart';
+import '../../help/widgets/contextual_video_guide_button.dart';
+
+/// Displays user-eligible vouchers. Selection never redeems a voucher or
+/// credits reward points automatically; the booking flow must confirm it.
+class VouchersScreen extends StatefulWidget {
+  const VouchersScreen({
+    super.key,
+    required this.userId,
+    this.module,
+    this.bookingAmount = 0,
+    this.voucherService,
+    this.rewardService,
+    this.onVoucherSelected,
+  });
+
+  final String userId;
+  final RewardModule? module;
+  final double bookingAmount;
+  final VoucherService? voucherService;
+  final RewardService? rewardService;
+  final ValueChanged<VoucherModel>? onVoucherSelected;
+
+  @override
+  State<VouchersScreen> createState() => _VouchersScreenState();
+}
+
+class _VouchersScreenState extends State<VouchersScreen> {
+  static const Color _navy = Color(0xFF09233F);
+  static const Color _blue = Color(0xFF1264E5);
+  static const Color _background = Color(0xFFF5F7FB);
+
+  late final VoucherService _voucherService;
+  late final RewardService _rewardService;
+  final TextEditingController _searchController = TextEditingController();
+
+  List<VoucherModel> _allVouchers = [];
+  List<VoucherModel> _visibleVouchers = [];
+  bool _isLoading = true;
+  bool _featureEnabled = true;
+  String? _errorMessage;
+
+  @override
+  void initState() {
+    super.initState();
+    _voucherService = widget.voucherService ?? VoucherService();
+    _rewardService = widget.rewardService ?? RewardService();
+    _loadVouchers();
+  }
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    super.dispose();
+  }
+
+  List<RewardModule> get _requestedModules {
+    if (widget.module != null) return [widget.module!];
+    return RewardModule.values
+        .where(
+          (module) =>
+              module != RewardModule.all && module != RewardModule.future,
+        )
+        .toList();
+  }
+
+  Future<void> _loadVouchers() async {
+    if (widget.userId.trim().isEmpty) {
+      setState(() {
+        _isLoading = false;
+        _errorMessage = 'User ID is required to load vouchers.';
+      });
+      return;
+    }
+
+    setState(() {
+      _isLoading = true;
+      _errorMessage = null;
+    });
+
+    try {
+      final settings = await _rewardService.getSettings();
+      final enabledModules = _requestedModules
+          .where(settings.isVoucherEnabledForModule)
+          .toList();
+
+      if (enabledModules.isEmpty) {
+        if (!mounted) return;
+        setState(() {
+          _featureEnabled = false;
+          _allVouchers = [];
+          _visibleVouchers = [];
+          _isLoading = false;
+        });
+        return;
+      }
+
+      final byId = <String, VoucherModel>{};
+
+      if (widget.bookingAmount > 0) {
+        final results = await Future.wait(
+          enabledModules.map((module) {
+            return _voucherService.getAvailableVouchers(
+              userId: widget.userId,
+              module: module,
+              bookingAmount: widget.bookingAmount,
+            );
+          }),
+        );
+        for (final vouchers in results) {
+          for (final voucher in vouchers) {
+            byId[voucher.id] = voucher;
+          }
+        }
+      } else {
+        final vouchers = await _voucherService.getAllVouchers();
+        for (final voucher in vouchers) {
+          final moduleAllowed = enabledModules.any(voucher.supportsModule);
+          if (voucher.isCurrentlyValid &&
+              voucher.isAssignedToUser(widget.userId) &&
+              moduleAllowed) {
+            byId[voucher.id] = voucher;
+          }
+        }
+      }
+
+      final vouchers = byId.values.toList()
+        ..sort((a, b) => a.expiryDate.compareTo(b.expiryDate));
+
+      if (!mounted) return;
+      setState(() {
+        _featureEnabled = true;
+        _allVouchers = vouchers;
+        _isLoading = false;
+      });
+      _applySearch();
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _isLoading = false;
+        _errorMessage = error.toString().replaceFirst('Exception: ', '');
+      });
+    }
+  }
+
+  void _applySearch([String? value]) {
+    final search = (value ?? _searchController.text).trim().toLowerCase();
+    setState(() {
+      _visibleVouchers = search.isEmpty
+          ? List<VoucherModel>.from(_allVouchers)
+          : _allVouchers.where((voucher) {
+              return voucher.normalizedCode.toLowerCase().contains(search) ||
+                  voucher.title.toLowerCase().contains(search) ||
+                  voucher.description.toLowerCase().contains(search) ||
+                  voucher.type.name.toLowerCase().contains(search);
+            }).toList();
+    });
+  }
+
+  Future<void> _copyCode(VoucherModel voucher) async {
+    await Clipboard.setData(ClipboardData(text: voucher.normalizedCode));
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(content: Text('${voucher.normalizedCode} copied')),
+      );
+  }
+
+  void _selectVoucher(VoucherModel voucher) {
+    if (widget.onVoucherSelected != null) {
+      widget.onVoucherSelected!(voucher);
+      return;
+    }
+    _copyCode(voucher);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: _background,
+      appBar: AppBar(
+        backgroundColor: Colors.white,
+        foregroundColor: _navy,
+        elevation: 0,
+        title: const Text(
+          'My Vouchers',
+          style: TextStyle(fontWeight: FontWeight.w800),
+        ),
+        actions: [
+          IconButton(
+            tooltip: 'Refresh',
+            onPressed: _isLoading ? null : _loadVouchers,
+            icon: const Icon(Icons.refresh_rounded),
+          ),
+        ],
+      ),
+      body: SafeArea(child: _buildBody()),
+    );
+  }
+
+  Widget _buildBody() {
+    if (_isLoading) {
+      return const Center(child: CircularProgressIndicator());
+    }
+
+    if (_errorMessage != null) {
+      return _StateMessage(
+        icon: Icons.cloud_off_rounded,
+        title: 'Vouchers unavailable',
+        message: _errorMessage!.isEmpty
+            ? 'Vouchers could not be loaded.'
+            : _errorMessage!,
+        onRetry: _loadVouchers,
+      );
+    }
+
+    if (!_featureEnabled) {
+      return const _StateMessage(
+        icon: Icons.pause_circle_outline_rounded,
+        title: 'Vouchers are turned off',
+        message: 'Vouchers are currently disabled by Admin for this service.',
+      );
+    }
+
+    return RefreshIndicator(
+      onRefresh: _loadVouchers,
+      child: ListView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
+        children: [
+          _buildHeader(),
+          const SizedBox(height: 16),
+          ContextualVideoGuideButton(
+            module: 'rewards',
+            feature: 'vouchers',
+            intents: const <String>[
+              'available_vouchers',
+              'use_voucher',
+              'voucher_eligibility',
+              'voucher_expiry',
+              'voucher_terms',
+            ],
+            label: 'Need Help? Watch Voucher Guide',
+          ),
+          const SizedBox(height: 16),
+          TextField(
+            controller: _searchController,
+            onChanged: _applySearch,
+            decoration: InputDecoration(
+              hintText: 'Search vouchers',
+              prefixIcon: const Icon(Icons.search_rounded),
+              suffixIcon: _searchController.text.isEmpty
+                  ? null
+                  : IconButton(
+                      onPressed: () {
+                        _searchController.clear();
+                        _applySearch('');
+                      },
+                      icon: const Icon(Icons.close_rounded),
+                    ),
+              filled: true,
+              fillColor: Colors.white,
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(16),
+                borderSide: BorderSide.none,
+              ),
+              enabledBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(16),
+                borderSide: const BorderSide(color: Color(0xFFE5EAF2)),
+              ),
+            ),
+          ),
+          const SizedBox(height: 18),
+          Text(
+            '${_visibleVouchers.length} available',
+            style: const TextStyle(
+              color: _navy,
+              fontSize: 18,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+          const SizedBox(height: 10),
+          if (_visibleVouchers.isEmpty)
+            const _EmptyVouchers()
+          else
+            for (final voucher in _visibleVouchers) ...[
+              _VoucherCard(
+                voucher: voucher,
+                onCopy: () => _copyCode(voucher),
+                onSelect: () => _selectVoucher(voucher),
+                selectionMode: widget.onVoucherSelected != null,
+              ),
+              const SizedBox(height: 12),
+            ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildHeader() {
+    return Container(
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        gradient: const LinearGradient(
+          colors: [_navy, _blue],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        borderRadius: BorderRadius.circular(22),
+        boxShadow: const [
+          BoxShadow(
+            color: Color(0x291264E5),
+            blurRadius: 20,
+            offset: Offset(0, 10),
+          ),
+        ],
+      ),
+      child: const Row(
+        children: [
+          CircleAvatar(
+            radius: 28,
+            backgroundColor: Color(0x24FFFFFF),
+            child: Icon(
+              Icons.card_giftcard_rounded,
+              color: Color(0xFFFFD166),
+              size: 30,
+            ),
+          ),
+          SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'A gift from SWAT',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 20,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+                SizedBox(height: 4),
+                Text(
+                  'Birthday, loyalty and special-event vouchers in one place.',
+                  style: TextStyle(color: Colors.white70, height: 1.3),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _VoucherCard extends StatelessWidget {
+  const _VoucherCard({
+    required this.voucher,
+    required this.onCopy,
+    required this.onSelect,
+    required this.selectionMode,
+  });
+
+  final VoucherModel voucher;
+  final VoidCallback onCopy;
+  final VoidCallback onSelect;
+  final bool selectionMode;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: const Color(0xFFE2E8F1)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.all(16),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Container(
+                  width: 60,
+                  height: 60,
+                  decoration: BoxDecoration(
+                    gradient: const LinearGradient(
+                      colors: [Color(0xFFEAF3FF), Color(0xFFFFF3D1)],
+                    ),
+                    borderRadius: BorderRadius.circular(18),
+                  ),
+                  child: Center(
+                    child: Text(
+                      _benefitLabel(voucher),
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(
+                        color: Color(0xFF1264E5),
+                        fontSize: 14,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 13),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              voucher.title.trim().isEmpty
+                                  ? _label(voucher.type.name)
+                                  : voucher.title,
+                              style: const TextStyle(
+                                color: Color(0xFF09233F),
+                                fontSize: 17,
+                                fontWeight: FontWeight.w900,
+                              ),
+                            ),
+                          ),
+                          _TypeBadge(type: voucher.type),
+                        ],
+                      ),
+                      if (voucher.description.trim().isNotEmpty) ...[
+                        const SizedBox(height: 5),
+                        Text(
+                          voucher.description,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            color: Color(0xFF64728A),
+                            height: 1.3,
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: Wrap(
+              spacing: 7,
+              runSpacing: 7,
+              children: [
+                if (voucher.minimumAmount > 0)
+                  _InfoPill(text: 'Min PKR ${_money(voucher.minimumAmount)}'),
+                if (voucher.maximumDiscount != null)
+                  _InfoPill(
+                    text: 'Max PKR ${_money(voucher.maximumDiscount!)}',
+                  ),
+                _InfoPill(text: _expiryText(voucher.expiryDate)),
+                _InfoPill(text: _moduleText(voucher.supportedModules)),
+              ],
+            ),
+          ),
+          const SizedBox(height: 14),
+          const Divider(height: 1, color: Color(0xFFE9EDF4)),
+          Padding(
+            padding: const EdgeInsets.all(12),
+            child: Row(
+              children: [
+                Expanded(
+                  child: InkWell(
+                    onTap: onCopy,
+                    borderRadius: BorderRadius.circular(12),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 11,
+                      ),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFF4F7FB),
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: const Color(0xFFDCE3ED)),
+                      ),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Flexible(
+                            child: Text(
+                              voucher.normalizedCode,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                color: Color(0xFF09233F),
+                                fontWeight: FontWeight.w900,
+                                letterSpacing: 1,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 7),
+                          const Icon(Icons.copy_rounded, size: 17),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+                if (selectionMode) ...[
+                  const SizedBox(width: 10),
+                  FilledButton(
+                    onPressed: onSelect,
+                    child: const Text('Select'),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _TypeBadge extends StatelessWidget {
+  const _TypeBadge({required this.type});
+  final VoucherType type;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      margin: const EdgeInsets.only(left: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: const Color(0xFFFFF3D1),
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Text(
+        _label(type.name),
+        style: const TextStyle(
+          color: Color(0xFF9A6A00),
+          fontSize: 10,
+          fontWeight: FontWeight.w800,
+        ),
+      ),
+    );
+  }
+}
+
+class _InfoPill extends StatelessWidget {
+  const _InfoPill({required this.text});
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF4F7FB),
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Text(
+        text,
+        style: const TextStyle(color: Color(0xFF5D6B82), fontSize: 11),
+      ),
+    );
+  }
+}
+
+class _EmptyVouchers extends StatelessWidget {
+  const _EmptyVouchers();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Padding(
+      padding: EdgeInsets.symmetric(vertical: 56, horizontal: 24),
+      child: Column(
+        children: [
+          Icon(
+            Icons.card_giftcard_outlined,
+            size: 66,
+            color: Color(0xFF9AA5B5),
+          ),
+          SizedBox(height: 15),
+          Text(
+            'No vouchers available',
+            style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800),
+          ),
+          SizedBox(height: 7),
+          Text(
+            'Eligible birthday, festival and loyalty vouchers will appear here.',
+            textAlign: TextAlign.center,
+            style: TextStyle(color: Color(0xFF6A7890)),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _StateMessage extends StatelessWidget {
+  const _StateMessage({
+    required this.icon,
+    required this.title,
+    required this.message,
+    this.onRetry,
+  });
+
+  final IconData icon;
+  final String title;
+  final String message;
+  final VoidCallback? onRetry;
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.all(28),
+        child: Column(
+          children: [
+            Icon(icon, size: 62, color: const Color(0xFF9AA5B5)),
+            const SizedBox(height: 15),
+            Text(
+              title,
+              textAlign: TextAlign.center,
+              style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w800),
+            ),
+            const SizedBox(height: 8),
+            Text(message, textAlign: TextAlign.center),
+            if (onRetry != null) ...[
+              const SizedBox(height: 20),
+              FilledButton(onPressed: onRetry, child: const Text('Try again')),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+String _benefitLabel(VoucherModel voucher) {
+  switch (voucher.benefitType) {
+    case VoucherBenefitType.percentageDiscount:
+      return '${_money(voucher.benefitValue)}%\nOFF';
+    case VoucherBenefitType.fixedDiscount:
+      return 'PKR\n${_money(voucher.benefitValue)}';
+    case VoucherBenefitType.freeDelivery:
+      return 'FREE\nDELIVERY';
+    case VoucherBenefitType.rewardPoints:
+      return '${voucher.rewardPoints}\nPOINTS';
+  }
+}
+
+String _moduleText(List<RewardModule> modules) {
+  if (modules.contains(RewardModule.all)) return 'All services';
+  if (modules.isEmpty) return 'Selected services';
+  if (modules.length == 1) return _label(modules.first.name);
+  return '${modules.length} services';
+}
+
+String _expiryText(DateTime expiry) {
+  const months = [
+    'Jan',
+    'Feb',
+    'Mar',
+    'Apr',
+    'May',
+    'Jun',
+    'Jul',
+    'Aug',
+    'Sep',
+    'Oct',
+    'Nov',
+    'Dec',
+  ];
+  return 'Until ${expiry.day} ${months[expiry.month - 1]} ${expiry.year}';
+}
+
+String _money(double value) {
+  return value == value.roundToDouble()
+      ? value.toInt().toString()
+      : value.toStringAsFixed(2);
+}
+
+String _label(String value) {
+  final spaced = value
+      .replaceAllMapped(
+        RegExp(r'([a-z])([A-Z])'),
+        (match) => '${match[1]} ${match[2]}',
+      )
+      .replaceAll('_', ' ')
+      .trim();
+  if (spaced.isEmpty) return 'Other';
+  return spaced
+      .split(' ')
+      .map((word) {
+        if (word.isEmpty) return word;
+        return '${word[0].toUpperCase()}${word.substring(1)}';
+      })
+      .join(' ');
+}

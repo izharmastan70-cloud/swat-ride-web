@@ -1,0 +1,266 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
+
+import '../models/agent_role.dart';
+
+// =========================================================
+// AGENT ROLE SERVICE
+// =========================================================
+//
+// Firestore collection: agent_roles only.
+// Phase 1 client-side validation is NOT a substitute for Firestore
+// Security Rules / trusted backend enforcement.
+
+class AgentRoleService {
+  final FirebaseFirestore _firestore = FirebaseFirestore.instance;
+
+  static const String _collectionPath = 'agent_roles';
+
+  CollectionReference<Map<String, dynamic>> get _collection =>
+      _firestore.collection(_collectionPath);
+
+  AgentRole _readSafely(
+    DocumentSnapshot<Map<String, dynamic>> snapshot,
+  ) {
+    final AgentRole raw = AgentRole.fromSnapshot(snapshot);
+    return raw.isValid ? raw : raw.failClosed();
+  }
+
+  void _ensureOrdinaryWriteAllowed(AgentRole role) {
+    if (role.isFailClosed) {
+      throw const AgentRoleValidationException(
+        'Corrupted agent role is locked. Repair the stored role before '
+        'changing it.',
+      );
+    }
+    role.validate();
+  }
+
+  Future<AgentRole?> getRole(String roleId) async {
+    final DocumentSnapshot<Map<String, dynamic>> snapshot =
+        await _collection.doc(roleId).get();
+
+    if (!snapshot.exists) return null;
+    return _readSafely(snapshot);
+  }
+
+  Future<List<AgentRole>> getAllRoles() async {
+    final QuerySnapshot<Map<String, dynamic>> snapshot =
+        await _collection.get();
+
+    final List<AgentRole> roles = snapshot.docs
+        .map(
+          (QueryDocumentSnapshot<Map<String, dynamic>> doc) =>
+              _readSafely(doc),
+        )
+        .toList(growable: false);
+
+    return roles;
+  }
+
+  Stream<List<AgentRole>> watchAllRoles() {
+    return _collection.orderBy('roleId').snapshots().map(
+      (QuerySnapshot<Map<String, dynamic>> snapshot) {
+        final List<AgentRole> roles = snapshot.docs
+            .map(
+              (QueryDocumentSnapshot<Map<String, dynamic>> doc) =>
+                  _readSafely(doc),
+            )
+            .toList(growable: false);
+        return roles;
+      },
+    );
+  }
+
+  Stream<AgentRole?> watchRole(String roleId) {
+    return _collection.doc(roleId).snapshots().map(
+      (DocumentSnapshot<Map<String, dynamic>> snapshot) {
+        if (!snapshot.exists) return null;
+        return _readSafely(snapshot);
+      },
+    );
+  }
+
+  Future<void> createRole(AgentRole role) async {
+    _ensureOrdinaryWriteAllowed(role);
+    await _collection.doc(role.roleId).set(role.toMap());
+  }
+
+  Future<void> createRoleIfNotExists(AgentRole role) async {
+    _ensureOrdinaryWriteAllowed(role);
+
+    final DocumentSnapshot<Map<String, dynamic>> existing =
+        await _collection.doc(role.roleId).get();
+
+    if (existing.exists) return;
+    await _collection.doc(role.roleId).set(role.toMap());
+  }
+
+  Future<void> updateRole(AgentRole role) async {
+    _ensureOrdinaryWriteAllowed(role);
+
+    final AgentRole updated = role.copyWith(updatedAt: DateTime.now());
+    _ensureOrdinaryWriteAllowed(updated);
+
+    await _collection.doc(updated.roleId).set(
+          updated.toMap(),
+          SetOptions(merge: true),
+        );
+  }
+
+  Future<void> syncRolePermissions({
+    required String roleId,
+    required List<String> allowedActions,
+    required List<String> approvalRequiredActions,
+    required List<String> forbiddenActions,
+    String? description,
+  }) async {
+    final String normalizedRoleId = roleId.trim();
+
+    if (normalizedRoleId.isEmpty) {
+      throw const AgentRoleValidationException(
+        'roleId is required for permission synchronization.',
+      );
+    }
+
+    List<String> normalizeActions(
+      List<String> actions,
+      String fieldName,
+    ) {
+      final List<String> normalized = actions
+          .map((String action) => action.trim())
+          .where((String action) => action.isNotEmpty)
+          .toSet()
+          .toList(growable: false);
+
+      if (normalized.length != actions.length) {
+        throw AgentRoleValidationException(
+          '$fieldName contains an empty or duplicate action ID.',
+        );
+      }
+
+      return List<String>.unmodifiable(normalized);
+    }
+
+    final List<String> normalizedAllowed = normalizeActions(
+      allowedActions,
+      'allowedActions',
+    );
+
+    final List<String> normalizedApprovalRequired =
+        normalizeActions(
+      approvalRequiredActions,
+      'approvalRequiredActions',
+    );
+
+    final List<String> normalizedForbidden = normalizeActions(
+      forbiddenActions,
+      'forbiddenActions',
+    );
+
+    final Set<String> allowedSet = normalizedAllowed.toSet();
+    final Set<String> approvalSet =
+        normalizedApprovalRequired.toSet();
+    final Set<String> forbiddenSet =
+        normalizedForbidden.toSet();
+
+    if (allowedSet.intersection(forbiddenSet).isNotEmpty ||
+        approvalSet.intersection(forbiddenSet).isNotEmpty) {
+      throw const AgentRoleValidationException(
+        'An action cannot be both permitted and forbidden.',
+      );
+    }
+
+    final AgentRole? existing =
+        await getRole(normalizedRoleId);
+
+    if (existing == null) {
+      throw AgentRoleValidationException(
+        'Agent role "$normalizedRoleId" not found.',
+      );
+    }
+
+    _ensureOrdinaryWriteAllowed(existing);
+
+    final String? normalizedDescription =
+        description?.trim();
+
+    if (description != null &&
+        (normalizedDescription == null ||
+            normalizedDescription.isEmpty)) {
+      throw const AgentRoleValidationException(
+        'description cannot be empty when provided.',
+      );
+    }
+
+    final AgentRole updated = existing.copyWith(
+      description:
+          normalizedDescription ?? existing.description,
+      allowedActions: normalizedAllowed,
+      approvalRequiredActions:
+          normalizedApprovalRequired,
+      forbiddenActions: normalizedForbidden,
+      updatedAt: DateTime.now(),
+    );
+
+    _ensureOrdinaryWriteAllowed(updated);
+
+    await _collection.doc(normalizedRoleId).update(
+      <String, dynamic>{
+        if (normalizedDescription != null)
+          'description': normalizedDescription,
+        'allowedActions': normalizedAllowed,
+        'approvalRequiredActions':
+            normalizedApprovalRequired,
+        'forbiddenActions': normalizedForbidden,
+        'updatedAt': FieldValue.serverTimestamp(),
+      },
+    );
+  }
+  Future<void> updateMode({
+    required String roleId,
+    required String mode,
+  }) async {
+    final AgentRole? existing = await getRole(roleId);
+    if (existing == null) {
+      throw Exception('Agent role "$roleId" not found.');
+    }
+
+    _ensureOrdinaryWriteAllowed(existing);
+
+    final AgentRole updated = existing.copyWith(mode: mode);
+    _ensureOrdinaryWriteAllowed(updated);
+
+    await _collection.doc(roleId).update(<String, dynamic>{
+      'mode': mode,
+      'updatedAt': FieldValue.serverTimestamp(),
+    });
+  }
+
+  Future<void> setEnabled({
+    required String roleId,
+    required bool enabled,
+  }) async {
+    final AgentRole? existing = await getRole(roleId);
+    if (existing == null) {
+      throw Exception('Agent role "$roleId" not found.');
+    }
+
+    _ensureOrdinaryWriteAllowed(existing);
+
+    final AgentRole updated = existing.copyWith(enabled: enabled);
+    _ensureOrdinaryWriteAllowed(updated);
+
+    await _collection.doc(roleId).update(<String, dynamic>{
+      'enabled': enabled,
+      'updatedAt': FieldValue.serverTimestamp(),
+    });
+  }
+
+  Future<bool> isRoleAiClassValid(String roleId) async {
+    final DocumentSnapshot<Map<String, dynamic>> snapshot =
+        await _collection.doc(roleId).get();
+
+    if (!snapshot.exists) return false;
+    return AgentRole.fromSnapshot(snapshot).isValid;
+  }
+}

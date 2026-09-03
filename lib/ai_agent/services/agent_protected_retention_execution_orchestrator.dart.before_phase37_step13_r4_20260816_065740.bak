@@ -1,0 +1,141 @@
+import '../models/agent_approval_request.dart';
+import '../models/agent_protected_retention_action_request.dart';
+import '../models/agent_protected_retention_execution_plan.dart';
+import '../models/agent_protected_retention_execution_settings.dart';
+import 'agent_protected_retention_execution_adapter.dart';
+import 'agent_protected_retention_execution_control.dart';
+import 'agent_protected_retention_execution_validator.dart';
+
+class AgentProtectedRetentionOrchestrationResult {
+  final AgentProtectedRetentionExecutionControlDecision controlDecision;
+  final AgentProtectedRetentionExecutionValidation validation;
+  final AgentProtectedRetentionExecutionResult executionResult;
+
+  const AgentProtectedRetentionOrchestrationResult({
+    required this.controlDecision,
+    required this.validation,
+    required this.executionResult,
+  });
+
+  bool get executed => executionResult.executed;
+
+  bool get deletionAuthorized => validation.deletionAuthorized;
+}
+
+/// Final orchestration boundary before any protected-retention
+/// execution adapter is invoked.
+///
+/// Safety:
+/// - request/plan/consumed approval are validated together;
+/// - validator remains fail-closed;
+/// - disconnected adapter cannot execute;
+/// - destructive execution must be explicitly enabled by adapter;
+/// - current default adapter performs no Firestore operation;
+/// - no broad collection-wide operation exists here.
+class AgentProtectedRetentionExecutionOrchestrator {
+  final AgentProtectedRetentionExecutionAdapter adapter;
+
+  const AgentProtectedRetentionExecutionOrchestrator({
+    this.adapter = const AgentDisabledProtectedRetentionExecutionAdapter(),
+  });
+
+  Future<AgentProtectedRetentionOrchestrationResult> execute({
+    required AgentProtectedRetentionExecutionSettings settings,
+    required AgentProtectedRetentionExecutionPlan plan,
+    required AgentProtectedRetentionActionRequest request,
+    required AgentApprovalRequest consumedApproval,
+  }) async {
+    final AgentProtectedRetentionExecutionControlDecision controlDecision =
+        AgentProtectedRetentionExecutionControl.evaluate(settings);
+
+    if (!controlDecision.allowedToProceed) {
+      final AgentProtectedRetentionExecutionValidation validation =
+          AgentProtectedRetentionExecutionValidator.validate(
+            plan: plan,
+            request: request,
+            consumedApproval: consumedApproval,
+          );
+
+      return AgentProtectedRetentionOrchestrationResult(
+        controlDecision: controlDecision,
+        validation: validation,
+        executionResult: AgentProtectedRetentionExecutionResult(
+          executed: false,
+          decisionCode: controlDecision.decisionCode,
+          reason: controlDecision.reason,
+          executionPlanId: plan.executionPlanId.trim(),
+          affectedRecordIds: const <String>[],
+        ),
+      );
+    }
+    final AgentProtectedRetentionExecutionValidation validation =
+        AgentProtectedRetentionExecutionValidator.validate(
+          plan: plan,
+          request: request,
+          consumedApproval: consumedApproval,
+        );
+
+    if (!validation.prerequisitesSatisfied) {
+      return AgentProtectedRetentionOrchestrationResult(
+        validation: validation,
+        executionResult: AgentProtectedRetentionExecutionResult(
+          executed: false,
+          decisionCode: validation.decisionCode,
+          reason: validation.reason,
+          executionPlanId: plan.executionPlanId.trim(),
+          affectedRecordIds: const <String>[],
+        ),
+      );
+    }
+
+    if (!validation.deletionAuthorized) {
+      return AgentProtectedRetentionOrchestrationResult(
+        validation: validation,
+        executionResult: AgentProtectedRetentionExecutionResult(
+          executed: false,
+          decisionCode: 'DELETION_AUTHORIZATION_DISABLED',
+          reason:
+              'Execution prerequisites passed, but deletion authorization remains disabled.',
+          executionPlanId: plan.executionPlanId.trim(),
+          affectedRecordIds: const <String>[],
+        ),
+      );
+    }
+
+    if (!adapter.isConnected) {
+      return AgentProtectedRetentionOrchestrationResult(
+        validation: validation,
+        executionResult: AgentProtectedRetentionExecutionResult(
+          executed: false,
+          decisionCode: 'EXECUTION_ADAPTER_NOT_CONNECTED',
+          reason: 'Protected execution adapter is not connected.',
+          executionPlanId: plan.executionPlanId.trim(),
+          affectedRecordIds: const <String>[],
+        ),
+      );
+    }
+
+    if (!adapter.destructiveExecutionEnabled) {
+      return AgentProtectedRetentionOrchestrationResult(
+        validation: validation,
+        executionResult: AgentProtectedRetentionExecutionResult(
+          executed: false,
+          decisionCode: 'DESTRUCTIVE_EXECUTION_DISABLED',
+          reason: 'Connected adapter does not allow destructive execution.',
+          executionPlanId: plan.executionPlanId.trim(),
+          affectedRecordIds: const <String>[],
+        ),
+      );
+    }
+
+    final AgentProtectedRetentionExecutionResult result = await adapter.execute(
+      plan,
+    );
+
+    return AgentProtectedRetentionOrchestrationResult(
+      controlDecision: controlDecision,
+      validation: validation,
+      executionResult: result,
+    );
+  }
+}

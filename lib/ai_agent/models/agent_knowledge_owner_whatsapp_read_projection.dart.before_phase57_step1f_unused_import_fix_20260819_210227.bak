@@ -1,0 +1,67 @@
+import '../constants/agent_knowledge_answer_context_constants.dart';
+
+class AgentKnowledgeOwnerWhatsAppReadProjection {
+  AgentKnowledgeOwnerWhatsAppReadProjection({
+    required this.requestId,
+    required this.targetRole,
+    required this.module,
+    required this.topic,
+    required this.language,
+    required this.claimKey,
+    required this.citationCount,
+    required List<String> sourceReferenceIds,
+    required List<String> warningCodes,
+  }) : sourceReferenceIds = List<String>.unmodifiable(sourceReferenceIds),
+       warningCodes = List<String>.unmodifiable(warningCodes);
+
+  final String requestId;
+  final String targetRole;
+  final String module;
+  final String topic;
+  final String language;
+  final String claimKey;
+  final int citationCount;
+  final List<String> sourceReferenceIds;
+  final List<String> warningCodes;
+
+  bool get readVisibilityOnly => true;
+  bool get verifiedIdentityRequired => true;
+  bool get roleAuthorizationRequired => true;
+  bool get containsSelectedClaimValueBinding => false;
+  bool get containsRawKnowledgeContent => false;
+  bool get containsRawSourcePayload => false;
+  bool get containsRawPrompt => false;
+  bool get containsRawConversation => false;
+  bool get containsPhone => false;
+  bool get containsEmail => false;
+  bool get containsCnic => false;
+  bool get containsAuthToken => false;
+  bool get containsPaymentData => false;
+  bool get containsSecret => false;
+
+  bool get sendsWhatsApp => false;
+  bool get executesApproval => false;
+  bool get grantsPermission => false;
+  bool get expandsScope => false;
+  bool get executesBusinessAction => false;
+  bool get writesBusinessData => false;
+  bool get persistsProjection => false;
+
+  Map<String, dynamic> toSafeSummary() => <String, dynamic>{
+    'requestId': requestId,
+    'targetRole': targetRole,
+    'module': module,
+    'topic': topic,
+    'language': language,
+    'claimKey': claimKey,
+    'citationCount': citationCount,
+    'sourceReferenceIds': sourceReferenceIds,
+    'warningCodes': warningCodes,
+    'readVisibilityOnly': true,
+    'containsRawKnowledgeContent': false,
+    'containsPrivateData': false,
+    'sendsWhatsApp': false,
+    'executesApproval': false,
+    'executesBusinessAction': false,
+  };
+}

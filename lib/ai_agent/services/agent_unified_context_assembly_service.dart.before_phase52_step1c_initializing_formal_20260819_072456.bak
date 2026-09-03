@@ -1,0 +1,186 @@
+import '../constants/agent_omnichannel_constants.dart';
+import '../constants/agent_unified_context_constants.dart';
+import '../models/agent_unified_context_assembly_bundle.dart';
+import '../models/agent_unified_context_assembly_request.dart';
+import '../models/agent_unified_context_item.dart';
+import 'agent_unified_context_classification_policy.dart';
+
+class AgentUnifiedContextAssemblyService {
+  const AgentUnifiedContextAssemblyService({
+    AgentUnifiedContextClassificationPolicy classificationPolicy =
+        const AgentUnifiedContextClassificationPolicy(),
+  }) : _classificationPolicy = classificationPolicy;
+
+  final AgentUnifiedContextClassificationPolicy _classificationPolicy;
+
+  static const Map<String, String> _channelByRole = <String, String>{
+    'support_agent': AgentOmnichannelChannel.appChat,
+    'customer_whatsapp_agent': AgentOmnichannelChannel.customerWhatsApp,
+    'owner_whatsapp_agent': AgentOmnichannelChannel.ownerWhatsApp,
+    'emergency_whatsapp_agent': AgentOmnichannelChannel.emergencyWhatsApp,
+    'email_agent': AgentOmnichannelChannel.email,
+    'call_agent': AgentOmnichannelChannel.phoneCall,
+    'voice_super_admin_agent': AgentOmnichannelChannel.ownerVoice,
+  };
+
+  static const Map<String, Set<String>> _purposesByRole = <String, Set<String>>{
+    'support_agent': <String>{
+      AgentUnifiedContextPurpose.generalSupport,
+      AgentUnifiedContextPurpose.bookingAssistance,
+      AgentUnifiedContextPurpose.statusRead,
+    },
+    'customer_whatsapp_agent': <String>{
+      AgentUnifiedContextPurpose.generalSupport,
+      AgentUnifiedContextPurpose.bookingAssistance,
+      AgentUnifiedContextPurpose.statusRead,
+    },
+    'owner_whatsapp_agent': <String>{
+      AgentUnifiedContextPurpose.ownerOperations,
+      AgentUnifiedContextPurpose.statusRead,
+    },
+    'emergency_whatsapp_agent': <String>{
+      AgentUnifiedContextPurpose.safetyTriage,
+    },
+    'email_agent': <String>{
+      AgentUnifiedContextPurpose.generalSupport,
+      AgentUnifiedContextPurpose.statusRead,
+    },
+    'call_agent': <String>{
+      AgentUnifiedContextPurpose.generalSupport,
+      AgentUnifiedContextPurpose.bookingAssistance,
+      AgentUnifiedContextPurpose.statusRead,
+    },
+    'voice_super_admin_agent': <String>{
+      AgentUnifiedContextPurpose.ownerOperations,
+      AgentUnifiedContextPurpose.statusRead,
+    },
+  };
+
+  AgentUnifiedContextAssemblyBundle assemble({
+    required AgentUnifiedContextAssemblyRequest request,
+    required Iterable<AgentUnifiedContextItem> candidates,
+  }) {
+    try {
+      request.validateStructure();
+    } on AgentUnifiedContextAssemblyRequestException {
+      return _blockedRequest(
+        request: request,
+        reasonCode: AgentUnifiedContextAssemblyReason.invalidRequest,
+      );
+    }
+
+    final String? expectedChannel = _channelByRole[request.requestingRoleId];
+
+    if (expectedChannel == null ||
+        expectedChannel != request.requestingChannel) {
+      return _blockedRequest(
+        request: request,
+        reasonCode: AgentUnifiedContextAssemblyReason.roleChannelMismatch,
+      );
+    }
+
+    final Set<String>? allowedPurposes =
+        _purposesByRole[request.requestingRoleId];
+
+    if (allowedPurposes == null ||
+        !allowedPurposes.contains(request.requestedPurpose)) {
+      return _blockedRequest(
+        request: request,
+        reasonCode: AgentUnifiedContextAssemblyReason.purposeNotAllowedForRole,
+      );
+    }
+
+    final List<AgentUnifiedContextItem> orderedCandidates =
+        List<AgentUnifiedContextItem>.from(candidates)..sort(
+          (AgentUnifiedContextItem a, AgentUnifiedContextItem b) =>
+              b.capturedAt.compareTo(a.capturedAt),
+        );
+
+    final List<AgentUnifiedContextItem> selected = <AgentUnifiedContextItem>[];
+
+    final Map<String, String> rejectedReasons = <String, String>{};
+
+    final Set<String> seenContextIds = <String>{};
+
+    int totalCharacters = 0;
+
+    for (final AgentUnifiedContextItem item in orderedCandidates) {
+      if (!seenContextIds.add(item.contextId)) {
+        rejectedReasons[item.contextId] =
+            AgentUnifiedContextAssemblyReason.duplicateContextId;
+        continue;
+      }
+
+      final decision = _classificationPolicy.evaluate(
+        item: item,
+        requestingSubjectRef: request.requestingSubjectRef,
+        requestingRoleId: request.requestingRoleId,
+        requestingChannel: request.requestingChannel,
+        requestedPurpose: request.requestedPurpose,
+        now: request.requestedAt,
+      );
+
+      if (!decision.allowed) {
+        rejectedReasons[item.contextId] = decision.reasonCode;
+        continue;
+      }
+
+      if (selected.length >= request.maxItems) {
+        rejectedReasons[item.contextId] =
+            AgentUnifiedContextAssemblyReason.itemBudgetExceeded;
+        continue;
+      }
+
+      final int nextCharacters = totalCharacters + item.sanitizedValue.length;
+
+      if (nextCharacters > request.maxSanitizedCharacters) {
+        rejectedReasons[item.contextId] =
+            AgentUnifiedContextAssemblyReason.characterBudgetExceeded;
+        continue;
+      }
+
+      selected.add(item);
+      totalCharacters = nextCharacters;
+    }
+
+    return AgentUnifiedContextAssemblyBundle(
+      status: AgentUnifiedContextAssemblyStatus.ready,
+      reasonCode: AgentUnifiedContextAssemblyReason.ready,
+      requestId: request.requestId,
+      requestingSubjectRef: request.requestingSubjectRef,
+      requestedPurpose: request.requestedPurpose,
+      selectedItems: selected,
+      rejectedReasonsByContextId: rejectedReasons,
+      totalSanitizedCharacters: totalCharacters,
+    );
+  }
+
+  AgentUnifiedContextAssemblyBundle _blockedRequest({
+    required AgentUnifiedContextAssemblyRequest request,
+    required String reasonCode,
+  }) {
+    return AgentUnifiedContextAssemblyBundle(
+      status: AgentUnifiedContextAssemblyStatus.blockedRequest,
+      reasonCode: reasonCode,
+      requestId: request.requestId,
+      requestingSubjectRef: request.requestingSubjectRef,
+      requestedPurpose: request.requestedPurpose,
+      selectedItems: const <AgentUnifiedContextItem>[],
+      rejectedReasonsByContextId: const <String, String>{},
+      totalSanitizedCharacters: 0,
+    );
+  }
+
+  bool get grantsAuthority => false;
+  bool get grantsPermission => false;
+  bool get consumesApproval => false;
+  bool get invokesProvider => false;
+  bool get invokesTargetAgent => false;
+  bool get invokesRuntimeGate => false;
+  bool get writesBusinessData => false;
+  bool get persistsContext => false;
+  bool get persistsBundle => false;
+  bool get loadsFullConversationHistory => false;
+  bool get loadsCrossSubjectContext => false;
+  bool get bypassesRoleChannelMapping => false;
+}

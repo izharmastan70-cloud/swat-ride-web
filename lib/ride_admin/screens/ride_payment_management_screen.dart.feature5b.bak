@@ -1,0 +1,527 @@
+﻿import 'package:flutter/material.dart';
+
+import '../services/ride_admin_service.dart';
+
+class RidePaymentManagementScreen extends StatefulWidget {
+  const RidePaymentManagementScreen({
+    super.key,
+    this.adminId = 'testing_admin',
+  });
+
+  final String adminId;
+
+  @override
+  State<RidePaymentManagementScreen> createState() =>
+      _RidePaymentManagementScreenState();
+}
+
+class _RidePaymentManagementScreenState
+    extends State<RidePaymentManagementScreen> {
+  static const Color _yellow = Color(0xFFFFD400);
+  static const Color _background = Color(0xFF090909);
+  static const Color _card = Color(0xFF191919);
+
+  static const List<_PaymentDefinition> _definitions = <_PaymentDefinition>[
+    _PaymentDefinition(
+      id: 'cash',
+      title: 'Cash',
+      subtitle: 'Rider pays the driver after completing the ride.',
+      icon: Icons.payments_outlined,
+      realProviderRequired: false,
+    ),
+    _PaymentDefinition(
+      id: 'wallet',
+      title: 'SWAT RIDE Wallet',
+      subtitle: 'Pay using the rider wallet balance.',
+      icon: Icons.account_balance_wallet_outlined,
+      realProviderRequired: true,
+    ),
+    _PaymentDefinition(
+      id: 'bank_card',
+      title: 'Bank Card',
+      subtitle: 'Visa, Mastercard and supported Pakistani bank cards.',
+      icon: Icons.credit_card_rounded,
+      realProviderRequired: true,
+    ),
+    _PaymentDefinition(
+      id: 'jazzcash',
+      title: 'JazzCash',
+      subtitle: 'Pay through the JazzCash payment gateway.',
+      icon: Icons.phone_android_rounded,
+      realProviderRequired: true,
+    ),
+    _PaymentDefinition(
+      id: 'easypaisa',
+      title: 'Easypaisa',
+      subtitle: 'Pay through the Easypaisa payment gateway.',
+      icon: Icons.mobile_friendly_rounded,
+      realProviderRequired: true,
+    ),
+  ];
+
+  final RideAdminService _service = RideAdminService();
+  final Set<String> _savingMethods = <String>{};
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: _background,
+      appBar: AppBar(
+        backgroundColor: const Color(0xFF121212),
+        foregroundColor: Colors.white,
+        elevation: 0,
+        title: const Text(
+          'Ride Payments',
+          style: TextStyle(fontWeight: FontWeight.w900),
+        ),
+      ),
+      body: SafeArea(
+        child: StreamBuilder<RideAdminRecord?>(
+          stream: _service.watchPaymentSettings(),
+          builder: (context, snapshot) {
+            if (snapshot.hasError) {
+              return _MessageState(
+                icon: Icons.cloud_off_rounded,
+                title: 'Payment settings could not be loaded',
+                message: _cleanError(snapshot.error),
+              );
+            }
+            if (snapshot.connectionState == ConnectionState.waiting) {
+              return const Center(
+                child: CircularProgressIndicator(color: _yellow),
+              );
+            }
+            final Map<String, dynamic> methods =
+                snapshot.data?.map('methods') ?? <String, dynamic>{};
+            return ListView(
+              padding: const EdgeInsets.fromLTRB(16, 16, 16, 30),
+              children: <Widget>[
+                _buildSafetyNotice(),
+                const SizedBox(height: 14),
+                _buildTestingBanner(),
+                const SizedBox(height: 20),
+                const Text(
+                  'Payment methods',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 20,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+                const SizedBox(height: 6),
+                const Text(
+                  'Admin changes become available to normal Ride booking without an app update.',
+                  style: TextStyle(color: Colors.white54, height: 1.4),
+                ),
+                const SizedBox(height: 14),
+                ..._definitions.map((definition) {
+                  final Map<String, dynamic> config =
+                      _methodConfig(methods, definition.id);
+                  final bool enabled = _bool(
+                    config['isEnabled'],
+                    fallback: definition.id == 'cash',
+                  );
+                  final bool bypass = definition.id != 'cash' &&
+                      _bool(config['isTestingBypassEnabled'], fallback: true);
+                  return Padding(
+                    padding: const EdgeInsets.only(bottom: 12),
+                    child: _buildMethodCard(
+                      definition,
+                      enabled: enabled,
+                      testingBypassEnabled: bypass,
+                    ),
+                  );
+                }),
+                const SizedBox(height: 8),
+                _buildProductionChecklist(),
+              ],
+            );
+          },
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSafetyNotice() {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.blueAccent.withValues(alpha: 0.1),
+        border: Border.all(color: Colors.blueAccent.withValues(alpha: 0.35)),
+        borderRadius: BorderRadius.circular(18),
+      ),
+      child: const Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Icon(Icons.security_rounded, color: Colors.lightBlueAccent),
+          SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                Text(
+                  'Secure payment architecture',
+                  style: TextStyle(color: Colors.white, fontWeight: FontWeight.w800),
+                ),
+                SizedBox(height: 5),
+                Text(
+                  'Provider secret keys, real charges and webhook verification must run on a secure backendâ€”not inside Flutter.',
+                  style: TextStyle(color: Colors.white60, height: 1.4),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildTestingBanner() {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: _yellow.withValues(alpha: 0.1),
+        border: Border.all(color: _yellow.withValues(alpha: 0.4)),
+        borderRadius: BorderRadius.circular(18),
+      ),
+      child: const Row(
+        children: <Widget>[
+          Icon(Icons.science_outlined, color: _yellow),
+          SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                Text(
+                  'Testing bypass is active',
+                  style: TextStyle(color: _yellow, fontWeight: FontWeight.w900),
+                ),
+                SizedBox(height: 4),
+                Text(
+                  'Non-cash methods can be tested without making a real charge. Billing/provider setup remains paused.',
+                  style: TextStyle(color: Colors.white70, height: 1.35),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildMethodCard(
+    _PaymentDefinition definition, {
+    required bool enabled,
+    required bool testingBypassEnabled,
+  }) {
+    final bool saving = _savingMethods.contains(definition.id);
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: _card,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(
+          color: enabled
+              ? _yellow.withValues(alpha: 0.24)
+              : Colors.white10,
+        ),
+      ),
+      child: Column(
+        children: <Widget>[
+          Row(
+            children: <Widget>[
+              Container(
+                width: 48,
+                height: 48,
+                decoration: BoxDecoration(
+                  color: enabled
+                      ? _yellow.withValues(alpha: 0.12)
+                      : Colors.white.withValues(alpha: 0.05),
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                child: saving
+                    ? const Padding(
+                        padding: EdgeInsets.all(13),
+                        child: CircularProgressIndicator(
+                          color: _yellow,
+                          strokeWidth: 2,
+                        ),
+                      )
+                    : Icon(
+                        definition.icon,
+                        color: enabled ? _yellow : Colors.white38,
+                      ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: <Widget>[
+                    Text(
+                      definition.title,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 16,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      definition.subtitle,
+                      style: const TextStyle(color: Colors.white54, height: 1.3),
+                    ),
+                  ],
+                ),
+              ),
+              Switch(
+                value: enabled,
+                onChanged: saving
+                    ? null
+                    : (value) => _setMethod(
+                          definition,
+                          isEnabled: value,
+                          testingBypassEnabled: testingBypassEnabled,
+                        ),
+                activeTrackColor: _yellow,
+                activeThumbColor: Colors.black,
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          const Divider(color: Colors.white12, height: 1),
+          const SizedBox(height: 12),
+          Row(
+            children: <Widget>[
+              _StatusPill(
+                label: enabled ? 'ENABLED' : 'DISABLED',
+                color: enabled ? Colors.green : Colors.redAccent,
+              ),
+              const SizedBox(width: 8),
+              if (definition.realProviderRequired)
+                _StatusPill(
+                  label: testingBypassEnabled ? 'TEST MODE' : 'REAL MODE',
+                  color: testingBypassEnabled ? _yellow : Colors.lightBlueAccent,
+                ),
+              const Spacer(),
+              if (definition.realProviderRequired)
+                const Tooltip(
+                  message: 'Real provider activation requires secure backend and billing setup.',
+                  child: Icon(Icons.info_outline, color: Colors.white38, size: 20),
+                ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildProductionChecklist() {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: _card,
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: const Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Row(
+            children: <Widget>[
+              Icon(Icons.fact_check_outlined, color: _yellow),
+              SizedBox(width: 10),
+              Text(
+                'Required before real payments',
+                style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w900),
+              ),
+            ],
+          ),
+          SizedBox(height: 14),
+          _ChecklistRow(text: 'Merchant/provider account approval'),
+          _ChecklistRow(text: 'Secure backend payment endpoints'),
+          _ChecklistRow(text: 'Webhook signature verification'),
+          _ChecklistRow(text: 'Refund and failed-payment handling'),
+          _ChecklistRow(text: 'Real-device sandbox and production tests'),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _setMethod(
+    _PaymentDefinition definition, {
+    required bool isEnabled,
+    required bool testingBypassEnabled,
+  }) async {
+    if (definition.realProviderRequired && isEnabled) {
+      final bool? confirmed = await showDialog<bool>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          backgroundColor: const Color(0xFF202020),
+          title: Text(
+            'Enable ${definition.title}?',
+            style: const TextStyle(color: Colors.white),
+          ),
+          content: const Text(
+            'This will enable testing mode only. It will not charge real money until the secure provider backend is configured.',
+            style: TextStyle(color: Colors.white70, height: 1.4),
+          ),
+          actions: <Widget>[
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext, false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(dialogContext, true),
+              style: FilledButton.styleFrom(
+                backgroundColor: _yellow,
+                foregroundColor: Colors.black,
+              ),
+              child: const Text('Enable Test Mode'),
+            ),
+          ],
+        ),
+      );
+      if (confirmed != true) return;
+    }
+
+    setState(() => _savingMethods.add(definition.id));
+    try {
+      await _service.setPaymentMethodEnabled(
+        method: definition.id,
+        isEnabled: isEnabled,
+        updatedBy: widget.adminId,
+        testingBypassEnabled:
+            definition.realProviderRequired ? true : false,
+      );
+      if (!mounted) return;
+      _showMessage(
+        '${definition.title} ${isEnabled ? 'enabled' : 'disabled'} successfully.',
+        success: true,
+      );
+    } catch (error) {
+      if (!mounted) return;
+      _showMessage(_cleanError(error));
+    } finally {
+      if (mounted) setState(() => _savingMethods.remove(definition.id));
+    }
+  }
+
+  void _showMessage(String message, {bool success = false}) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        backgroundColor: success ? Colors.green : Colors.redAccent,
+        content: Text(message),
+      ),
+    );
+  }
+
+  static Map<String, dynamic> _methodConfig(
+    Map<String, dynamic> methods,
+    String id,
+  ) {
+    final dynamic value = methods[id];
+    return value is Map
+        ? Map<String, dynamic>.from(value)
+        : <String, dynamic>{};
+  }
+
+  static bool _bool(dynamic value, {required bool fallback}) {
+    return value is bool ? value : fallback;
+  }
+
+  static String _cleanError(Object? error) =>
+      error.toString().replaceFirst('Exception: ', '').trim();
+}
+
+class _PaymentDefinition {
+  const _PaymentDefinition({
+    required this.id,
+    required this.title,
+    required this.subtitle,
+    required this.icon,
+    required this.realProviderRequired,
+  });
+
+  final String id;
+  final String title;
+  final String subtitle;
+  final IconData icon;
+  final bool realProviderRequired;
+}
+
+class _StatusPill extends StatelessWidget {
+  const _StatusPill({required this.label, required this.color});
+
+  final String label;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.13),
+        border: Border.all(color: color.withValues(alpha: 0.55)),
+        borderRadius: BorderRadius.circular(30),
+      ),
+      child: Text(
+        label,
+        style: TextStyle(color: color, fontSize: 10, fontWeight: FontWeight.w900),
+      ),
+    );
+  }
+}
+
+class _ChecklistRow extends StatelessWidget {
+  const _ChecklistRow({required this.text});
+
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Row(
+        children: <Widget>[
+          const Icon(Icons.pause_circle_outline, color: Colors.orangeAccent, size: 19),
+          const SizedBox(width: 10),
+          Expanded(child: Text(text, style: const TextStyle(color: Colors.white60))),
+        ],
+      ),
+    );
+  }
+}
+
+class _MessageState extends StatelessWidget {
+  const _MessageState({required this.icon, required this.title, required this.message});
+
+  final IconData icon;
+  final String title;
+  final String message;
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.all(32),
+        child: Column(
+          children: <Widget>[
+            Icon(icon, size: 64, color: Colors.white24),
+            const SizedBox(height: 16),
+            Text(
+              title,
+              textAlign: TextAlign.center,
+              style: const TextStyle(color: Colors.white, fontSize: 19, fontWeight: FontWeight.w800),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              message,
+              textAlign: TextAlign.center,
+              style: const TextStyle(color: Colors.white54, height: 1.4),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+

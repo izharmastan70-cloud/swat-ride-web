@@ -1,0 +1,503 @@
+import 'package:flutter/material.dart';
+
+import 'agent_production_rollout_post_activation_diagnostic_screen.dart';
+import 'agent_production_rollout_monitor_recovery_screen.dart';
+import 'agent_production_rollout_monitor_observation_screen.dart';
+
+import '../constants/agent_production_rollout_step1g_evidence_constants.dart';
+import '../models/agent_production_rollout_step1g_runtime_models.dart';
+import '../services/agent_master_settings_service.dart';
+import '../services/agent_production_rollout_step1g_live_activation_coordinator.dart';
+
+class AgentProductionRolloutMonitorActivationScreen extends StatefulWidget {
+  const AgentProductionRolloutMonitorActivationScreen({
+    super.key,
+    required this.currentAdminId,
+  });
+
+  final String currentAdminId;
+
+  @override
+  State<AgentProductionRolloutMonitorActivationScreen> createState() =>
+      _AgentProductionRolloutMonitorActivationScreenState();
+}
+
+class _AgentProductionRolloutMonitorActivationScreenState
+    extends State<AgentProductionRolloutMonitorActivationScreen> {
+  final AgentProductionRolloutStep1GLiveActivationCoordinator _coordinator =
+      AgentProductionRolloutStep1GLiveActivationCoordinator();
+
+  AgentProductionRolloutStep1GPreparedReview? _prepared;
+  AgentProductionRolloutStep1GActivationOutcome? _outcome;
+
+  bool _working = false;
+  String _message = 'No live production action has been prepared yet.';
+
+  Future<void> _initializeSafeMasterBaseline() async {
+    if (_working) return;
+
+    final bool confirmed =
+        await showDialog<bool>(
+          context: context,
+          barrierDismissible: false,
+          builder: (BuildContext dialogContext) {
+            return AlertDialog(
+              title: const Text('Initialize safe AI master baseline?'),
+              content: const Text(
+                'This creates agent_settings/master only if it is missing, '
+                'using the existing fail-closed safe defaults. '
+                'It does NOT activate MONITOR_ONLY, AUTO, paid/local AI, '
+                'Call, Email or WhatsApp.',
+              ),
+              actions: <Widget>[
+                TextButton(
+                  onPressed: () {
+                    Navigator.of(dialogContext).pop(false);
+                  },
+                  child: const Text('CANCEL'),
+                ),
+                FilledButton(
+                  onPressed: () {
+                    Navigator.of(dialogContext).pop(true);
+                  },
+                  child: const Text('INITIALIZE SAFE BASELINE'),
+                ),
+              ],
+            );
+          },
+        ) ??
+        false;
+
+    if (!mounted || !confirmed) {
+      return;
+    }
+
+    setState(() {
+      _working = true;
+      _prepared = null;
+      _outcome = null;
+      _message =
+          'Creating the fail-closed AI master document only if it is missing...';
+    });
+
+    try {
+      await AgentMasterSettingsService().bootstrapSafeDefaults(
+        actorId: widget.currentAdminId,
+      );
+
+      if (!mounted) return;
+
+      setState(() {
+        _prepared = null;
+        _outcome = null;
+        _message =
+            'Safe AI master baseline is present. '
+            'Press READ LIVE STATE / PREPARE REVIEW again before activation.';
+      });
+    } catch (error) {
+      if (!mounted) return;
+
+      setState(() {
+        _prepared = null;
+        _outcome = null;
+        _message = _friendlyError(error);
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          _working = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _prepare() async {
+    if (_working) return;
+
+    setState(() {
+      _working = true;
+      _message = 'Reading current production control state...';
+      _outcome = null;
+    });
+
+    try {
+      final AgentProductionRolloutStep1GPreparedReview review =
+          await _coordinator.prepare(currentAdminId: widget.currentAdminId);
+
+      if (!mounted) return;
+
+      setState(() {
+        _prepared = review;
+        _message =
+            'Live OFF baseline verified. Review the hashes and role count '
+            'before explicit MONITOR_ONLY approval.';
+      });
+    } catch (error) {
+      if (!mounted) return;
+
+      setState(() {
+        _prepared = null;
+        _message = _friendlyError(error);
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          _working = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _confirmAndActivate() async {
+    final AgentProductionRolloutStep1GPreparedReview? prepared = _prepared;
+
+    if (_working || prepared == null) return;
+
+    final TextEditingController controller = TextEditingController();
+
+    final bool confirmed =
+        await showDialog<bool>(
+          context: context,
+          barrierDismissible: false,
+          builder: (BuildContext dialogContext) {
+            return AlertDialog(
+              title: const Text('Activate production MONITOR_ONLY?'),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  const Text(
+                    'This is a real production control-plane change. '
+                    'AUTO traffic and business writes remain 0%. '
+                    'Paid AI, Local AI, Call, Email and WhatsApp '
+                    'remain disabled.',
+                  ),
+                  const SizedBox(height: 12),
+                  const Text(
+                    'Type MONITOR_ONLY to approve:',
+                    style: TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: controller,
+                    autofocus: true,
+                    decoration: const InputDecoration(
+                      border: OutlineInputBorder(),
+                      hintText: 'MONITOR_ONLY',
+                    ),
+                  ),
+                ],
+              ),
+              actions: <Widget>[
+                TextButton(
+                  onPressed: () {
+                    Navigator.of(dialogContext).pop(false);
+                  },
+                  child: const Text('CANCEL'),
+                ),
+                FilledButton(
+                  onPressed: () {
+                    final bool exact =
+                        controller.text.trim() ==
+                        AgentProductionRolloutStep1GEvidence.confirmationPhrase;
+
+                    Navigator.of(dialogContext).pop(exact);
+                  },
+                  child: const Text('APPROVE'),
+                ),
+              ],
+            );
+          },
+        ) ??
+        false;
+
+    controller.dispose();
+
+    if (!mounted || !confirmed) {
+      return;
+    }
+
+    setState(() {
+      _working = true;
+      _message =
+          'Running fresh preflight, guard binding, one-time token, '
+          'atomic activation and immediate verification...';
+      _outcome = null;
+    });
+
+    try {
+      final AgentProductionRolloutStep1GActivationOutcome outcome =
+          await _coordinator.approveAndActivate(
+            currentAdminId: widget.currentAdminId,
+            prepared: prepared,
+          );
+
+      if (!mounted) return;
+
+      setState(() {
+        _outcome = outcome;
+        _message = outcome.monitorOnlyProductionActive
+            ? 'MONITOR_ONLY is production-active and immediate '
+                  'verification passed.'
+            : outcome.activated
+            ? 'CRITICAL: Activation committed but post-verification '
+                  'did not pass. Use the existing AI Emergency Stop '
+                  'and review the control plane.'
+            : 'Activation was blocked safely: '
+                  '${outcome.reasonCode}';
+      });
+    } catch (error) {
+      if (!mounted) return;
+
+      setState(() {
+        _outcome = null;
+        _message = _friendlyError(error);
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          _working = false;
+        });
+      }
+    }
+  }
+
+  String _friendlyError(Object error) {
+    final String raw = error.toString();
+
+    if (raw.contains(
+      'fresh_login_required_sign_out_and_sign_in_again_with_normal_otp',
+    )) {
+      return 'Fresh Super Admin login required. Sign out, sign in '
+          'again using the normal OTP flow, then return here. '
+          'Token refresh alone does not count as re-authentication.';
+    }
+
+    if (raw.contains(
+      'firebase_super_admin_custom_claim_required_for_production_rollout',
+    )) {
+      return 'Production rollout requires the Firebase '
+          'role=super_admin custom claim. A Firestore-only Admin '
+          'record is intentionally not enough for this critical action.';
+    }
+
+    return raw.replaceFirst('Bad state: ', '');
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final AgentProductionRolloutStep1GPreparedReview? prepared = _prepared;
+
+    final AgentProductionRolloutStep1GActivationOutcome? outcome = _outcome;
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text(
+          'Production Rollout ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â MONITOR_ONLY',
+        ),
+      ),
+      body: ListView(
+        padding: const EdgeInsets.all(16),
+        children: <Widget>[
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: const <Widget>[
+                  Text(
+                    'Initial production rollout safety boundary',
+                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                  ),
+                  SizedBox(height: 10),
+                  Text(
+                    'ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ Current stage must be OFF.',
+                  ),
+                  Text(
+                    'ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ Master must be fail-closed before activation.',
+                  ),
+                  Text(
+                    'ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ Fresh Super Admin login ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¤ 5 minutes required.',
+                  ),
+                  Text(
+                    'ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ Firebase super_admin custom claim required.',
+                  ),
+                  Text(
+                    'ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ AUTO traffic = 0%.',
+                  ),
+                  Text(
+                    'ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ Business-write traffic = 0%.',
+                  ),
+                  Text(
+                    'ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ Local/Paid/Call/Email/WhatsApp remain OFF.',
+                  ),
+                  Text(
+                    'ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ No automatic rollback is performed.',
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 12),
+          OutlinedButton.icon(
+            onPressed: _working
+                ? null
+                : () {
+                    Navigator.of(context).push(
+                      MaterialPageRoute<void>(
+                        builder: (BuildContext context) =>
+                            AgentProductionRolloutPostActivationDiagnosticScreen(
+                              currentAdminId: widget.currentAdminId,
+                            ),
+                      ),
+                    );
+                  },
+            icon: const Icon(Icons.health_and_safety_outlined),
+            label: const Text('READ-ONLY POST-ACTIVATION DIAGNOSTIC'),
+          ),
+          const SizedBox(height: 8),
+          OutlinedButton.icon(
+            onPressed: _working
+                ? null
+                : () {
+                    Navigator.of(context).push(
+                      MaterialPageRoute<void>(
+                        builder: (BuildContext context) =>
+                            AgentProductionRolloutMonitorRecoveryScreen(
+                              currentAdminId: widget.currentAdminId,
+                            ),
+                      ),
+                    );
+                  },
+            icon: const Icon(Icons.restart_alt_outlined),
+            label: const Text('CONTROLLED MONITOR_ONLY RECOVERY'),
+          ),
+          const SizedBox(height: 8),
+          OutlinedButton.icon(
+            onPressed: _working
+                ? null
+                : () {
+                    Navigator.of(context).push(
+                      MaterialPageRoute<void>(
+                        builder: (BuildContext context) =>
+                            AgentProductionRolloutMonitorObservationScreen(
+                              currentAdminId: widget.currentAdminId,
+                            ),
+                      ),
+                    );
+                  },
+            icon: const Icon(Icons.monitor_heart_outlined),
+            label: const Text('MONITOR_ONLY STABILITY OBSERVATION'),
+          ),
+          const SizedBox(height: 8),
+          OutlinedButton.icon(
+            onPressed: _working ? null : _initializeSafeMasterBaseline,
+            icon: const Icon(Icons.shield_outlined),
+            label: const Text('INITIALIZE SAFE MASTER BASELINE'),
+          ),
+          const SizedBox(height: 8),
+          FilledButton.icon(
+            onPressed: _working ? null : _prepare,
+            icon: const Icon(Icons.fact_check_outlined),
+            label: const Text('READ LIVE STATE / PREPARE REVIEW'),
+          ),
+          if (_working) ...<Widget>[
+            const SizedBox(height: 12),
+            const LinearProgressIndicator(),
+          ],
+          const SizedBox(height: 12),
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Text(_message),
+            ),
+          ),
+          if (prepared != null) ...<Widget>[
+            const SizedBox(height: 12),
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: <Widget>[
+                    const Text(
+                      'Prepared live review',
+                      style: TextStyle(fontWeight: FontWeight.bold),
+                    ),
+                    const SizedBox(height: 8),
+                    _row('Access', prepared.accessSourceLabel),
+                    _row('Roles', prepared.roleCount.toString()),
+                    _row(
+                      'Actor SHA',
+                      _shortHash(prepared.actorReferenceSha256),
+                    ),
+                    _row(
+                      'Snapshot SHA',
+                      _shortHash(prepared.snapshotFingerprintSha256),
+                    ),
+                    _row(
+                      'Control SHA',
+                      _shortHash(prepared.controlStateFingerprintSha256),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 12),
+            FilledButton.icon(
+              onPressed: _working ? null : _confirmAndActivate,
+              icon: const Icon(Icons.rocket_launch_outlined),
+              label: const Text('APPROVE & ACTIVATE MONITOR_ONLY'),
+            ),
+          ],
+          if (outcome != null) ...<Widget>[
+            const SizedBox(height: 12),
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: <Widget>[
+                    Text(
+                      outcome.monitorOnlyProductionActive
+                          ? 'VERIFIED ACTIVE'
+                          : 'NOT VERIFIED ACTIVE',
+                      style: TextStyle(
+                        fontWeight: FontWeight.bold,
+                        color: outcome.monitorOnlyProductionActive
+                            ? Colors.green
+                            : Colors.red,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    _row('Status', outcome.status),
+                    _row('Reason', outcome.reasonCode),
+                    _row('Guard revision', outcome.guardRevision.toString()),
+                    _row('Activation ID', _shortHash(outcome.activationId)),
+                    _row('Token SHA', _shortHash(outcome.armingTokenIdSha256)),
+                    _row('AUTO traffic', '0%'),
+                    _row('Business writes', '0%'),
+                    _row('External channels', 'OFF'),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _row(String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 6),
+      child: Text('$label: $value'),
+    );
+  }
+
+  String _shortHash(String value) {
+    final String clean = value.trim();
+    if (clean.length <= 16) return clean;
+    return '${clean.substring(0, 8)}ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¦${clean.substring(clean.length - 8)}';
+  }
+}

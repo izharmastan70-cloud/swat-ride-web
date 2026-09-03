@@ -1,0 +1,370 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
+
+import '../models/hotel_booking.dart';
+
+class HotelBookingInventoryLockService {
+  HotelBookingInventoryLockService({
+    FirebaseFirestore? firestore,
+  }) : _firestore = firestore ?? FirebaseFirestore.instance;
+
+  final FirebaseFirestore _firestore;
+
+  static const String bookingsCollection = 'hotel_bookings';
+  static const String roomsCollection = 'hotel_rooms';
+  static const String locksCollection = 'hotel_room_inventory_locks';
+
+  CollectionReference<Map<String, dynamic>> get _bookings =>
+      _firestore.collection(bookingsCollection);
+
+  DateTime? _readDate(dynamic value) {
+    if (value == null) {
+      return null;
+    }
+    if (value is Timestamp) {
+      return value.toDate();
+    }
+    if (value is DateTime) {
+      return value;
+    }
+    return DateTime.tryParse(value.toString());
+  }
+
+  DateTime _dateOnly(DateTime value) {
+    return DateTime(value.year, value.month, value.day);
+  }
+
+  String _dateKey(DateTime value) {
+    final String year = value.year.toString().padLeft(4, '0');
+    final String month = value.month.toString().padLeft(2, '0');
+    final String day = value.day.toString().padLeft(2, '0');
+    return '$year$month$day';
+  }
+
+  List<DateTime> _bookingNights(
+    DateTime checkIn,
+    DateTime checkOut,
+  ) {
+    final DateTime start = _dateOnly(checkIn);
+    final DateTime end = _dateOnly(checkOut);
+    final List<DateTime> nights = <DateTime>[];
+
+    DateTime cursor = start;
+    while (cursor.isBefore(end)) {
+      nights.add(cursor);
+      cursor = cursor.add(const Duration(days: 1));
+    }
+
+    return nights;
+  }
+
+  Future<int> _roomInventory(String roomId) async {
+    DocumentSnapshot<Map<String, dynamic>> room =
+        await _firestore.collection(roomsCollection).doc(roomId).get();
+
+    if (!room.exists) {
+      final QuerySnapshot<Map<String, dynamic>> query = await _firestore
+          .collection(roomsCollection)
+          .where('roomId', isEqualTo: roomId)
+          .limit(1)
+          .get();
+
+      if (query.docs.isNotEmpty) {
+        room = query.docs.first;
+      }
+    }
+
+    if (!room.exists || room.data() == null) {
+      throw StateError('Selected room is no longer available.');
+    }
+
+    final Map<String, dynamic> data = room.data()!;
+    final dynamic quantityValue =
+        data['availableQuantity'] ?? data['quantity'];
+
+    if (quantityValue is num) {
+      return quantityValue.toInt();
+    }
+
+    return int.tryParse(quantityValue?.toString() ?? '') ?? 1;
+  }
+
+  Future<Map<String, int>> _legacyReservedByNight({
+    required HotelBooking booking,
+    required List<DateTime> nights,
+  }) async {
+    final Map<String, int> result = <String, int>{
+      for (final DateTime night in nights) _dateKey(night): 0,
+    };
+
+    final QuerySnapshot<Map<String, dynamic>> snapshot = await _bookings
+        .where('roomId', isEqualTo: booking.roomId.trim())
+        .get();
+
+    const Set<String> terminal = <String>{
+      'cancelled',
+      'rejected',
+      'completed',
+      'checked_out',
+    };
+
+    for (final QueryDocumentSnapshot<Map<String, dynamic>> document
+        in snapshot.docs) {
+      final Map<String, dynamic> data = document.data();
+
+      if (data['inventoryLockManaged'] == true) {
+        continue;
+      }
+
+      final String status =
+          (data['bookingStatus'] ?? '').toString().trim().toLowerCase();
+
+      if (terminal.contains(status)) {
+        continue;
+      }
+
+      final DateTime? existingCheckIn = _readDate(data['checkIn']);
+      final DateTime? existingCheckOut = _readDate(data['checkOut']);
+
+      if (existingCheckIn == null || existingCheckOut == null) {
+        continue;
+      }
+
+      int reservedRooms = 1;
+      final dynamic roomsValue = data['rooms'];
+
+      if (roomsValue is num) {
+        reservedRooms = roomsValue.toInt();
+      } else if (roomsValue != null) {
+        reservedRooms = int.tryParse(roomsValue.toString()) ?? 1;
+      }
+
+      if (reservedRooms <= 0) {
+        reservedRooms = 1;
+      }
+
+      for (final DateTime night in nights) {
+        final DateTime nightEnd = night.add(const Duration(days: 1));
+        final bool overlaps = existingCheckIn.isBefore(nightEnd) &&
+            existingCheckOut.isAfter(night);
+
+        if (!overlaps) {
+          continue;
+        }
+
+        final String key = _dateKey(night);
+        result[key] = (result[key] ?? 0) + reservedRooms;
+      }
+    }
+
+    return result;
+  }
+
+  Future<String> createBookingAtomically(
+    HotelBooking booking,
+  ) async {
+    final String roomId = booking.roomId.trim();
+    final String hotelId = booking.hotelId.trim();
+
+    if (roomId.isEmpty || hotelId.isEmpty) {
+      throw StateError('Hotel and room are required.');
+    }
+
+    if (!booking.checkOut.isAfter(booking.checkIn)) {
+      throw StateError('Check-out must be after check-in.');
+    }
+
+    if (booking.rooms <= 0) {
+      throw StateError('At least one room must be selected.');
+    }
+
+    final int inventory = await _roomInventory(roomId);
+
+    if (inventory <= 0 || booking.rooms > inventory) {
+      throw StateError('Requested room inventory is unavailable.');
+    }
+
+    final List<DateTime> nights =
+        _bookingNights(booking.checkIn, booking.checkOut);
+
+    if (nights.isEmpty) {
+      throw StateError('Booking must contain at least one night.');
+    }
+
+    final Map<String, int> legacyReserved =
+        await _legacyReservedByNight(booking: booking, nights: nights);
+
+    final DocumentReference<Map<String, dynamic>> bookingReference =
+        _bookings.doc();
+
+    final List<DocumentReference<Map<String, dynamic>>> lockReferences =
+        nights.map((DateTime night) {
+      final String key = _dateKey(night);
+      return _firestore.collection(locksCollection).doc('${roomId}_$key');
+    }).toList();
+
+    await _firestore.runTransaction((transaction) async {
+      final List<DocumentSnapshot<Map<String, dynamic>>> snapshots =
+          <DocumentSnapshot<Map<String, dynamic>>>[];
+
+      for (final DocumentReference<Map<String, dynamic>> reference
+          in lockReferences) {
+        snapshots.add(await transaction.get(reference));
+      }
+
+      for (int index = 0; index < nights.length; index++) {
+        final DateTime night = nights[index];
+        final String dateKey = _dateKey(night);
+        final DocumentReference<Map<String, dynamic>> reference =
+            lockReferences[index];
+        final Map<String, dynamic>? current = snapshots[index].data();
+
+        int managedReserved = 0;
+        final dynamic currentValue = current?['reservedRooms'];
+
+        if (currentValue is num) {
+          managedReserved = currentValue.toInt();
+        } else if (currentValue != null) {
+          managedReserved = int.tryParse(currentValue.toString()) ?? 0;
+        }
+
+        final int projected =
+            (legacyReserved[dateKey] ?? 0) + managedReserved + booking.rooms;
+
+        if (projected > inventory) {
+          throw StateError(
+            'Requested room inventory is no longer available for $dateKey.',
+          );
+        }
+
+        transaction.set(
+          reference,
+          <String, dynamic>{
+            'roomId': roomId,
+            'hotelId': hotelId,
+            'dateKey': dateKey,
+            'date': night.toIso8601String(),
+            'reservedRooms': managedReserved + booking.rooms,
+            'inventory': inventory,
+            'updatedAt': FieldValue.serverTimestamp(),
+          },
+          SetOptions(merge: true),
+        );
+      }
+
+      transaction.set(
+        bookingReference,
+        <String, dynamic>{
+          ...booking.toMap(),
+          'inventoryLockManaged': true,
+          'inventoryLockRooms': booking.rooms,
+          'inventoryLockSlotIds':
+              lockReferences.map((reference) => reference.id).toList(),
+          'inventoryLockReleased': false,
+        },
+      );
+    });
+
+    return bookingReference.id;
+  }
+
+  Future<void> setTerminalStatusAndReleaseLocks({
+    required String bookingId,
+    required String status,
+  }) async {
+    final DocumentReference<Map<String, dynamic>> bookingReference =
+        _bookings.doc(bookingId);
+
+    await _firestore.runTransaction((transaction) async {
+      final DocumentSnapshot<Map<String, dynamic>> bookingSnapshot =
+          await transaction.get(bookingReference);
+
+      if (!bookingSnapshot.exists || bookingSnapshot.data() == null) {
+        throw StateError('Hotel booking was not found.');
+      }
+
+      final Map<String, dynamic> data = bookingSnapshot.data()!;
+
+      if (data['inventoryLockManaged'] != true ||
+          data['inventoryLockReleased'] == true) {
+        transaction.update(
+          bookingReference,
+          <String, dynamic>{
+            'bookingStatus': status,
+            'updatedAt': FieldValue.serverTimestamp(),
+          },
+        );
+        return;
+      }
+
+      final List<String> slotIds = (data['inventoryLockSlotIds'] is List
+            ? data['inventoryLockSlotIds'] as List<dynamic>
+            : const <dynamic>[])
+        .map((dynamic value) => value.toString())
+        .where((String value) => value.isNotEmpty)
+        .toList();
+
+      int rooms = 1;
+      final dynamic roomsValue =
+          data['inventoryLockRooms'] ?? data['rooms'];
+
+      if (roomsValue is num) {
+        rooms = roomsValue.toInt();
+      } else if (roomsValue != null) {
+        rooms = int.tryParse(roomsValue.toString()) ?? 1;
+      }
+
+      if (rooms <= 0) {
+        rooms = 1;
+      }
+
+      final List<DocumentReference<Map<String, dynamic>>> lockReferences =
+        slotIds.map((String slotId) {
+      return _firestore.collection(locksCollection).doc(slotId);
+    }).toList();
+
+    final List<DocumentSnapshot<Map<String, dynamic>>> lockSnapshots =
+        <DocumentSnapshot<Map<String, dynamic>>>[];
+
+    for (final DocumentReference<Map<String, dynamic>> reference
+        in lockReferences) {
+      lockSnapshots.add(await transaction.get(reference));
+    }
+
+    for (int index = 0; index < lockReferences.length; index++) {
+      final DocumentReference<Map<String, dynamic>> reference =
+          lockReferences[index];
+      final Map<String, dynamic>? lockData = lockSnapshots[index].data();
+
+      int reserved = 0;
+      final dynamic reservedValue = lockData?['reservedRooms'];
+
+      if (reservedValue is num) {
+        reserved = reservedValue.toInt();
+      } else if (reservedValue != null) {
+        reserved = int.tryParse(reservedValue.toString()) ?? 0;
+      }
+
+      final int nextReserved = reserved - rooms;
+
+      transaction.set(
+        reference,
+        <String, dynamic>{
+          'reservedRooms': nextReserved < 0 ? 0 : nextReserved,
+          'updatedAt': FieldValue.serverTimestamp(),
+        },
+        SetOptions(merge: true),
+      );
+    }
+
+    transaction.update(
+      bookingReference,
+      <String, dynamic>{
+        'bookingStatus': status,
+        'inventoryLockReleased': true,
+        'inventoryLockReleasedAt': FieldValue.serverTimestamp(),
+        'updatedAt': FieldValue.serverTimestamp(),
+      },
+     );
+  });
+}
+}

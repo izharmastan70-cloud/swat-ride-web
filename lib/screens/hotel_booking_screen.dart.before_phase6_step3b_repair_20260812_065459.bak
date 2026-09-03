@@ -1,0 +1,2635 @@
+import 'dart:convert';
+import 'dart:math';
+
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+
+class HotelBookingScreen extends StatefulWidget {
+  const HotelBookingScreen({
+    super.key,
+    required this.hotel,
+    required this.room,
+    required this.roomPrice,
+    this.rooms = const <Map<String, dynamic>>[],
+  });
+
+  final Map<String, dynamic> hotel;
+  final Map<String, dynamic> room;
+  final int roomPrice;
+
+  /// Optional full room list for this hotel.
+  /// Existing calls remain compatible because this defaults to an empty list.
+  final List<Map<String, dynamic>> rooms;
+
+  @override
+  State<HotelBookingScreen> createState() =>
+      _HotelBookingScreenState();
+}
+
+class _HotelBookingScreenState
+    extends State<HotelBookingScreen> {
+  static const Color yellow = Color(0xFFFFD60A);
+  static const Color darkCard = Color(0xFF1A1A1A);
+  static const Color darkBackground = Color(0xFF0D0D0D);
+
+  final GlobalKey<FormState> formKey =
+      GlobalKey<FormState>();
+
+  final FirebaseFirestore _firestore =
+      FirebaseFirestore.instance;
+
+  final TextEditingController guestNameController =
+      TextEditingController();
+  final TextEditingController phoneController =
+      TextEditingController();
+  final TextEditingController cnicController =
+      TextEditingController();
+  final TextEditingController notesController =
+      TextEditingController();
+  final TextEditingController checkInController =
+      TextEditingController();
+  final TextEditingController checkOutController =
+      TextEditingController();
+
+  bool _isSavingBooking = false;
+
+  late Map<String, dynamic> _selectedRoom;
+  late List<Map<String, dynamic>> _roomOptions;
+
+  DateTime? checkInDate;
+  DateTime? checkOutDate;
+
+  int adultCount = 1;
+  int childCount = 0;
+  int roomCount = 1;
+  int extraBedCount = 0;
+
+  String selectedPaymentMethod = 'Cash';
+
+  final List<String> paymentMethods = const <String>[
+    'Cash',
+    'JazzCash',
+    'Easypaisa',
+    'Wallet',
+  ];
+
+  List<Map<String, dynamic>> _buildRoomOptions() {
+    final List<Map<String, dynamic>> options =
+        <Map<String, dynamic>>[];
+
+    void addRoom(Map<String, dynamic> room) {
+      final String id = _roomId(room);
+
+      final bool duplicate = options.any(
+        (item) =>
+            id.isNotEmpty &&
+            _roomId(item) == id,
+      );
+
+      if (!duplicate) {
+        options.add(
+          Map<String, dynamic>.from(room),
+        );
+      }
+    }
+
+    addRoom(widget.room);
+
+    for (final room in widget.rooms) {
+      addRoom(room);
+    }
+
+    final dynamic hotelRooms = widget.hotel['rooms'];
+
+    if (hotelRooms is List) {
+      for (final dynamic item in hotelRooms) {
+        if (item is Map) {
+          addRoom(
+            Map<String, dynamic>.from(item),
+          );
+        }
+      }
+    }
+
+    return options;
+  }
+
+  String _roomId(
+    Map<String, dynamic> room,
+  ) {
+    return room['id']?.toString() ??
+        room['roomId']?.toString() ??
+        room['roomName']?.toString() ??
+        room['roomType']?.toString() ??
+        room['name']?.toString() ??
+        '';
+  }
+
+  String get selectedRoomName =>
+      _selectedRoom['roomName']?.toString() ??
+      _selectedRoom['roomType']?.toString() ??
+      _selectedRoom['name']?.toString() ??
+      'Selected Room';
+
+  int get roomAdults =>
+      _readInt(_selectedRoom['adults'], fallback: 2);
+
+  int get roomChildren {
+    final int configured =
+        _readInt(_selectedRoom['children']);
+
+    // Safe fallback for older/testing room records.
+    return configured > 0 ? configured : 2;
+  }
+
+  int get roomCapacity {
+    final int configured =
+        _readInt(_selectedRoom['capacity']);
+
+    if (configured > 0) {
+      return configured;
+    }
+
+    final int value =
+        roomAdults + roomChildren;
+
+    return value > 0 ? value : 2;
+  }
+
+  int get availableRoomQuantity {
+    final int available = _readInt(
+      _selectedRoom['availableQuantity'],
+    );
+
+    if (available > 0) {
+      return available;
+    }
+
+    final int configured = _readInt(
+      _selectedRoom['quantity'],
+    );
+
+    // Safe testing fallback when room stock was not configured.
+    return configured > 1 ? configured : 10;
+  }
+
+  bool get extraBedAllowed =>
+      _selectedRoom['extraBedAllowed'] == true;
+
+  int get totalGuests =>
+      adultCount + childCount;
+
+  int get totalNights {
+    if (checkInDate == null ||
+        checkOutDate == null) {
+      return 0;
+    }
+
+    final int nights =
+        checkOutDate!.difference(checkInDate!).inDays;
+
+    return nights > 0 ? nights : 0;
+  }
+
+  int get minimumRoomsNeeded {
+    final int adultRooms =
+        (adultCount / max(roomAdults, 1)).ceil();
+
+    final int childRooms = roomChildren <= 0
+        ? (childCount > 0
+            ? availableRoomQuantity + 1
+            : 0)
+        : (childCount / roomChildren).ceil();
+
+    final int capacityRooms =
+        (totalGuests / max(roomCapacity, 1)).ceil();
+
+    return max(
+      1,
+      max(
+        adultRooms,
+        max(childRooms, capacityRooms),
+      ),
+    );
+  }
+
+  bool get guestCapacityValid {
+    if (adultCount >
+        roomAdults * roomCount) {
+      return false;
+    }
+
+    if (childCount >
+        roomChildren * roomCount) {
+      return false;
+    }
+
+    return totalGuests <=
+        roomCapacity * roomCount +
+            extraBedCount;
+  }
+
+  bool get datesValid {
+    if (checkInDate == null ||
+        checkOutDate == null) {
+      return false;
+    }
+
+    final DateTime today =
+        _dateOnly(DateTime.now());
+
+    return !checkInDate!.isBefore(today) &&
+        checkOutDate!.isAfter(checkInDate!);
+  }
+
+  bool get canConfirmBooking {
+    return !_isSavingBooking &&
+        datesValid &&
+        totalNights > 0 &&
+        baseNightPrice > 0 &&
+        roomCount >= 1 &&
+        roomCount <= availableRoomQuantity &&
+        guestCapacityValid &&
+        selectedPaymentMethod.isNotEmpty;
+  }
+
+  double get baseNightPrice {
+    final double configured = _readDouble(
+      _selectedRoom['pricePerNight'] ??
+          _selectedRoom['roomPrice'] ??
+          _selectedRoom['price'],
+    );
+
+    if (configured > 0) {
+      return configured;
+    }
+
+    return widget.roomPrice.toDouble();
+  }
+
+  double get weekendNightPrice =>
+      _readDouble(_selectedRoom['weekendPrice']);
+
+  double get seasonalNightPrice =>
+      _readDouble(_selectedRoom['seasonalPrice']);
+
+  double get holidayNightPrice =>
+      _readDouble(_selectedRoom['holidayPrice']);
+
+  double get extraBedPrice =>
+      _readDouble(_selectedRoom['extraBedPrice']);
+
+  double get discountPrice =>
+      _readDouble(_selectedRoom['discountPrice']);
+
+  bool get seasonalPricingActive =>
+      _selectedRoom['seasonalPricingActive'] == true;
+
+  bool get holidayPricingActive =>
+      _selectedRoom['holidayPricingActive'] == true;
+
+  double _priceForDate(DateTime date) {
+    if (holidayPricingActive &&
+        holidayNightPrice > 0) {
+      return holidayNightPrice;
+    }
+
+    if (seasonalPricingActive &&
+        seasonalNightPrice > 0) {
+      return seasonalNightPrice;
+    }
+
+    final bool weekend =
+        date.weekday == DateTime.friday ||
+            date.weekday == DateTime.saturday;
+
+    if (weekend && weekendNightPrice > 0) {
+      return weekendNightPrice;
+    }
+
+    return baseNightPrice;
+  }
+
+  double get staySubtotal {
+    if (checkInDate == null ||
+        totalNights <= 0) {
+      return 0;
+    }
+
+    double total = 0;
+
+    for (int index = 0;
+        index < totalNights;
+        index++) {
+      final DateTime date =
+          checkInDate!.add(Duration(days: index));
+
+      total += _priceForDate(date) * roomCount;
+    }
+
+    return total;
+  }
+
+  double get extraBedTotal =>
+      extraBedAllowed
+          ? extraBedPrice *
+              extraBedCount *
+              totalNights
+          : 0;
+
+  double get calculatedDiscount {
+    if (discountPrice <= 0 ||
+        totalNights <= 0) {
+      return 0;
+    }
+
+    return discountPrice * roomCount;
+  }
+
+  double get totalPrice {
+    final double value =
+        staySubtotal +
+            extraBedTotal -
+            calculatedDiscount;
+
+    return value < 0 ? 0 : value;
+  }
+
+  @override
+  void initState() {
+    super.initState();
+
+    _selectedRoom =
+        Map<String, dynamic>.from(widget.room);
+    _roomOptions = _buildRoomOptions();
+
+    final User? user =
+        FirebaseAuth.instance.currentUser;
+
+    if (user?.displayName != null) {
+      guestNameController.text =
+          user!.displayName!;
+    }
+
+    if (user?.phoneNumber != null) {
+      phoneController.text =
+          user!.phoneNumber!;
+    }
+  }
+
+  @override
+  void dispose() {
+    guestNameController.dispose();
+    phoneController.dispose();
+    cnicController.dispose();
+    notesController.dispose();
+    checkInController.dispose();
+    checkOutController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final String hotelName =
+        widget.hotel['name']?.toString() ??
+            widget.hotel['hotelName']?.toString() ??
+            'Swat Hotel';
+
+    final String hotelLocation =
+        widget.hotel['location']?.toString() ??
+            widget.hotel['address']?.toString() ??
+            'Swat';
+
+    final String roomName =
+        selectedRoomName;
+
+    final int roomBeds =
+        _readInt(_selectedRoom['beds'], fallback: 1);
+
+    return Scaffold(
+      backgroundColor: darkBackground,
+      appBar: AppBar(
+        backgroundColor: darkBackground,
+        elevation: 0,
+        iconTheme: const IconThemeData(
+          color: Colors.white,
+        ),
+        title: const Text(
+          'Hotel Booking',
+          style: TextStyle(
+            color: Colors.white,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+      ),
+      body: SafeArea(
+        child: Form(
+          key: formKey,
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.fromLTRB(
+              16,
+              8,
+              16,
+              30,
+            ),
+            child: Column(
+              crossAxisAlignment:
+                  CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Complete Your Booking',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 27,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                const Text(
+                  'Enter guest details, select stay dates and review the live room price.',
+                  style: TextStyle(
+                    color: Colors.grey,
+                    fontSize: 14,
+                    height: 1.5,
+                  ),
+                ),
+                const SizedBox(height: 22),
+
+                _hotelSummary(
+                  hotelName,
+                  hotelLocation,
+                ),
+
+                const SizedBox(height: 14),
+
+                _roomSummary(
+                  roomName: roomName,
+                  roomBeds: roomBeds,
+                ),
+
+                const SizedBox(height: 24),
+
+                _sectionTitle('Guest Details'),
+                const SizedBox(height: 12),
+
+                _textField(
+                  controller:
+                      guestNameController,
+                  label: 'Full Name',
+                  icon: Icons.person,
+                  validator: _requiredValidator,
+                ),
+
+                const SizedBox(height: 14),
+
+                _textField(
+                  controller: phoneController,
+                  label: 'Phone Number',
+                  icon: Icons.phone,
+                  keyboardType:
+                      TextInputType.phone,
+                  inputFormatters:
+                      <TextInputFormatter>[
+                    FilteringTextInputFormatter.allow(
+                      RegExp(r'[0-9+]'),
+                    ),
+                    LengthLimitingTextInputFormatter(
+                      13,
+                    ),
+                  ],
+                  validator: _phoneValidator,
+                ),
+
+                const SizedBox(height: 14),
+
+                _textField(
+                  controller: cnicController,
+                  label: 'CNIC Number',
+                  icon: Icons.badge,
+                  keyboardType:
+                      TextInputType.number,
+                  inputFormatters:
+                      <TextInputFormatter>[
+                    FilteringTextInputFormatter
+                        .digitsOnly,
+                    _CnicInputFormatter(),
+                    LengthLimitingTextInputFormatter(
+                      15,
+                    ),
+                  ],
+                  validator: _cnicValidator,
+                ),
+
+                const SizedBox(height: 24),
+
+                _sectionTitle('Stay Dates'),
+                const SizedBox(height: 12),
+
+                _typedDateField(
+                  controller:
+                      checkInController,
+                  title: 'Check-in Date',
+                  icon: Icons.login,
+                  onCalendarTap:
+                      _selectCheckInDate,
+                  isCheckIn: true,
+                ),
+
+                const SizedBox(height: 12),
+
+                _typedDateField(
+                  controller:
+                      checkOutController,
+                  title: 'Check-out Date',
+                  icon: Icons.logout,
+                  onCalendarTap:
+                      _selectCheckOutDate,
+                  isCheckIn: false,
+                ),
+
+                const SizedBox(height: 8),
+
+                Text(
+                  totalNights > 0
+                      ? '$totalNights night(s) selected.'
+                      : 'Type 05082026 and it will become 05/08/2026, or use the calendar.',
+                  style: TextStyle(
+                    color: totalNights > 0
+                        ? yellow
+                        : Colors.grey,
+                    fontSize: 11,
+                    fontWeight: totalNights > 0
+                        ? FontWeight.bold
+                        : FontWeight.normal,
+                  ),
+                ),
+
+                const SizedBox(height: 24),
+
+                _sectionTitle(
+                  'Guests & Rooms',
+                ),
+                const SizedBox(height: 12),
+
+                _counterCard(
+                  icon: Icons.person_outline,
+                  title: 'Adults',
+                  subtitle:
+                      'Maximum configured adult capacity per room: $roomAdults',
+                  value: adultCount,
+                  min: 1,
+                  max: max(
+                    roomAdults *
+                        availableRoomQuantity,
+                    1,
+                  ),
+                  onChanged: (value) {
+                    setState(() {
+                      adultCount = value;
+                      _applyRecommendedRoomCount();
+                    });
+                  },
+                ),
+
+                const SizedBox(height: 12),
+
+                _counterCard(
+                  icon: Icons.child_care,
+                  title: 'Children',
+                  subtitle:
+                      'Select number of children.',
+                  value: childCount,
+                  min: 0,
+                  max: max(
+                    roomChildren *
+                        availableRoomQuantity,
+                    0,
+                  ),
+                  onChanged: (value) {
+                    setState(() {
+                      childCount = value;
+                      _applyRecommendedRoomCount();
+                    });
+                  },
+                ),
+
+                const SizedBox(height: 12),
+
+                _counterCard(
+                  icon: Icons.meeting_room,
+                  title: 'Rooms',
+                  subtitle:
+                      'Select how many rooms you need. Maximum selectable: $availableRoomQuantity.',
+                  value: roomCount,
+                  min: 1,
+                  max: availableRoomQuantity > 0
+                      ? availableRoomQuantity
+                      : 1,
+                  onChanged: (value) {
+                    setState(() {
+                      roomCount = value;
+
+                      if (extraBedCount >
+                          roomCount) {
+                        extraBedCount =
+                            roomCount;
+                      }
+                    });
+                  },
+                ),
+
+                if (!guestCapacityValid) ...[
+                  const SizedBox(height: 10),
+                  _warningCard(
+                    minimumRoomsNeeded >
+                            availableRoomQuantity
+                        ? 'This room type cannot fit the selected guests. Choose another room.'
+                        : 'Increase rooms to at least $minimumRoomsNeeded or choose another room type.',
+                  ),
+                ],
+
+                if (extraBedAllowed) ...[
+                  const SizedBox(height: 12),
+                  _counterCard(
+                    icon:
+                        Icons.bedroom_parent_outlined,
+                    title: 'Extra Beds',
+                    subtitle: extraBedPrice > 0
+                        ? 'PKR ${_money(extraBedPrice)} per bed per night.'
+                        : 'Extra bed allowed. Price not configured.',
+                    value: extraBedCount,
+                    min: 0,
+                    max: roomCount,
+                    onChanged: (value) {
+                      setState(() {
+                        extraBedCount = value;
+                      });
+                    },
+                  ),
+                ],
+
+                const SizedBox(height: 24),
+
+                _sectionTitle('Payment Method'),
+                const SizedBox(height: 12),
+
+                ...paymentMethods.map(
+                  (method) => Padding(
+                    padding:
+                        const EdgeInsets.only(
+                      bottom: 10,
+                    ),
+                    child:
+                        _paymentCard(method),
+                  ),
+                ),
+
+                if (selectedPaymentMethod !=
+                    'Cash')
+                  _warningCard(
+                    '$selectedPaymentMethod is in testing bypass mode. No real money will be charged.',
+                  ),
+
+                const SizedBox(height: 14),
+
+                _sectionTitle('Special Request'),
+                const SizedBox(height: 12),
+
+                _textField(
+                  controller: notesController,
+                  label:
+                      'Optional booking notes',
+                  icon: Icons.notes,
+                  maxLines: 3,
+                ),
+
+                const SizedBox(height: 24),
+
+                _sectionTitle('Booking Summary'),
+                const SizedBox(height: 12),
+
+                _bookingSummary(
+                  hotelName: hotelName,
+                  roomName: roomName,
+                ),
+
+                const SizedBox(height: 24),
+
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton.icon(
+                    onPressed:
+                        canConfirmBooking
+                            ? _submitBooking
+                            : null,
+                    icon: _isSavingBooking
+                        ? const SizedBox(
+                            width: 20,
+                            height: 20,
+                            child:
+                                CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: Colors.black,
+                            ),
+                          )
+                        : const Icon(
+                            Icons.check_circle,
+                            color: Colors.black,
+                          ),
+                    label: Text(
+                      _isSavingBooking
+                          ? 'Checking Availability...'
+                          : 'Confirm Hotel Booking',
+                      style: const TextStyle(
+                        color: Colors.black,
+                        fontSize: 16,
+                        fontWeight:
+                            FontWeight.bold,
+                      ),
+                    ),
+                    style:
+                        ElevatedButton.styleFrom(
+                      backgroundColor: yellow,
+                      disabledBackgroundColor:
+                          Colors.grey.shade700,
+                      foregroundColor:
+                          Colors.black,
+                      padding:
+                          const EdgeInsets.symmetric(
+                        vertical: 16,
+                      ),
+                      shape:
+                          RoundedRectangleBorder(
+                        borderRadius:
+                            BorderRadius.circular(
+                          14,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+
+                if (!canConfirmBooking &&
+                    !_isSavingBooking) ...[
+                  const SizedBox(height: 10),
+                  const Text(
+                    'Select valid dates, guests, rooms and payment method to enable confirmation.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      color: Colors.grey,
+                      fontSize: 11,
+                    ),
+                  ),
+                ],
+
+                const SizedBox(height: 12),
+
+                const Text(
+                  'Testing mode is active. Booking and availability records use Firestore, while real online payment remains bypassed.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    color: Colors.grey,
+                    fontSize: 11,
+                    height: 1.4,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _hotelSummary(
+    String hotelName,
+    String hotelLocation,
+  ) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: darkCard,
+        borderRadius:
+            BorderRadius.circular(18),
+        border: Border.all(
+          color: Colors.white.withValues(
+            alpha: 0.06,
+          ),
+        ),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 58,
+            height: 58,
+            decoration: BoxDecoration(
+              color:
+                  yellow.withValues(alpha: 0.12),
+              borderRadius:
+                  BorderRadius.circular(16),
+            ),
+            child: const Icon(
+              Icons.hotel,
+              color: yellow,
+              size: 30,
+            ),
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment:
+                  CrossAxisAlignment.start,
+              children: [
+                Text(
+                  hotelName,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 17,
+                    fontWeight:
+                        FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(height: 5),
+                Row(
+                  children: [
+                    const Icon(
+                      Icons.location_on,
+                      color: yellow,
+                      size: 15,
+                    ),
+                    const SizedBox(width: 4),
+                    Expanded(
+                      child: Text(
+                        hotelLocation,
+                        style: const TextStyle(
+                          color: Colors.grey,
+                          fontSize: 12,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _roomSummary({
+    required String roomName,
+    required int roomBeds,
+  }) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: darkCard,
+        borderRadius:
+            BorderRadius.circular(18),
+        border: Border.all(
+          color:
+              yellow.withValues(alpha: 0.18),
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment:
+            CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(
+                Icons.bed,
+                color: yellow,
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  roomName,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 17,
+                    fontWeight:
+                        FontWeight.bold,
+                  ),
+                ),
+              ),
+              if (_roomOptions.length > 1)
+                OutlinedButton.icon(
+                  onPressed: _showRoomSelector,
+                  icon: const Icon(
+                    Icons.swap_horiz,
+                    size: 18,
+                  ),
+                  label: const Text('Change'),
+                ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          _summaryRow(
+            'Capacity',
+            '$roomAdults adult(s), '
+                '$roomChildren child(ren)',
+          ),
+          _summaryRow(
+            'Beds',
+            '$roomBeds',
+          ),
+          _summaryRow(
+            'Available Quantity',
+            '$availableRoomQuantity',
+          ),
+          _summaryRow(
+            'Base Night Price',
+            baseNightPrice > 0
+                ? 'PKR ${_money(baseNightPrice)}'
+                : 'Price on request',
+          ),
+          if (weekendNightPrice > 0)
+            _summaryRow(
+              'Weekend Price',
+              'PKR ${_money(weekendNightPrice)}',
+            ),
+          if (seasonalPricingActive &&
+              seasonalNightPrice > 0)
+            _summaryRow(
+              'Active Seasonal Price',
+              'PKR ${_money(seasonalNightPrice)}',
+            ),
+          if (holidayPricingActive &&
+              holidayNightPrice > 0)
+            _summaryRow(
+              'Active Holiday Price',
+              'PKR ${_money(holidayNightPrice)}',
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _bookingSummary({
+    required String hotelName,
+    required String roomName,
+  }) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: darkCard,
+        borderRadius:
+            BorderRadius.circular(18),
+        border: Border.all(
+          color: Colors.white.withValues(
+            alpha: 0.06,
+          ),
+        ),
+      ),
+      child: Column(
+        children: [
+          _summaryRow('Hotel', hotelName),
+          _summaryRow('Room', roomName),
+          _summaryRow(
+            'Check-in',
+            _formatDate(checkInDate),
+          ),
+          _summaryRow(
+            'Check-out',
+            _formatDate(checkOutDate),
+          ),
+          _summaryRow(
+            'Nights',
+            totalNights > 0
+                ? '$totalNights'
+                : 'Not selected',
+          ),
+          _summaryRow(
+            'Adults',
+            '$adultCount',
+          ),
+          _summaryRow(
+            'Children',
+            '$childCount',
+          ),
+          _summaryRow(
+            'Rooms',
+            '$roomCount',
+          ),
+          if (extraBedCount > 0)
+            _summaryRow(
+              'Extra Beds',
+              '$extraBedCount',
+            ),
+          _summaryRow(
+            'Payment',
+            selectedPaymentMethod,
+          ),
+          const Divider(
+            color: Colors.white12,
+            height: 24,
+          ),
+          _summaryRow(
+            'Room Subtotal',
+            totalNights > 0
+                ? 'PKR ${_money(staySubtotal)}'
+                : 'Select dates',
+          ),
+          if (extraBedTotal > 0)
+            _summaryRow(
+              'Extra Bed Total',
+              'PKR ${_money(extraBedTotal)}',
+            ),
+          if (calculatedDiscount > 0)
+            _summaryRow(
+              'Discount',
+              '- PKR ${_money(calculatedDiscount)}',
+            ),
+          const SizedBox(height: 4),
+          Row(
+            children: [
+              const Expanded(
+                child: Text(
+                  'Estimated Total',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 16,
+                    fontWeight:
+                        FontWeight.bold,
+                  ),
+                ),
+              ),
+              Text(
+                totalPrice > 0
+                    ? 'PKR ${_money(totalPrice)}'
+                    : 'Select dates',
+                style: const TextStyle(
+                  color: yellow,
+                  fontSize: 18,
+                  fontWeight:
+                      FontWeight.bold,
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _typedDateField({
+    required TextEditingController controller,
+    required String title,
+    required IconData icon,
+    required VoidCallback onCalendarTap,
+    required bool isCheckIn,
+  }) {
+    return TextFormField(
+      controller: controller,
+      keyboardType:
+          TextInputType.number,
+      inputFormatters:
+          <TextInputFormatter>[
+        FilteringTextInputFormatter
+            .digitsOnly,
+        _DateInputFormatter(),
+        LengthLimitingTextInputFormatter(
+          10,
+        ),
+      ],
+      style: const TextStyle(
+        color: Colors.white,
+      ),
+      onChanged: (value) {
+        _applyTypedDate(
+          value: value,
+          isCheckIn: isCheckIn,
+        );
+      },
+      decoration: InputDecoration(
+        labelText: title,
+        hintText: 'DD/MM/YYYY',
+        labelStyle: const TextStyle(
+          color: Colors.grey,
+        ),
+        hintStyle: const TextStyle(
+          color: Colors.grey,
+        ),
+        prefixIcon: Icon(
+          icon,
+          color: yellow,
+        ),
+        suffixIcon: IconButton(
+          onPressed: onCalendarTap,
+          icon: const Icon(
+            Icons.calendar_today,
+            color: yellow,
+          ),
+        ),
+        filled: true,
+        fillColor: darkCard,
+        border: OutlineInputBorder(
+          borderRadius:
+              BorderRadius.circular(14),
+          borderSide: BorderSide.none,
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius:
+              BorderRadius.circular(14),
+          borderSide:
+              const BorderSide(color: yellow),
+        ),
+      ),
+      validator: (value) {
+        if (value == null ||
+            value.trim().isEmpty) {
+          return 'Please enter or select date.';
+        }
+
+        final DateTime? parsed =
+            _parseDate(value);
+
+        if (parsed == null) {
+          return 'Enter a valid DD/MM/YYYY date.';
+        }
+
+        final DateTime today =
+            _dateOnly(DateTime.now());
+
+        if (isCheckIn &&
+            parsed.isBefore(today)) {
+          return 'Check-in cannot be in the past.';
+        }
+
+        if (!isCheckIn &&
+            checkInDate != null &&
+            !parsed.isAfter(checkInDate!)) {
+          return 'Check-out must be after check-in.';
+        }
+
+        return null;
+      },
+    );
+  }
+
+  Future<void> _selectCheckInDate() async {
+    final DateTime today =
+        _dateOnly(DateTime.now());
+
+    final DateTime? selected =
+        await showDatePicker(
+      context: context,
+      initialDate:
+          checkInDate ?? today,
+      firstDate: today,
+      lastDate: today.add(
+        const Duration(days: 730),
+      ),
+    );
+
+    if (selected == null ||
+        !mounted) {
+      return;
+    }
+
+    setState(() {
+      checkInDate =
+          _dateOnly(selected);
+      checkInController.text =
+          _formatDate(checkInDate);
+
+      if (checkOutDate != null &&
+          !checkOutDate!
+              .isAfter(checkInDate!)) {
+        checkOutDate = null;
+        checkOutController.clear();
+      }
+    });
+  }
+
+  Future<void> _selectCheckOutDate() async {
+    if (checkInDate == null) {
+      _showMessage(
+        'Please enter or select check-in date first.',
+      );
+      return;
+    }
+
+    final DateTime firstCheckOutDate =
+        checkInDate!.add(
+      const Duration(days: 1),
+    );
+
+    final DateTime? selected =
+        await showDatePicker(
+      context: context,
+      initialDate:
+          checkOutDate ??
+              firstCheckOutDate,
+      firstDate:
+          firstCheckOutDate,
+      lastDate:
+          checkInDate!.add(
+        const Duration(days: 730),
+      ),
+    );
+
+    if (selected == null ||
+        !mounted) {
+      return;
+    }
+
+    setState(() {
+      checkOutDate =
+          _dateOnly(selected);
+      checkOutController.text =
+          _formatDate(checkOutDate);
+    });
+  }
+
+  void _applyTypedDate({
+    required String value,
+    required bool isCheckIn,
+  }) {
+    final DateTime? parsed =
+        _parseDate(value);
+
+    final DateTime today =
+        _dateOnly(DateTime.now());
+
+    setState(() {
+      if (isCheckIn) {
+        checkInDate =
+            parsed != null &&
+                    !parsed.isBefore(today)
+                ? parsed
+                : null;
+
+        if (checkInDate != null &&
+            checkOutDate != null &&
+            !checkOutDate!
+                .isAfter(checkInDate!)) {
+          checkOutDate = null;
+          checkOutController.clear();
+        }
+      } else {
+        checkOutDate =
+            parsed != null &&
+                    checkInDate != null &&
+                    parsed.isAfter(
+                      checkInDate!,
+                    )
+                ? parsed
+                : null;
+      }
+    });
+  }
+
+  void _applyRecommendedRoomCount() {
+    final int recommended =
+        minimumRoomsNeeded;
+
+    if (recommended <=
+            availableRoomQuantity &&
+        roomCount < recommended) {
+      roomCount = recommended;
+    }
+  }
+
+  Widget _warningCard(
+    String message,
+  ) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.orange.withValues(
+          alpha: 0.10,
+        ),
+        borderRadius:
+            BorderRadius.circular(12),
+        border: Border.all(
+          color: Colors.orange.withValues(
+            alpha: 0.35,
+          ),
+        ),
+      ),
+      child: Row(
+        crossAxisAlignment:
+            CrossAxisAlignment.start,
+        children: [
+          const Icon(
+            Icons.warning_amber,
+            color: Colors.orange,
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              message,
+              style: const TextStyle(
+                color: Colors.grey,
+                fontSize: 11,
+                height: 1.4,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _showRoomSelector() async {
+    final Map<String, dynamic>? selected =
+        await showModalBottomSheet<
+            Map<String, dynamic>>(
+      context: context,
+      backgroundColor: darkCard,
+      isScrollControlled: true,
+      shape:
+          const RoundedRectangleBorder(
+        borderRadius:
+            BorderRadius.vertical(
+          top: Radius.circular(24),
+        ),
+      ),
+      builder: (sheetContext) {
+        return SafeArea(
+          child: SizedBox(
+            height:
+                MediaQuery.sizeOf(context)
+                        .height *
+                    0.72,
+            child: Column(
+              children: [
+                const Padding(
+                  padding:
+                      EdgeInsets.all(18),
+                  child: Row(
+                    children: [
+                      Icon(
+                        Icons.bed,
+                        color: yellow,
+                      ),
+                      SizedBox(width: 10),
+                      Text(
+                        'Select Room Type',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 20,
+                          fontWeight:
+                              FontWeight.bold,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                Expanded(
+                  child: ListView.builder(
+                    itemCount:
+                        _roomOptions.length,
+                    itemBuilder:
+                        (context, index) {
+                      final Map<String, dynamic>
+                          room =
+                          _roomOptions[index];
+
+                      final String name =
+                          room['roomName']
+                                  ?.toString() ??
+                              room['roomType']
+                                  ?.toString() ??
+                              room['name']
+                                  ?.toString() ??
+                              'Room';
+
+                      final double price =
+                          _readDouble(
+                        room['pricePerNight'] ??
+                            room['roomPrice'] ??
+                            room['price'],
+                      );
+
+                      final int adults =
+                          _readInt(
+                        room['adults'],
+                        fallback: 2,
+                      );
+
+                      final int children =
+                          _readInt(
+                        room['children'],
+                      );
+
+                      final int quantity =
+                          _readInt(
+                        room['availableQuantity'] ??
+                            room['quantity'],
+                        fallback: 1,
+                      );
+
+                      return ListTile(
+                        leading:
+                            const CircleAvatar(
+                          backgroundColor:
+                              Color(
+                            0x22FFD60A,
+                          ),
+                          child: Icon(
+                            Icons.bed_outlined,
+                            color: yellow,
+                          ),
+                        ),
+                        title: Text(
+                          name,
+                          style:
+                              const TextStyle(
+                            color: Colors.white,
+                            fontWeight:
+                                FontWeight.bold,
+                          ),
+                        ),
+                        subtitle: Text(
+                          '$adults adult(s), $children child(ren) • $quantity available',
+                          style:
+                              const TextStyle(
+                            color: Colors.grey,
+                            fontSize: 11,
+                          ),
+                        ),
+                        trailing: Text(
+                          price > 0
+                              ? 'PKR ${_money(price)}'
+                              : 'Price on request',
+                          style:
+                              const TextStyle(
+                            color: yellow,
+                            fontSize: 11,
+                            fontWeight:
+                                FontWeight.bold,
+                          ),
+                        ),
+                        onTap: () {
+                          Navigator.pop(
+                            sheetContext,
+                            room,
+                          );
+                        },
+                      );
+                    },
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+
+    if (selected == null ||
+        !mounted) {
+      return;
+    }
+
+    setState(() {
+      _selectedRoom =
+          Map<String, dynamic>.from(
+        selected,
+      );
+
+      roomCount = 1;
+      extraBedCount = 0;
+
+      final int maxAdults =
+          roomAdults *
+              availableRoomQuantity;
+
+      final int maxChildren =
+          roomChildren *
+              availableRoomQuantity;
+
+      if (adultCount > maxAdults) {
+        adultCount =
+            max(maxAdults, 1);
+      }
+
+      if (childCount > maxChildren) {
+        childCount = maxChildren;
+      }
+
+      _applyRecommendedRoomCount();
+    });
+  }
+
+  Future<void> _submitBooking() async {
+    if (formKey.currentState?.validate() !=
+        true) {
+      return;
+    }
+
+    checkInDate = _parseDate(
+      checkInController.text,
+    );
+    checkOutDate = _parseDate(
+      checkOutController.text,
+    );
+
+    if (checkInDate == null ||
+        checkOutDate == null) {
+      _showMessage(
+        'Enter valid check-in and check-out dates.',
+      );
+      return;
+    }
+
+    final DateTime today =
+        _dateOnly(DateTime.now());
+
+    if (checkInDate!.isBefore(today)) {
+      _showMessage(
+        'Check-in date cannot be in the past.',
+      );
+      return;
+    }
+
+    if (!checkOutDate!
+        .isAfter(checkInDate!)) {
+      _showMessage(
+        'Check-out date must be after check-in date.',
+      );
+      return;
+    }
+
+    if (!guestCapacityValid) {
+      _showMessage(
+        'Selected room(s) do not fit the adults and children.',
+      );
+      return;
+    }
+
+    if (roomCount >
+        availableRoomQuantity) {
+      _showMessage(
+        'Only $availableRoomQuantity room(s) are available.',
+      );
+      return;
+    }
+
+    if (!extraBedAllowed &&
+        extraBedCount > 0) {
+      _showMessage(
+        'Extra bed is not allowed for this room.',
+      );
+      return;
+    }
+
+    final User? user =
+        FirebaseAuth.instance.currentUser;
+
+    if (user == null) {
+      _showMessage(
+        'Please log in before confirming the booking.',
+      );
+      return;
+    }
+
+    setState(() {
+      _isSavingBooking = true;
+    });
+
+    try {
+      final String hotelId =
+          widget.hotel['id']?.toString() ??
+              widget.hotel['hotelId']?.toString() ??
+              '';
+
+      final String roomId =
+          _selectedRoom['id']?.toString() ??
+              _selectedRoom['roomId']?.toString() ??
+              '';
+
+      if (hotelId.isEmpty ||
+          roomId.isEmpty) {
+        throw Exception(
+          'Hotel or room ID is missing.',
+        );
+      }
+
+      final bool available =
+          await _checkLiveAvailability(
+        roomId: roomId,
+      );
+
+      if (!available) {
+        _showMessage(
+          'Selected room is no longer available for these dates.',
+        );
+        return;
+      }
+
+      final String hotelName =
+          widget.hotel['name']?.toString() ??
+              widget.hotel['hotelName']?.toString() ??
+              'Swat Hotel';
+
+      final String hotelLocation =
+          widget.hotel['location']?.toString() ??
+              widget.hotel['address']?.toString() ??
+              'Swat';
+
+      final String hotelPhone =
+          widget.hotel['phone']?.toString() ??
+              widget.hotel['phoneNumber']?.toString() ??
+              widget.hotel['helpline']?.toString() ??
+              '';
+
+      final String roomName =
+          selectedRoomName;
+
+      final String roomNumber =
+          _selectedRoom['roomNumber']?.toString() ??
+              '';
+
+      final DocumentReference<
+              Map<String, dynamic>>
+          bookingReference =
+          _firestore
+              .collection('hotel_bookings')
+              .doc();
+
+      final String qrToken = _createSecureToken();
+      final String verificationPin = _createVerificationPin();
+      final String qrPayload = _createQrPayload(
+        bookingId: bookingReference.id,
+        token: qrToken,
+      );
+
+      await bookingReference.set(
+        <String, dynamic>{
+          'bookingId':
+              bookingReference.id,
+          'userId': user.uid,
+          'customerId': user.uid,
+          'hotelId': hotelId,
+          'hotelName': hotelName,
+          'hotelLocation':
+              hotelLocation,
+          'hotelPhone': hotelPhone,
+          'roomId': roomId,
+          'roomName': roomName,
+          'roomNumber': roomNumber,
+          'guestName':
+              guestNameController.text.trim(),
+          'guestPhone':
+              phoneController.text.trim(),
+          'guestCnic':
+              cnicController.text.trim(),
+          'guestEmail':
+              user.email ?? '',
+          'notes':
+              notesController.text.trim(),
+          'checkIn':
+              Timestamp.fromDate(
+            checkInDate!,
+          ),
+          'checkOut':
+              Timestamp.fromDate(
+            checkOutDate!,
+          ),
+          'hotelCheckOutHour':
+              _readInt(
+            widget.hotel[
+                'checkOutHour'],
+            fallback: 12,
+          ),
+          'hotelCheckOutMinute':
+              _readInt(
+            widget.hotel[
+                'checkOutMinute'],
+          ),
+          'nights': totalNights,
+          'adults': adultCount,
+          'children': childCount,
+          'guests': totalGuests,
+          'rooms': roomCount,
+          'extraBeds':
+              extraBedCount,
+          'baseNightPrice':
+              baseNightPrice,
+          'weekendPrice':
+              weekendNightPrice,
+          'seasonalPrice':
+              seasonalNightPrice,
+          'holidayPrice':
+              holidayNightPrice,
+          'seasonalPricingActive':
+              seasonalPricingActive,
+          'holidayPricingActive':
+              holidayPricingActive,
+          'extraBedPrice':
+              extraBedPrice,
+          'discountPrice':
+              discountPrice,
+          'staySubtotal':
+              staySubtotal,
+          'extraBedTotal':
+              extraBedTotal,
+          'discountTotal':
+              calculatedDiscount,
+          'totalAmount':
+              totalPrice,
+          'paymentMethod':
+              selectedPaymentMethod,
+          'paymentStatus':
+              selectedPaymentMethod ==
+                      'Cash'
+                  ? 'cash_pending'
+                  : 'testing_bypassed',
+          'bookingStatus':
+              'pending_hotel_confirmation',
+          'availabilityChecked':
+              true,
+          'isTestingMode': true,
+          'realPaymentProcessed':
+              false,
+          'storageUploadUsed':
+              false,
+
+          // Secure hotel check-in verification.
+          // Firestore rules must restrict this booking to the customer,
+          // the matching hotel staff and SWAT RIDE Super Admin.
+          'qrPayload': qrPayload,
+          'qrToken': qrToken,
+          'qrIsActive': true,
+          'qrCreatedAt': FieldValue.serverTimestamp(),
+          'qrUsedAt': null,
+          'verificationPin': verificationPin,
+          'verificationPinIsActive': true,
+          'checkInMethod': '',
+          'checkedInBy': '',
+          'checkedInAt': null,
+
+          'createdAt':
+              FieldValue.serverTimestamp(),
+          'updatedAt':
+              FieldValue.serverTimestamp(),
+        },
+      );
+
+      if (!mounted) {
+        return;
+      }
+
+      _showTestBookingConfirmation(
+        bookingId:
+            bookingReference.id,
+      );
+
+      // =====================================================
+      // REAL PAYMENT / BILLING CODE - KEEP COMMENTED
+      // =====================================================
+      //
+      // For JazzCash / Easypaisa / Wallet:
+      // 1. Create server-side payment intent.
+      // 2. Verify transaction from trusted backend/webhook.
+      // 3. Set realPaymentProcessed = true.
+      // 4. Change paymentStatus to paid/advance_paid.
+      // 5. Confirm booking after verified payment.
+      //
+      // Firebase Storage remains bypassed.
+      // =====================================================
+    } catch (error) {
+      _showMessage(
+        'Unable to save hotel booking: $error',
+      );
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isSavingBooking = false;
+        });
+      }
+    }
+  }
+
+  Future<bool> _checkLiveAvailability({
+    required String roomId,
+  }) async {
+    final QuerySnapshot<
+            Map<String, dynamic>>
+        snapshot = await _firestore
+            .collection('hotel_bookings')
+            .where(
+              'roomId',
+              isEqualTo: roomId,
+            )
+            .get();
+
+    int reservedRooms = 0;
+
+    for (final document
+        in snapshot.docs) {
+      final Map<String, dynamic> data =
+          document.data();
+
+      final String status =
+          data['bookingStatus']
+                  ?.toString() ??
+              '';
+
+      if (status == 'cancelled' ||
+          status == 'rejected' ||
+          status == 'checked_out') {
+        continue;
+      }
+
+      final DateTime? existingCheckIn =
+          _readDate(data['checkIn']);
+
+      final DateTime? existingCheckOut =
+          _readDate(data['checkOut']);
+
+      if (existingCheckIn == null ||
+          existingCheckOut == null) {
+        continue;
+      }
+
+      final bool overlaps =
+          checkInDate!
+                  .isBefore(existingCheckOut) &&
+              checkOutDate!
+                  .isAfter(existingCheckIn);
+
+      if (overlaps) {
+        reservedRooms += _readInt(
+          data['rooms'],
+          fallback: 1,
+        );
+      }
+    }
+
+    return reservedRooms + roomCount <=
+        availableRoomQuantity;
+  }
+
+  void _showTestBookingConfirmation({
+    required String bookingId,
+  }) {
+    final String hotelName =
+        widget.hotel['name']?.toString() ??
+            widget.hotel['hotelName']?.toString() ??
+            'Swat Hotel';
+
+    final String roomName =
+        selectedRoomName;
+
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) {
+        return AlertDialog(
+          backgroundColor: darkCard,
+          title: const Row(
+            children: [
+              Icon(
+                Icons.check_circle,
+                color: yellow,
+              ),
+              SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  'Booking Saved',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontWeight:
+                        FontWeight.bold,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          content:
+              SingleChildScrollView(
+            child: Column(
+              mainAxisSize:
+                  MainAxisSize.min,
+              crossAxisAlignment:
+                  CrossAxisAlignment.start,
+              children: [
+                _dialogRow(
+                  'Booking ID',
+                  bookingId,
+                ),
+                _dialogRow(
+                  'Hotel',
+                  hotelName,
+                ),
+                _dialogRow(
+                  'Room',
+                  roomName,
+                ),
+                _dialogRow(
+                  'Guest',
+                  guestNameController
+                      .text
+                      .trim(),
+                ),
+                _dialogRow(
+                  'Stay',
+                  '$totalNights night(s)',
+                ),
+                _dialogRow(
+                  'Adults',
+                  '$adultCount',
+                ),
+                _dialogRow(
+                  'Children',
+                  '$childCount',
+                ),
+                _dialogRow(
+                  'Rooms',
+                  '$roomCount',
+                ),
+                if (extraBedCount > 0)
+                  _dialogRow(
+                    'Extra Beds',
+                    '$extraBedCount',
+                  ),
+                _dialogRow(
+                  'Payment',
+                  selectedPaymentMethod,
+                ),
+                _dialogRow(
+                  'Estimated Total',
+                  'PKR ${_money(totalPrice)}',
+                ),
+                const SizedBox(height: 14),
+                Container(
+                  width: double.infinity,
+                  padding:
+                      const EdgeInsets.all(
+                    12,
+                  ),
+                  decoration:
+                      BoxDecoration(
+                    color: yellow.withValues(
+                      alpha: 0.10,
+                    ),
+                    borderRadius:
+                        BorderRadius.circular(
+                      12,
+                    ),
+                  ),
+                  child: const Text(
+                    'Booking and live date availability were checked in Firestore. Real online payment remains bypassed.',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 12,
+                      height: 1.4,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            ElevatedButton(
+              onPressed: () {
+                Navigator.pop(
+                  dialogContext,
+                );
+                Navigator.popUntil(
+                  context,
+                  (route) =>
+                      route.isFirst,
+                );
+              },
+              style:
+                  ElevatedButton.styleFrom(
+                backgroundColor: yellow,
+                foregroundColor:
+                    Colors.black,
+              ),
+              child: const Text(
+                'Done',
+                style: TextStyle(
+                  fontWeight:
+                      FontWeight.bold,
+                ),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  Widget _sectionTitle(
+    String title,
+  ) {
+    return Text(
+      title,
+      style: const TextStyle(
+        color: Colors.white,
+        fontSize: 19,
+        fontWeight: FontWeight.bold,
+      ),
+    );
+  }
+
+  Widget _textField({
+    required TextEditingController controller,
+    required String label,
+    required IconData icon,
+    TextInputType keyboardType =
+        TextInputType.text,
+    int maxLines = 1,
+    List<TextInputFormatter>? inputFormatters,
+    String? Function(String?)? validator,
+  }) {
+    return TextFormField(
+      controller: controller,
+      keyboardType: keyboardType,
+      maxLines: maxLines,
+      inputFormatters: inputFormatters,
+      validator: validator,
+      style: const TextStyle(
+        color: Colors.white,
+      ),
+      decoration: InputDecoration(
+        labelText: label,
+        labelStyle: const TextStyle(
+          color: Colors.grey,
+        ),
+        prefixIcon: Icon(
+          icon,
+          color: yellow,
+        ),
+        filled: true,
+        fillColor: darkCard,
+        border: OutlineInputBorder(
+          borderRadius:
+              BorderRadius.circular(14),
+          borderSide: BorderSide.none,
+        ),
+        focusedBorder:
+            OutlineInputBorder(
+          borderRadius:
+              BorderRadius.circular(14),
+          borderSide:
+              const BorderSide(
+            color: yellow,
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _counterCard({
+    required IconData icon,
+    required String title,
+    required String subtitle,
+    required int value,
+    required int min,
+    required int max,
+    required ValueChanged<int>
+        onChanged,
+  }) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: darkCard,
+        borderRadius:
+            BorderRadius.circular(16),
+      ),
+      child: Row(
+        children: [
+          Icon(
+            icon,
+            color: yellow,
+            size: 28,
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment:
+                  CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontWeight:
+                        FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  subtitle,
+                  style: const TextStyle(
+                    color: Colors.grey,
+                    fontSize: 11,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          IconButton(
+            onPressed: value > min
+                ? () => onChanged(
+                      value - 1,
+                    )
+                : null,
+            icon: Icon(
+              Icons.remove_circle,
+              color: value > min
+                  ? yellow
+                  : Colors.grey.shade700,
+            ),
+          ),
+          Text(
+            '$value',
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 18,
+              fontWeight:
+                  FontWeight.bold,
+            ),
+          ),
+          IconButton(
+            onPressed: value < max
+                ? () => onChanged(
+                      value + 1,
+                    )
+                : null,
+            icon: Icon(
+              Icons.add_circle,
+              color: value < max
+                  ? yellow
+                  : Colors.grey.shade700,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _paymentCard(
+    String method,
+  ) {
+    final bool selected =
+        selectedPaymentMethod == method;
+
+    IconData icon;
+
+    switch (method) {
+      case 'JazzCash':
+        icon = Icons.phone_android;
+        break;
+      case 'Easypaisa':
+        icon = Icons.smartphone;
+        break;
+      case 'Wallet':
+        icon =
+            Icons.account_balance_wallet;
+        break;
+      default:
+        icon = Icons.payments;
+    }
+
+    return InkWell(
+      onTap: () {
+        setState(() {
+          selectedPaymentMethod =
+              method;
+        });
+      },
+      borderRadius:
+          BorderRadius.circular(14),
+      child: Container(
+        padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(
+          color: darkCard,
+          borderRadius:
+              BorderRadius.circular(14),
+          border: Border.all(
+            color: selected
+                ? yellow
+                : Colors.white.withValues(
+                    alpha: 0.05,
+                  ),
+          ),
+        ),
+        child: Row(
+          children: [
+            Icon(icon, color: yellow),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Text(
+                method,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontWeight:
+                      FontWeight.bold,
+                ),
+              ),
+            ),
+            Icon(
+              selected
+                  ? Icons
+                      .radio_button_checked
+                  : Icons.radio_button_off,
+              color: selected
+                  ? yellow
+                  : Colors.grey,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _summaryRow(
+    String title,
+    String value,
+  ) {
+    return Padding(
+      padding: const EdgeInsets.only(
+        bottom: 10,
+      ),
+      child: Row(
+        crossAxisAlignment:
+            CrossAxisAlignment.start,
+        children: [
+          Expanded(
+            child: Text(
+              title,
+              style: const TextStyle(
+                color: Colors.grey,
+                fontSize: 13,
+              ),
+            ),
+          ),
+          const SizedBox(width: 12),
+          Flexible(
+            child: Text(
+              value,
+              textAlign: TextAlign.right,
+              style: const TextStyle(
+                color: Colors.white,
+                fontWeight:
+                    FontWeight.bold,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _dialogRow(
+    String title,
+    String value,
+  ) {
+    return Padding(
+      padding: const EdgeInsets.only(
+        bottom: 8,
+      ),
+      child: Row(
+        crossAxisAlignment:
+            CrossAxisAlignment.start,
+        children: [
+          Expanded(
+            child: Text(
+              title,
+              style: const TextStyle(
+                color: Colors.grey,
+                fontSize: 12,
+              ),
+            ),
+          ),
+          Flexible(
+            child: Text(
+              value,
+              textAlign: TextAlign.right,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 12,
+                fontWeight:
+                    FontWeight.bold,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  String? _requiredValidator(
+    String? value,
+  ) {
+    if (value == null ||
+        value.trim().isEmpty) {
+      return 'This field is required.';
+    }
+
+    return null;
+  }
+
+  String? _phoneValidator(
+    String? value,
+  ) {
+    final String clean =
+        value?.replaceAll(
+              RegExp(r'\D'),
+              '',
+            ) ??
+            '';
+
+    if (clean.length < 10 ||
+        clean.length > 13) {
+      return 'Enter a valid phone number.';
+    }
+
+    return null;
+  }
+
+  String? _cnicValidator(
+    String? value,
+  ) {
+    final String clean =
+        value?.replaceAll(
+              RegExp(r'\D'),
+              '',
+            ) ??
+            '';
+
+    if (clean.length != 13) {
+      return 'Enter a valid 13-digit CNIC.';
+    }
+
+    return null;
+  }
+
+  DateTime? _parseDate(
+    String value,
+  ) {
+    final String clean =
+        value.trim();
+
+    final RegExpMatch? match =
+        RegExp(
+      r'^(\d{2})/(\d{2})/(\d{4})$',
+    ).firstMatch(clean);
+
+    if (match == null) {
+      return null;
+    }
+
+    final int day =
+        int.parse(match.group(1)!);
+    final int month =
+        int.parse(match.group(2)!);
+    final int year =
+        int.parse(match.group(3)!);
+
+    final DateTime date =
+        DateTime(year, month, day);
+
+    if (date.year != year ||
+        date.month != month ||
+        date.day != day) {
+      return null;
+    }
+
+    return _dateOnly(date);
+  }
+
+  String _formatDate(
+    DateTime? date,
+  ) {
+    if (date == null) {
+      return 'Select date';
+    }
+
+    final String day =
+        date.day
+            .toString()
+            .padLeft(2, '0');
+
+    final String month =
+        date.month
+            .toString()
+            .padLeft(2, '0');
+
+    return '$day/$month/${date.year}';
+  }
+
+  DateTime _dateOnly(
+    DateTime date,
+  ) {
+    return DateTime(
+      date.year,
+      date.month,
+      date.day,
+    );
+  }
+
+  int _readInt(
+    dynamic value, {
+    int fallback = 0,
+  }) {
+    if (value is int) {
+      return value;
+    }
+
+    if (value is num) {
+      return value.toInt();
+    }
+
+    return int.tryParse(
+          value?.toString() ?? '',
+        ) ??
+        fallback;
+  }
+
+  double _readDouble(
+    dynamic value,
+  ) {
+    if (value is num) {
+      return value.toDouble();
+    }
+
+    return double.tryParse(
+          value?.toString() ?? '',
+        ) ??
+        0;
+  }
+
+  DateTime? _readDate(
+    dynamic value,
+  ) {
+    if (value is Timestamp) {
+      return value.toDate();
+    }
+
+    if (value is DateTime) {
+      return value;
+    }
+
+    if (value is String) {
+      return DateTime.tryParse(value);
+    }
+
+    return null;
+  }
+
+  String _money(
+    num amount,
+  ) {
+    return amount
+        .toStringAsFixed(0)
+        .replaceAllMapped(
+          RegExp(
+            r'\B(?=(\d{3})+(?!\d))',
+          ),
+          (match) => ',',
+        );
+  }
+
+
+  String _createSecureToken() {
+    final Random random = Random.secure();
+    final List<int> bytes = List<int>.generate(
+      32,
+      (_) => random.nextInt(256),
+    );
+    return base64UrlEncode(bytes).replaceAll('=', '');
+  }
+
+  String _createVerificationPin() {
+    final Random random = Random.secure();
+    return (100000 + random.nextInt(900000)).toString();
+  }
+
+  String _createQrPayload({
+    required String bookingId,
+    required String token,
+  }) {
+    return jsonEncode(<String, dynamic>{
+      'type': 'swat_ride_hotel_check_in',
+      'version': 1,
+      'bookingId': bookingId,
+      'token': token,
+    });
+  }
+
+  void _showMessage(
+    String message,
+  ) {
+    if (!mounted) {
+      return;
+    }
+
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Text(message),
+          backgroundColor: darkCard,
+          duration:
+              const Duration(seconds: 3),
+        ),
+      );
+  }
+}
+
+
+class _DateInputFormatter
+    extends TextInputFormatter {
+  @override
+  TextEditingValue formatEditUpdate(
+    TextEditingValue oldValue,
+    TextEditingValue newValue,
+  ) {
+    final String digits =
+        newValue.text.replaceAll(
+      RegExp(r'\D'),
+      '',
+    );
+
+    final String limited =
+        digits.length > 8
+            ? digits.substring(0, 8)
+            : digits;
+
+    final StringBuffer buffer =
+        StringBuffer();
+
+    for (int index = 0;
+        index < limited.length;
+        index++) {
+      if (index == 2 || index == 4) {
+        buffer.write('/');
+      }
+
+      buffer.write(limited[index]);
+    }
+
+    final String value =
+        buffer.toString();
+
+    return TextEditingValue(
+      text: value,
+      selection:
+          TextSelection.collapsed(
+        offset: value.length,
+      ),
+    );
+  }
+}
+
+class _CnicInputFormatter
+    extends TextInputFormatter {
+  @override
+  TextEditingValue formatEditUpdate(
+    TextEditingValue oldValue,
+    TextEditingValue newValue,
+  ) {
+    final String digits =
+        newValue.text.replaceAll(
+      RegExp(r'\D'),
+      '',
+    );
+
+    final String limited =
+        digits.length > 13
+            ? digits.substring(0, 13)
+            : digits;
+
+    final StringBuffer buffer =
+        StringBuffer();
+
+    for (int index = 0;
+        index < limited.length;
+        index++) {
+      if (index == 5 || index == 12) {
+        buffer.write('-');
+      }
+
+      buffer.write(limited[index]);
+    }
+
+    final String value =
+        buffer.toString();
+
+    return TextEditingValue(
+      text: value,
+      selection:
+          TextSelection.collapsed(
+        offset: value.length,
+      ),
+    );
+  }
+}

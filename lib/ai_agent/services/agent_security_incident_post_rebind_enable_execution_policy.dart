@@ -1,0 +1,207 @@
+import '../models/agent_security_incident_post_rebind_enable_execution_contract.dart';
+
+class AgentSecurityIncidentPostRebindEnableExecutionPolicy {
+  const AgentSecurityIncidentPostRebindEnableExecutionPolicy();
+
+  AgentSecurityIncidentPostRebindTokenRecoveryDecision evaluateTokenRecovery(
+    AgentSecurityIncidentPostRebindTokenRecoveryEvidence evidence,
+  ) {
+    try {
+      evidence.validate();
+    } catch (_) {
+      return const AgentSecurityIncidentPostRebindTokenRecoveryDecision(
+        status:
+            AgentSecurityIncidentPostRebindTokenRecoveryStatus.blockedInvalid,
+        reasonCode: 'invalid_post_rebind_token_recovery_evidence',
+        eligibleForReplacementTokenIssuance: false,
+      );
+    }
+
+    if (evidence.authorityManifestRevision !=
+            AgentSecurityIncidentPostRebindEnableExecutionContract
+                .authorityManifestRevision ||
+        evidence.guardRevision !=
+            AgentSecurityIncidentPostRebindEnableExecutionContract
+                .guardRevision ||
+        evidence.roleCount !=
+            AgentSecurityIncidentPostRebindEnableExecutionContract.roleCount ||
+        evidence.roleEnabled ||
+        evidence.roleMode != 'ASK_FIRST' ||
+        !evidence.migrationHoldActive ||
+        evidence.migrationHoldStatus !=
+            AgentSecurityIncidentPostRebindEnableExecutionContract
+                .requiredHoldStatus ||
+        evidence.rolloutStage !=
+            AgentSecurityIncidentPostRebindEnableExecutionContract
+                .rolloutStage ||
+        !evidence.rebindReceiptVerified) {
+      return const AgentSecurityIncidentPostRebindTokenRecoveryDecision(
+        status: AgentSecurityIncidentPostRebindTokenRecoveryStatus
+            .blockedCheckpoint,
+        reasonCode: 'post_rebind_checkpoint_not_exact',
+        eligibleForReplacementTokenIssuance: false,
+      );
+    }
+
+    if (!evidence.historicalTokenExists ||
+        !evidence.historicalTokenReady ||
+        !evidence.historicalTokenExpired ||
+        evidence.historicalTokenConsumed ||
+        evidence.rawHistoricalTokenReuseAttempted) {
+      return const AgentSecurityIncidentPostRebindTokenRecoveryDecision(
+        status: AgentSecurityIncidentPostRebindTokenRecoveryStatus
+            .blockedHistoricalToken,
+        reasonCode:
+            'expired_historical_token_must_remain_immutable_and_never_reused',
+        eligibleForReplacementTokenIssuance: false,
+      );
+    }
+
+    if (!evidence.freshOwnerIdentityVerified) {
+      return const AgentSecurityIncidentPostRebindTokenRecoveryDecision(
+        status: AgentSecurityIncidentPostRebindTokenRecoveryStatus
+            .blockedOwnerIdentity,
+        reasonCode: 'fresh_owner_identity_required_for_replacement_token',
+        eligibleForReplacementTokenIssuance: false,
+      );
+    }
+
+    if (evidence.repositoryRuntimeAttached ||
+        evidence.repositoryExecutionArmed ||
+        evidence.incidentWritePerformed) {
+      return const AgentSecurityIncidentPostRebindTokenRecoveryDecision(
+        status: AgentSecurityIncidentPostRebindTokenRecoveryStatus
+            .blockedRuntimeState,
+        reasonCode: 'runtime_must_remain_fail_closed_before_replacement_token',
+        eligibleForReplacementTokenIssuance: false,
+      );
+    }
+
+    return const AgentSecurityIncidentPostRebindTokenRecoveryDecision(
+      status: AgentSecurityIncidentPostRebindTokenRecoveryStatus.eligible,
+      reasonCode:
+          'fresh_replacement_token_issuance_eligible_separate_execution_required',
+      eligibleForReplacementTokenIssuance: true,
+    );
+  }
+
+  AgentSecurityIncidentPostRebindEnableExecutionDecision evaluateAtomicEnable(
+    AgentSecurityIncidentPostRebindEnableExecutionEvidence evidence,
+  ) {
+    try {
+      evidence.validate();
+    } catch (_) {
+      return const AgentSecurityIncidentPostRebindEnableExecutionDecision(
+        status:
+            AgentSecurityIncidentPostRebindEnableExecutionStatus.blockedInvalid,
+        reasonCode: 'invalid_post_rebind_enable_execution_evidence',
+        eligibleForAtomicEnableAndHoldRelease: false,
+      );
+    }
+
+    if (evidence.authorityManifestRevision !=
+            AgentSecurityIncidentPostRebindEnableExecutionContract
+                .authorityManifestRevision ||
+        evidence.guardRevision !=
+            AgentSecurityIncidentPostRebindEnableExecutionContract
+                .guardRevision ||
+        evidence.roleCount !=
+            AgentSecurityIncidentPostRebindEnableExecutionContract.roleCount ||
+        evidence.roleId !=
+            AgentSecurityIncidentPostRebindEnableExecutionContract.roleId ||
+        evidence.module !=
+            AgentSecurityIncidentPostRebindEnableExecutionContract.module ||
+        evidence.roleEnabled ||
+        evidence.roleMode != 'ASK_FIRST' ||
+        !evidence.migrationHoldActive ||
+        evidence.migrationHoldStatus !=
+            AgentSecurityIncidentPostRebindEnableExecutionContract
+                .requiredHoldStatus ||
+        evidence.rolloutStage !=
+            AgentSecurityIncidentPostRebindEnableExecutionContract
+                .rolloutStage ||
+        !evidence.rebindReceiptVerified) {
+      return const AgentSecurityIncidentPostRebindEnableExecutionDecision(
+        status: AgentSecurityIncidentPostRebindEnableExecutionStatus
+            .blockedCheckpoint,
+        reasonCode: 'post_rebind_enable_checkpoint_not_exact',
+        eligibleForAtomicEnableAndHoldRelease: false,
+      );
+    }
+
+    if (!evidence.freshReplacementTokenPresent ||
+        !evidence.freshReplacementTokenReady ||
+        !evidence.freshReplacementTokenUnexpired ||
+        !evidence.freshReplacementTokenExactBindingVerified ||
+        evidence.oldTokenReuseAttempted) {
+      return const AgentSecurityIncidentPostRebindEnableExecutionDecision(
+        status: AgentSecurityIncidentPostRebindEnableExecutionStatus
+            .blockedReplacementToken,
+        reasonCode:
+            'fresh_exact_unexpired_replacement_token_required_old_reuse_forbidden',
+        eligibleForAtomicEnableAndHoldRelease: false,
+      );
+    }
+
+    if (!evidence.freshOwnerIdentityVerified) {
+      return const AgentSecurityIncidentPostRebindEnableExecutionDecision(
+        status: AgentSecurityIncidentPostRebindEnableExecutionStatus
+            .blockedOwnerIdentity,
+        reasonCode: 'fresh_owner_identity_required_for_enable',
+        eligibleForAtomicEnableAndHoldRelease: false,
+      );
+    }
+
+    if (!evidence.separateOwnerEnableApprovalPresent ||
+        !evidence.ownerEnableApprovalApproved ||
+        !evidence.ownerEnableApprovalUnconsumed ||
+        !evidence.ownerEnableApprovalExactBindingVerified ||
+        evidence.migrationOrRebindApprovalReuseAttempted) {
+      return const AgentSecurityIncidentPostRebindEnableExecutionDecision(
+        status: AgentSecurityIncidentPostRebindEnableExecutionStatus
+            .blockedOwnerApproval,
+        reasonCode: 'fresh_separate_exact_owner_enable_approval_required',
+        eligibleForAtomicEnableAndHoldRelease: false,
+      );
+    }
+
+    if (evidence.repositoryRuntimeAttached ||
+        evidence.repositoryExecutionArmed ||
+        evidence.incidentWritePerformed) {
+      return const AgentSecurityIncidentPostRebindEnableExecutionDecision(
+        status: AgentSecurityIncidentPostRebindEnableExecutionStatus
+            .blockedRuntimeState,
+        reasonCode: 'runtime_must_remain_fail_closed_before_atomic_enable',
+        eligibleForAtomicEnableAndHoldRelease: false,
+      );
+    }
+
+    return const AgentSecurityIncidentPostRebindEnableExecutionDecision(
+      status: AgentSecurityIncidentPostRebindEnableExecutionStatus.eligible,
+      reasonCode:
+          'atomic_role_enable_and_hold_release_eligible_separate_live_executor_required',
+      eligibleForAtomicEnableAndHoldRelease: true,
+    );
+  }
+
+  bool get offlineOnly => true;
+  bool get performsFirestoreRead => false;
+  bool get performsFirestoreWrite => false;
+  bool get createsApproval => false;
+  bool get consumesApproval => false;
+  bool get issuesReplacementToken => false;
+  bool get enablesRole => false;
+  bool get releasesMigrationHold => false;
+  bool get attachesRepository => false;
+  bool get armsRepository => false;
+  bool get writesIncident => false;
+  bool get authorizesSuggestOnly => false;
+  bool get authorizesAuto => false;
+
+  bool get requiresFreshReplacementToken => true;
+  bool get permitsHistoricalTokenReuse => false;
+  bool get requiresAtomicReplacementTokenConsumption => true;
+  bool get requiresFreshOwnerIdentity => true;
+  bool get requiresSeparateOwnerEnableApproval => true;
+  bool get requiresAtomicRoleEnableAndHoldRelease => true;
+}

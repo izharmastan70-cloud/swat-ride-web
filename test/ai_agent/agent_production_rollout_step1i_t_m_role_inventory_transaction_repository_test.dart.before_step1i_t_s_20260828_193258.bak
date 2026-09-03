@@ -1,0 +1,240 @@
+import 'package:flutter_test/flutter_test.dart';
+import 'package:swat_ride/ai_agent/models/agent_security_incident_role_inventory_migration_plan.dart';
+import 'package:swat_ride/ai_agent/models/agent_security_incident_role_inventory_transaction_request.dart';
+import 'package:swat_ride/ai_agent/models/agent_security_incident_role_inventory_transaction_result.dart';
+import 'package:swat_ride/ai_agent/services/agent_security_incident_role_inventory_transaction_repository.dart';
+
+void main() {
+  const String hashA =
+      'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+  const String hashB =
+      'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+  const String hashC =
+      'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc';
+  const String hashD =
+      'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd';
+  const String hashE =
+      'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee';
+  const String hashF =
+      'ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff';
+
+  AgentSecurityIncidentRoleInventoryMigrationPlan validPlan() {
+    return const AgentSecurityIncidentRoleInventoryMigrationPlan(
+      currentInventoryVersion: 'phase66_roles_v1_22',
+      proposedInventoryVersion: 'phase66_roles_v2_23_security_incident',
+      currentRoleCount: 22,
+      proposedRoleCount: 23,
+      currentInventoryFingerprintSha256: hashA,
+      proposedInventoryFingerprintSha256: hashB,
+      currentControlFingerprintSha256: hashC,
+      freshOwnerVerified: true,
+      ownerApprovalBindingSha256: hashD,
+      currentRolloutStage: 'MONITOR_ONLY',
+      dedicatedRoleId: 'security_incident_agent',
+      dedicatedModule: 'security_incident',
+      dedicatedActionId: 'security_incident.attach_runtime',
+      currentGuardRevision: 2,
+      proposedGuardRevision: 3,
+      oldGuardImmutable: true,
+      oldArmingTokenImmutable: true,
+      oldActivationReceiptImmutable: true,
+      existingArmingTokenReuseAllowed: false,
+      migrationHoldRequired: true,
+      migrationHoldActive: true,
+      newLiveSnapshotRequired: true,
+      newGuardRequired: true,
+      newOneTimeTokenRequired: true,
+      newMigrationReceiptRequired: true,
+      firstIncidentWriteAuthorized: false,
+      repositoryAttachAuthorized: false,
+      repositoryArmAuthorized: false,
+      authorizesSuggestOnly: false,
+      authorizesAuto: false,
+    );
+  }
+
+  AgentSecurityIncidentRoleInventoryTransactionRequest validRequest() {
+    return AgentSecurityIncidentRoleInventoryTransactionRequest(
+      plan: validPlan(),
+      migrationIdSha256: hashE,
+      ownerApprovalId: 'owner-approval-t-m',
+      actorReferenceSha256: hashF,
+      expectedAuthorityManifestRevision: 1,
+      proposedRolePayload: const <String, dynamic>{
+        'roleId': 'security_incident_agent',
+        'name': 'Security Incident Agent',
+        'description': 'Dedicated security incident persistence authority.',
+        'module': 'security_incident',
+        'enabled': true,
+        'mode': 'ASK_FIRST',
+        'allowedActions': <String>['security_incident.attach_runtime'],
+        'approvalRequiredActions': <String>['security_incident.attach_runtime'],
+        'forbiddenActions': <String>[],
+        'aiClass': 'CONTROL_PLANE',
+        'privacyLevel': 'private',
+      },
+    );
+  }
+
+  group('Phase66 Step1I-T-M transaction repository', () {
+    test('default repository blocks before any Firestore access', () async {
+      final repository =
+          AgentSecurityIncidentRoleInventoryTransactionRepository();
+
+      final result = await repository.execute(request: validRequest());
+
+      expect(
+        result.status,
+        AgentSecurityIncidentRoleInventoryTransactionStatus.blockedNotArmed,
+      );
+      expect(result.roleCreated, isFalse);
+      expect(result.authorityManifestUpdated, isFalse);
+      expect(result.migrationHoldUpdated, isFalse);
+    });
+
+    test(
+      'armed repository still blocks until migration rules verified',
+      () async {
+        final repository =
+            AgentSecurityIncidentRoleInventoryTransactionRepository(
+              executionArmed: true,
+            );
+
+        final result = await repository.execute(request: validRequest());
+
+        expect(
+          result.status,
+          AgentSecurityIncidentRoleInventoryTransactionStatus
+              .blockedRulesNotVerified,
+        );
+        expect(result.committed, isFalse);
+      },
+    );
+
+    test('repository is a dedicated transaction owner', () {
+      final repository =
+          AgentSecurityIncidentRoleInventoryTransactionRepository();
+
+      expect(repository.usesDedicatedFirestoreTransaction, isTrue);
+      expect(repository.usesOrdinaryRoleServiceCreate, isFalse);
+      expect(repository.requiresAuthorityManifest, isTrue);
+      expect(repository.requiresManifestCoupledFirestoreRules, isTrue);
+      expect(repository.requiresOwnerBoundMigrationHold, isTrue);
+    });
+
+    test('transaction requires exact role inventory fingerprints', () {
+      final repository =
+          AgentSecurityIncidentRoleInventoryTransactionRepository();
+
+      expect(repository.requiresExact22RoleReadsInsideTransaction, isTrue);
+      expect(
+        repository.requiresCurrentRoleFingerprintInsideTransaction,
+        isTrue,
+      );
+      expect(
+        repository.requiresProposedRoleFingerprintInsideTransaction,
+        isTrue,
+      );
+    });
+
+    test('role authority fingerprint is deterministic across input order', () {
+      final repository =
+          AgentSecurityIncidentRoleInventoryTransactionRepository();
+
+      final roleA = <String, dynamic>{
+        'roleId': 'a',
+        'module': 'm',
+        'enabled': true,
+        'mode': 'ASK_FIRST',
+        'allowedActions': <String>['b', 'a'],
+        'approvalRequiredActions': <String>['b'],
+        'forbiddenActions': <String>[],
+        'aiClass': 'FREE_AI',
+        'privacyLevel': 'private',
+      };
+
+      final roleB = <String, dynamic>{
+        'roleId': 'b',
+        'module': 'm',
+        'enabled': true,
+        'mode': 'MONITOR_ONLY',
+        'allowedActions': <String>['z'],
+        'approvalRequiredActions': <String>[],
+        'forbiddenActions': <String>['x'],
+        'aiClass': 'FREE_AI',
+        'privacyLevel': 'private',
+      };
+
+      final first = repository.computeRoleInventoryFingerprint(
+        <Map<String, dynamic>>[roleA, roleB],
+      );
+
+      final second = repository.computeRoleInventoryFingerprint(
+        <Map<String, dynamic>>[roleB, roleA],
+      );
+
+      expect(first, second);
+      expect(first.length, 64);
+    });
+
+    test('old activation evidence is not a T-M write target', () {
+      final repository =
+          AgentSecurityIncidentRoleInventoryTransactionRepository();
+
+      expect(repository.writesOldGuard, isFalse);
+      expect(repository.writesOldArmingToken, isFalse);
+      expect(repository.writesOldActivationReceipt, isFalse);
+      expect(repository.consumesApproval, isFalse);
+    });
+
+    test('post migration rebinding remains separate', () {
+      final repository =
+          AgentSecurityIncidentRoleInventoryTransactionRepository();
+
+      expect(repository.postMigrationSnapshotStillRequired, isTrue);
+      expect(repository.newGuardStillRequired, isTrue);
+      expect(repository.newOneTimeTokenStillRequired, isTrue);
+      expect(repository.newMigrationReceiptStillRequired, isTrue);
+    });
+
+    test('T-M never grants repository persistence runtime authority', () {
+      final repository =
+          AgentSecurityIncidentRoleInventoryTransactionRepository();
+
+      expect(repository.attachesRuntime, isFalse);
+      expect(repository.armsRepository, isFalse);
+      expect(repository.writesIncident, isFalse);
+    });
+
+    test('T-M never advances rollout', () {
+      final repository =
+          AgentSecurityIncidentRoleInventoryTransactionRepository();
+
+      expect(repository.changesRolloutStage, isFalse);
+      expect(repository.authorizesSuggestOnly, isFalse);
+      expect(repository.authorizesAuto, isFalse);
+    });
+
+    test('transaction result cannot imply unrelated runtime authority', () {
+      const result = AgentSecurityIncidentRoleInventoryTransactionResult(
+        status: AgentSecurityIncidentRoleInventoryTransactionStatus
+            .committedRoleDelta,
+        reasonCode: 'test',
+        roleCreated: true,
+        authorityManifestUpdated: true,
+        migrationHoldUpdated: true,
+      );
+
+      expect(result.committed, isTrue);
+      expect(result.oldGuardMutated, isFalse);
+      expect(result.oldArmingTokenMutated, isFalse);
+      expect(result.oldActivationReceiptMutated, isFalse);
+      expect(result.approvalConsumed, isFalse);
+      expect(result.repositoryAttached, isFalse);
+      expect(result.repositoryArmed, isFalse);
+      expect(result.incidentWritten, isFalse);
+      expect(result.authorizesSuggestOnly, isFalse);
+      expect(result.authorizesAuto, isFalse);
+    });
+  });
+}

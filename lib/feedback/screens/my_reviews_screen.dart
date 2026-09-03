@@ -1,0 +1,990 @@
+import 'package:flutter/material.dart';
+
+import '../models/feedback_model.dart';
+import '../services/feedback_service.dart';
+import '../widgets/star_rating_widget.dart';
+
+class MyReviewsScreen extends StatefulWidget {
+  final String reviewerId;
+  final FeedbackService? feedbackService;
+  final ValueChanged<FeedbackModel>? onReviewOpened;
+
+  const MyReviewsScreen({
+    super.key,
+    required this.reviewerId,
+    this.feedbackService,
+    this.onReviewOpened,
+  });
+
+  @override
+  State<MyReviewsScreen> createState() => _MyReviewsScreenState();
+}
+
+class _MyReviewsScreenState extends State<MyReviewsScreen> {
+  late final FeedbackService _feedbackService;
+
+  FeedbackRuntimeSettings? _settings;
+  FeedbackServiceType? _selectedService;
+  bool _settingsLoading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _feedbackService = widget.feedbackService ?? FeedbackService();
+    _loadSettings();
+  }
+
+  Future<void> _loadSettings() async {
+    try {
+      final settings = await _feedbackService.getSettings();
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        _settings = settings;
+        _settingsLoading = false;
+      });
+    } on Object catch (error) {
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        _settings = const FeedbackRuntimeSettings();
+        _settingsLoading = false;
+      });
+
+      debugPrint('MyReviews settings error: $error');
+    }
+  }
+
+  Stream<List<FeedbackModel>> _reviewsStream() {
+    return _feedbackService.watchMyReviews(
+      reviewerId: widget.reviewerId,
+      serviceType: _selectedService,
+      limit: 100,
+    );
+  }
+
+  Future<void> _editReview(FeedbackModel review) async {
+    final settings = _settings;
+
+    if (settings == null || !settings.reviewEditingEnabled) {
+      _showMessage('Review editing is currently disabled.');
+      return;
+    }
+
+    if (!review.canCurrentlyEdit) {
+      _showMessage('The review editing window has expired.');
+      return;
+    }
+
+    final updated = await showModalBottomSheet<_ReviewEditResult>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      backgroundColor: Colors.transparent,
+      builder: (context) {
+        return _EditReviewSheet(review: review, settings: settings);
+      },
+    );
+
+    if (updated == null) {
+      return;
+    }
+
+    try {
+      await _feedbackService.editFeedback(
+        feedbackId: review.id,
+        reviewerId: widget.reviewerId,
+        rating: updated.rating,
+        tags: review.tags,
+        comment: updated.comment,
+        visibility: updated.visibility,
+      );
+
+      if (!mounted) {
+        return;
+      }
+
+      _showMessage('Your review has been updated.');
+    } on FeedbackOperationException catch (error) {
+      if (!mounted) {
+        return;
+      }
+
+      _showMessage(error.message);
+    } on Object catch (error) {
+      if (!mounted) {
+        return;
+      }
+
+      _showMessage('Review could not be updated.');
+      debugPrint('Edit feedback error: $error');
+    }
+  }
+
+  Future<void> _deleteReview(FeedbackModel review) async {
+    final settings = _settings;
+
+    if (settings == null || !settings.reviewDeletionEnabled) {
+      _showMessage('Review deletion is currently disabled.');
+      return;
+    }
+
+    final reasonController = TextEditingController();
+
+    final reason = await showDialog<String>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(24),
+          ),
+          title: const Text('Delete this review?'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              const Text(
+                'The review will be removed, but an audit record will remain.',
+              ),
+              const SizedBox(height: 16),
+              TextField(
+                controller: reasonController,
+                minLines: 2,
+                maxLines: 4,
+                textCapitalization: TextCapitalization.sentences,
+                decoration: InputDecoration(
+                  labelText: 'Reason',
+                  hintText: 'Why are you deleting this review?',
+                  filled: true,
+                  fillColor: const Color(0xFFF5F6F7),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(14),
+                    borderSide: BorderSide.none,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          actions: <Widget>[
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () {
+                final value = reasonController.text.trim();
+
+                if (value.isEmpty) {
+                  return;
+                }
+
+                Navigator.of(context).pop(value);
+              },
+              style: FilledButton.styleFrom(
+                backgroundColor: const Color(0xFFD93025),
+              ),
+              child: const Text('Delete'),
+            ),
+          ],
+        );
+      },
+    );
+
+    reasonController.dispose();
+
+    if (reason == null || reason.trim().isEmpty) {
+      return;
+    }
+
+    try {
+      await _feedbackService.deleteMyFeedback(
+        feedbackId: review.id,
+        reviewerId: widget.reviewerId,
+        reason: reason,
+      );
+
+      if (!mounted) {
+        return;
+      }
+
+      _showMessage('Your review has been deleted.');
+    } on FeedbackOperationException catch (error) {
+      if (!mounted) {
+        return;
+      }
+
+      _showMessage(error.message);
+    } on Object catch (error) {
+      if (!mounted) {
+        return;
+      }
+
+      _showMessage('Review could not be deleted.');
+      debugPrint('Delete feedback error: $error');
+    }
+  }
+
+  void _showMessage(String message) {
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(content: Text(message), behavior: SnackBarBehavior.floating),
+      );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFFF7F7F8),
+      appBar: AppBar(
+        backgroundColor: const Color(0xFFF7F7F8),
+        surfaceTintColor: Colors.transparent,
+        elevation: 0,
+        title: const Text(
+          'My reviews',
+          style: TextStyle(fontWeight: FontWeight.w800),
+        ),
+      ),
+      body: _settingsLoading
+          ? const Center(
+              child: CircularProgressIndicator(color: Color(0xFF111315)),
+            )
+          : Column(
+              children: <Widget>[
+                _buildFilters(),
+                Expanded(
+                  child: StreamBuilder<List<FeedbackModel>>(
+                    stream: _reviewsStream(),
+                    builder: (context, snapshot) {
+                      if (snapshot.connectionState == ConnectionState.waiting &&
+                          !snapshot.hasData) {
+                        return const Center(
+                          child: CircularProgressIndicator(
+                            color: Color(0xFF111315),
+                          ),
+                        );
+                      }
+
+                      if (snapshot.hasError) {
+                        return _ReviewsMessageView(
+                          icon: Icons.cloud_off_rounded,
+                          title: 'Could not load reviews',
+                          message:
+                              'Please check your connection and try again.',
+                          onRetry: () => setState(() {}),
+                        );
+                      }
+
+                      final reviews = snapshot.data ?? const <FeedbackModel>[];
+
+                      if (reviews.isEmpty) {
+                        return const _ReviewsMessageView(
+                          icon: Icons.rate_review_outlined,
+                          title: 'No reviews yet',
+                          message:
+                              'Your completed service reviews will appear here.',
+                        );
+                      }
+
+                      return RefreshIndicator(
+                        color: const Color(0xFF111315),
+                        onRefresh: () async {
+                          setState(() {});
+                          await Future<void>.delayed(
+                            const Duration(milliseconds: 350),
+                          );
+                        },
+                        child: ListView.separated(
+                          physics: const AlwaysScrollableScrollPhysics(),
+                          padding: const EdgeInsets.fromLTRB(16, 8, 16, 28),
+                          itemCount: reviews.length,
+                          separatorBuilder: (_, _) =>
+                              const SizedBox(height: 12),
+                          itemBuilder: (context, index) {
+                            final review = reviews[index];
+
+                            return _MyReviewCard(
+                              review: review,
+                              editingEnabled:
+                                  _settings?.reviewEditingEnabled == true &&
+                                  review.canCurrentlyEdit,
+                              deletionEnabled:
+                                  _settings?.reviewDeletionEnabled == true,
+                              onTap: () => widget.onReviewOpened?.call(review),
+                              onEdit: () => _editReview(review),
+                              onDelete: () => _deleteReview(review),
+                            );
+                          },
+                        ),
+                      );
+                    },
+                  ),
+                ),
+              ],
+            ),
+    );
+  }
+
+  Widget _buildFilters() {
+    const services = <FeedbackServiceType>[
+      FeedbackServiceType.ride,
+      FeedbackServiceType.food,
+      FeedbackServiceType.hotel,
+      FeedbackServiceType.tour,
+      FeedbackServiceType.cargo,
+      FeedbackServiceType.parcel,
+      FeedbackServiceType.studentRide,
+    ];
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.only(bottom: 10),
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 16),
+        child: Row(
+          children: <Widget>[
+            _FilterChip(
+              label: 'All',
+              selected: _selectedService == null,
+              onTap: () {
+                setState(() {
+                  _selectedService = null;
+                });
+              },
+            ),
+            const SizedBox(width: 8),
+            ...services.expand((service) {
+              return <Widget>[
+                _FilterChip(
+                  label: service.displayName,
+                  selected: _selectedService == service,
+                  onTap: () {
+                    setState(() {
+                      _selectedService = service;
+                    });
+                  },
+                ),
+                const SizedBox(width: 8),
+              ];
+            }),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _MyReviewCard extends StatelessWidget {
+  final FeedbackModel review;
+  final bool editingEnabled;
+  final bool deletionEnabled;
+  final VoidCallback onTap;
+  final VoidCallback onEdit;
+  final VoidCallback onDelete;
+
+  const _MyReviewCard({
+    required this.review,
+    required this.editingEnabled,
+    required this.deletionEnabled,
+    required this.onTap,
+    required this.onEdit,
+    required this.onDelete,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final targetName = review.targetName.trim().isEmpty
+        ? review.targetType.displayName
+        : review.targetName.trim();
+
+    return Material(
+      color: Colors.white,
+      borderRadius: BorderRadius.circular(22),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(22),
+        child: Container(
+          padding: const EdgeInsets.all(17),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(22),
+            border: Border.all(color: const Color(0xFFE8E9EC)),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              Row(
+                children: <Widget>[
+                  _ReviewTargetAvatar(review: review),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: <Widget>[
+                        Text(
+                          targetName,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            color: Color(0xFF202124),
+                            fontSize: 16,
+                            fontWeight: FontWeight.w800,
+                          ),
+                        ),
+                        const SizedBox(height: 3),
+                        Text(
+                          '${review.serviceType.displayName} â€¢ ${_formatDate(review.createdAt)}',
+                          style: const TextStyle(
+                            color: Color(0xFF888D95),
+                            fontSize: 12,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  _ReviewStatusBadge(review: review),
+                ],
+              ),
+              const SizedBox(height: 15),
+              Row(
+                children: <Widget>[
+                  StarRatingWidget(
+                    rating: review.rating,
+                    readOnly: true,
+                    starSize: 24,
+                    spacing: 2,
+                  ),
+                  const Spacer(),
+                  if (review.isVerified)
+                    const Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: <Widget>[
+                        Icon(
+                          Icons.verified_rounded,
+                          size: 17,
+                          color: Color(0xFF188038),
+                        ),
+                        SizedBox(width: 4),
+                        Text(
+                          'Verified',
+                          style: TextStyle(
+                            color: Color(0xFF188038),
+                            fontSize: 11,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ],
+                    ),
+                ],
+              ),
+              if (review.tags.isNotEmpty) ...<Widget>[
+                const SizedBox(height: 13),
+                Wrap(
+                  spacing: 7,
+                  runSpacing: 7,
+                  children: review.tags
+                      .take(5)
+                      .map((tag) {
+                        return Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 10,
+                            vertical: 6,
+                          ),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFFF2F3F5),
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          child: Text(
+                            tag,
+                            style: const TextStyle(
+                              color: Color(0xFF555960),
+                              fontSize: 11,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        );
+                      })
+                      .toList(growable: false),
+                ),
+              ],
+              if (review.comment.trim().isNotEmpty) ...<Widget>[
+                const SizedBox(height: 13),
+                Text(
+                  review.comment.trim(),
+                  maxLines: 4,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: Color(0xFF555960),
+                    fontSize: 14,
+                    height: 1.42,
+                  ),
+                ),
+              ],
+              const SizedBox(height: 13),
+              Row(
+                children: <Widget>[
+                  Icon(
+                    _visibilityIcon(review.visibility),
+                    size: 16,
+                    color: const Color(0xFF8A8F98),
+                  ),
+                  const SizedBox(width: 5),
+                  Text(
+                    _visibilityLabel(review.visibility),
+                    style: const TextStyle(
+                      color: Color(0xFF8A8F98),
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  const Spacer(),
+                  if (editingEnabled)
+                    TextButton.icon(
+                      onPressed: onEdit,
+                      icon: const Icon(Icons.edit_outlined, size: 17),
+                      label: const Text('Edit'),
+                    ),
+                  if (deletionEnabled)
+                    IconButton(
+                      tooltip: 'Delete review',
+                      onPressed: onDelete,
+                      icon: const Icon(
+                        Icons.delete_outline_rounded,
+                        color: Color(0xFFD93025),
+                        size: 21,
+                      ),
+                    ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  static String _formatDate(DateTime date) {
+    const months = <String>[
+      'Jan',
+      'Feb',
+      'Mar',
+      'Apr',
+      'May',
+      'Jun',
+      'Jul',
+      'Aug',
+      'Sep',
+      'Oct',
+      'Nov',
+      'Dec',
+    ];
+
+    return '${date.day} ${months[date.month - 1]} ${date.year}';
+  }
+
+  static IconData _visibilityIcon(FeedbackVisibility visibility) {
+    switch (visibility) {
+      case FeedbackVisibility.public:
+        return Icons.public_rounded;
+      case FeedbackVisibility.private:
+        return Icons.lock_outline_rounded;
+      case FeedbackVisibility.anonymous:
+        return Icons.visibility_off_outlined;
+    }
+  }
+
+  static String _visibilityLabel(FeedbackVisibility visibility) {
+    switch (visibility) {
+      case FeedbackVisibility.public:
+        return 'Public review';
+      case FeedbackVisibility.private:
+        return 'Private review';
+      case FeedbackVisibility.anonymous:
+        return 'Anonymous review';
+    }
+  }
+}
+
+class _EditReviewSheet extends StatefulWidget {
+  final FeedbackModel review;
+  final FeedbackRuntimeSettings settings;
+
+  const _EditReviewSheet({required this.review, required this.settings});
+
+  @override
+  State<_EditReviewSheet> createState() => _EditReviewSheetState();
+}
+
+class _EditReviewSheetState extends State<_EditReviewSheet> {
+  late int _rating;
+  late FeedbackVisibility _visibility;
+  late final TextEditingController _commentController;
+
+  @override
+  void initState() {
+    super.initState();
+    _rating = widget.review.rating;
+    _visibility = widget.review.visibility;
+    _commentController = TextEditingController(text: widget.review.comment);
+  }
+
+  @override
+  void dispose() {
+    _commentController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final keyboard = MediaQuery.viewInsetsOf(context).bottom;
+
+    return Padding(
+      padding: EdgeInsets.only(bottom: keyboard),
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(20, 12, 20, 22),
+        decoration: const BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
+        ),
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              Container(
+                width: 42,
+                height: 5,
+                decoration: BoxDecoration(
+                  color: const Color(0xFFDADCE0),
+                  borderRadius: BorderRadius.circular(99),
+                ),
+              ),
+              const SizedBox(height: 20),
+              const Text(
+                'Edit your review',
+                style: TextStyle(
+                  color: Color(0xFF202124),
+                  fontSize: 21,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+              const SizedBox(height: 20),
+              StarRatingWidget(
+                rating: _rating,
+                onRatingChanged: (value) {
+                  setState(() {
+                    _rating = value;
+                  });
+                },
+                showRatingLabel: true,
+              ),
+              const SizedBox(height: 20),
+              TextField(
+                controller: _commentController,
+                minLines: 3,
+                maxLines: 6,
+                maxLength: FeedbackModel.maximumCommentLength,
+                decoration: InputDecoration(
+                  hintText: 'Update your comment...',
+                  counterText: '',
+                  filled: true,
+                  fillColor: const Color(0xFFF5F6F7),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(16),
+                    borderSide: BorderSide.none,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+              RadioGroup<FeedbackVisibility>(
+                groupValue: _visibility,
+                onChanged: (value) {
+                  if (value == null) {
+                    return;
+                  }
+
+                  setState(() {
+                    _visibility = value;
+                  });
+                },
+                child: Column(
+                  children: <Widget>[
+                    RadioListTile<FeedbackVisibility>(
+                      value: FeedbackVisibility.public,
+                      enabled: widget.settings.publicReviewsEnabled,
+                      title: const Text('Public'),
+                    ),
+                    RadioListTile<FeedbackVisibility>(
+                      value: FeedbackVisibility.anonymous,
+                      enabled:
+                          widget.settings.publicReviewsEnabled &&
+                          widget.settings.anonymousReviewsEnabled,
+                      title: const Text('Anonymous'),
+                    ),
+                    const RadioListTile<FeedbackVisibility>(
+                      value: FeedbackVisibility.private,
+                      title: Text('Private'),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 14),
+              SizedBox(
+                width: double.infinity,
+                height: 54,
+                child: FilledButton(
+                  onPressed: () {
+                    Navigator.of(context).pop(
+                      _ReviewEditResult(
+                        rating: _rating,
+                        comment: _commentController.text.trim(),
+                        visibility: _visibility,
+                      ),
+                    );
+                  },
+                  style: FilledButton.styleFrom(
+                    backgroundColor: const Color(0xFF111315),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(17),
+                    ),
+                  ),
+                  child: const Text(
+                    'Save changes',
+                    style: TextStyle(fontWeight: FontWeight.w800),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _ReviewEditResult {
+  final int rating;
+  final String comment;
+  final FeedbackVisibility visibility;
+
+  const _ReviewEditResult({
+    required this.rating,
+    required this.comment,
+    required this.visibility,
+  });
+}
+
+class _ReviewTargetAvatar extends StatelessWidget {
+  final FeedbackModel review;
+
+  const _ReviewTargetAvatar({required this.review});
+
+  @override
+  Widget build(BuildContext context) {
+    final imageUrl = review.targetPhotoUrl.trim();
+
+    return Container(
+      width: 48,
+      height: 48,
+      clipBehavior: Clip.antiAlias,
+      decoration: const BoxDecoration(
+        color: Color(0xFFF0F1F3),
+        shape: BoxShape.circle,
+      ),
+      child: imageUrl.isEmpty
+          ? Icon(_icon, color: const Color(0xFF555960))
+          : Image.network(
+              imageUrl,
+              fit: BoxFit.cover,
+              errorBuilder: (_, _, _) =>
+                  Icon(_icon, color: const Color(0xFF555960)),
+            ),
+    );
+  }
+
+  IconData get _icon {
+    switch (review.targetType) {
+      case FeedbackTargetType.restaurant:
+        return Icons.restaurant_rounded;
+      case FeedbackTargetType.hotel:
+        return Icons.hotel_rounded;
+      case FeedbackTargetType.tourGuide:
+        return Icons.explore_rounded;
+      case FeedbackTargetType.service:
+      case FeedbackTargetType.other:
+        return Icons.star_rounded;
+      case FeedbackTargetType.driver:
+      case FeedbackTargetType.foodRider:
+      case FeedbackTargetType.tourismDriver:
+      case FeedbackTargetType.cargoDriver:
+      case FeedbackTargetType.parcelRider:
+      case FeedbackTargetType.studentRideDriver:
+        return Icons.person_rounded;
+    }
+  }
+}
+
+class _ReviewStatusBadge extends StatelessWidget {
+  final FeedbackModel review;
+
+  const _ReviewStatusBadge({required this.review});
+
+  @override
+  Widget build(BuildContext context) {
+    final color = _color;
+    final label = _label;
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
+      decoration: BoxDecoration(
+        color: color.withAlpha(25),
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Text(
+        label,
+        style: TextStyle(
+          color: color,
+          fontSize: 10,
+          fontWeight: FontWeight.w800,
+        ),
+      ),
+    );
+  }
+
+  String get _label {
+    switch (review.status) {
+      case FeedbackStatus.published:
+        return 'Published';
+      case FeedbackStatus.pendingModeration:
+        return 'Pending';
+      case FeedbackStatus.hidden:
+        return 'Hidden';
+      case FeedbackStatus.removed:
+        return 'Removed';
+      case FeedbackStatus.flagged:
+        return 'Flagged';
+    }
+  }
+
+  Color get _color {
+    switch (review.status) {
+      case FeedbackStatus.published:
+        return const Color(0xFF188038);
+      case FeedbackStatus.pendingModeration:
+        return const Color(0xFFF29900);
+      case FeedbackStatus.hidden:
+        return const Color(0xFF5F6368);
+      case FeedbackStatus.removed:
+        return const Color(0xFFD93025);
+      case FeedbackStatus.flagged:
+        return const Color(0xFFB06000);
+    }
+  }
+}
+
+class _FilterChip extends StatelessWidget {
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+
+  const _FilterChip({
+    required this.label,
+    required this.selected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: selected ? const Color(0xFF111315) : Colors.white,
+      borderRadius: BorderRadius.circular(14),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(14),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(
+              color: selected
+                  ? const Color(0xFF111315)
+                  : const Color(0xFFE1E4E8),
+            ),
+          ),
+          child: Text(
+            label,
+            style: TextStyle(
+              color: selected ? Colors.white : const Color(0xFF555960),
+              fontSize: 13,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _ReviewsMessageView extends StatelessWidget {
+  final IconData icon;
+  final String title;
+  final String message;
+  final VoidCallback? onRetry;
+
+  const _ReviewsMessageView({
+    required this.icon,
+    required this.title,
+    required this.message,
+    this.onRetry,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(28),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            Icon(icon, size: 58, color: const Color(0xFF9AA0A6)),
+            const SizedBox(height: 18),
+            Text(
+              title,
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                color: Color(0xFF202124),
+                fontSize: 20,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+            const SizedBox(height: 7),
+            Text(
+              message,
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                color: Color(0xFF777C85),
+                fontSize: 14,
+                height: 1.4,
+              ),
+            ),
+            if (onRetry != null) ...<Widget>[
+              const SizedBox(height: 18),
+              FilledButton(
+                onPressed: onRetry,
+                style: FilledButton.styleFrom(
+                  backgroundColor: const Color(0xFF111315),
+                ),
+                child: const Text('Try again'),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}

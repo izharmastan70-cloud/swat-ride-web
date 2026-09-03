@@ -1,0 +1,368 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+
+import {
+  ATOMIC_MIGRATION_SAFETY,
+  MIGRATION_OPERATION,
+  assertAtomicMigrationContractDisarmed,
+  buildAtomicMigrationExecutionPlan,
+} from '../src/atomic_migration_execution_contract.mjs';
+
+import {
+  proposedInventoryFingerprint,
+  roleInventoryFingerprint,
+} from '../src/fingerprint.mjs';
+
+const fixture = JSON.parse(
+  await readFile(
+    new URL('./fixtures/valid_dry_run_evidence.json', import.meta.url),
+    'utf8',
+  ),
+);
+
+const shaA = 'a'.repeat(64);
+const shaB = 'b'.repeat(64);
+const shaC = 'c'.repeat(64);
+
+function validEvidence() {
+  const currentRoles = fixture.currentRoles;
+
+  const currentFingerprint =
+    roleInventoryFingerprint(currentRoles);
+
+  const proposedFingerprint =
+    proposedInventoryFingerprint(currentRoles);
+
+  const roleIds = currentRoles
+    .map((role) => role.roleId)
+    .sort((a, b) => a.localeCompare(b));
+
+  return {
+    projectId: 'swat-ride-v2',
+    rolloutStage: 'MONITOR_ONLY',
+    guardRevision: 2,
+    guardRoleCount: 22,
+    autoTrafficPercent: 0,
+    businessWriteTrafficPercent: 0,
+    externalChannelsEnabled: false,
+    runtimeMonitorOnlyOverlayEnforced: true,
+    noAutoBusinessWriteBoundaryEnforced: true,
+
+    freshTrustedLiveInventoryRead: true,
+    dedicatedRoleAbsent: true,
+    requesterApproverSeparated: true,
+    freshOwnerDecisionVerified: true,
+    migrationRulesVerified: true,
+
+    oldGuardImmutable: true,
+    oldArmingTokenImmutable: true,
+    oldActivationReceiptImmutable: true,
+    existingArmingTokenReuseAllowed: false,
+
+    migrationIdSha256: shaA,
+    actorReferenceSha256: shaB,
+    currentControlFingerprintSha256: shaC,
+
+    currentRoles,
+    currentInventoryFingerprintSha256: currentFingerprint,
+    proposedInventoryFingerprintSha256: proposedFingerprint,
+
+    approval: {
+      approvalId: 'future-fresh-owner-approval',
+      status: 'APPROVED',
+      expired: false,
+      consumed: false,
+      operation: MIGRATION_OPERATION,
+      roleId: 'security_incident_agent',
+      actionId: 'security_incident.attach_runtime',
+      module: 'security_incident',
+      bindingFingerprintSha256: shaB,
+    },
+
+    authorityManifest: {
+      status: 'ACTIVE',
+      inventoryVersion: 'phase66_roles_v1_22',
+      roleCount: 22,
+      roleProjectionFingerprintSha256: currentFingerprint,
+      revision: 1,
+      postMigrationRebindRequired: false,
+    },
+
+    migrationHold: {
+      status: 'HELD',
+      migrationIdSha256: shaA,
+      ownerApprovalId: 'future-fresh-owner-approval',
+      ownerApprovalBindingSha256: shaB,
+      currentInventoryFingerprintSha256: currentFingerprint,
+      proposedInventoryFingerprintSha256: proposedFingerprint,
+      currentControlFingerprintSha256: shaC,
+      expectedRoleIds: roleIds,
+      expectedRoleCount: 22,
+      proposedRoleCount: 23,
+      expectedGuardRevision: 2,
+      targetRoleId: 'security_incident_agent',
+      targetActionId: 'security_incident.attach_runtime',
+      migrationHoldActive: true,
+      repositoryAttachAuthorized: false,
+      repositoryArmAuthorized: false,
+      firstIncidentWriteAuthorized: false,
+      authorizesSuggestOnly: false,
+      authorizesAuto: false,
+    },
+  };
+}
+
+test('atomic migration contract remains offline/default-disarmed', () => {
+  assert.equal(assertAtomicMigrationContractDisarmed(), true);
+  assert.equal(ATOMIC_MIGRATION_SAFETY.executionArmed, false);
+  assert.equal(ATOMIC_MIGRATION_SAFETY.networkReadEnabled, false);
+  assert.equal(ATOMIC_MIGRATION_SAFETY.networkWriteEnabled, false);
+  assert.equal(ATOMIC_MIGRATION_SAFETY.firestoreTransactionEnabled, false);
+  assert.equal(ATOMIC_MIGRATION_SAFETY.approvalConsumptionEnabled, false);
+  assert.equal(ATOMIC_MIGRATION_SAFETY.roleDeltaEnabled, false);
+  assert.equal(ATOMIC_MIGRATION_SAFETY.roleEnableEnabled, false);
+  assert.equal(ATOMIC_MIGRATION_SAFETY.repositoryAttachEnabled, false);
+  assert.equal(ATOMIC_MIGRATION_SAFETY.repositoryArmEnabled, false);
+  assert.equal(ATOMIC_MIGRATION_SAFETY.suggestOnlyAuthorized, false);
+  assert.equal(ATOMIC_MIGRATION_SAFETY.autoAuthorized, false);
+});
+
+test('valid exact evidence produces one five-write atomic plan', () => {
+  const plan =
+    buildAtomicMigrationExecutionPlan(validEvidence());
+
+  assert.equal(plan.executionArmed, false);
+  assert.equal(plan.transaction.required, true);
+  assert.equal(plan.transaction.exactLogicalWriteCount, 5);
+
+  assert.equal(
+    plan.transaction.write1ApprovalConsume.status,
+    'CONSUMED',
+  );
+
+  assert.equal(
+    plan.transaction.write2CreateDisabledRole.roleId,
+    'security_incident_agent',
+  );
+
+  assert.equal(
+    plan.transaction.write2CreateDisabledRole.enabled,
+    false,
+  );
+
+  assert.equal(
+    plan.transaction.write2CreateDisabledRole.name,
+    'Security Incident Agent',
+  );
+
+  assert.equal(
+    plan.transaction.write2CreateDisabledRole.description,
+    'Dedicated security incident persistence authority.',
+  );
+
+  assert.equal(
+    plan.transaction.write2CreateDisabledRole.mode,
+    'ASK_FIRST',
+  );
+
+  assert.equal(
+    plan.transaction.write2CreateDisabledRole.aiClass,
+    'FREE_AI',
+  );
+
+  assert.equal(
+    plan.transaction.write2CreateDisabledRole.privacyLevel,
+    'HIGHLY_SENSITIVE',
+  );
+
+  assert.deepEqual(
+    plan.transaction.write2CreateDisabledRole.allowedActions,
+    ['security_incident.attach_runtime'],
+  );
+
+  assert.deepEqual(
+    plan.transaction.write2CreateDisabledRole.approvalRequiredActions,
+    ['security_incident.attach_runtime'],
+  );
+
+  assert.deepEqual(
+    plan.transaction.write2CreateDisabledRole.forbiddenActions,
+    [],
+  );
+
+  assert.equal(
+    plan.transaction.write3AuthorityManifestPatch.revision,
+    2,
+  );
+
+  assert.equal(
+    plan.transaction.write4MigrationHoldPatch.status,
+    'ROLE_DELTA_COMMITTED',
+  );
+
+  assert.equal(
+    plan.transaction.write4MigrationHoldPatch.migrationHoldActive,
+    true,
+  );
+
+  assert.equal(
+    plan.postconditions.approvalConsumed,
+    true,
+  );
+
+  assert.equal(
+    plan.postconditions.securityIncidentRoleEnabled,
+    false,
+  );
+
+  assert.equal(
+    plan.postconditions.repositoryAttachAuthorized,
+    false,
+  );
+
+  assert.equal(
+    plan.postconditions.repositoryArmAuthorized,
+    false,
+  );
+
+  assert.equal(
+    plan.postconditions.suggestOnlyAuthorized,
+    false,
+  );
+
+  assert.equal(
+    plan.postconditions.autoAuthorized,
+    false,
+  );
+});
+
+test('expired, consumed or wrong-scope approval fails closed', () => {
+  assert.throws(
+    () =>
+      buildAtomicMigrationExecutionPlan({
+        ...validEvidence(),
+        approval: {
+          ...validEvidence().approval,
+          expired: true,
+        },
+      }),
+    /approval_expired_must_be_false/,
+  );
+
+  assert.throws(
+    () =>
+      buildAtomicMigrationExecutionPlan({
+        ...validEvidence(),
+        approval: {
+          ...validEvidence().approval,
+          consumed: true,
+        },
+      }),
+    /approval_consumed_must_be_false/,
+  );
+
+  assert.throws(
+    () =>
+      buildAtomicMigrationExecutionPlan({
+        ...validEvidence(),
+        approval: {
+          ...validEvidence().approval,
+          actionId: 'wrong.action',
+        },
+      }),
+    /approval_action_mismatch/,
+  );
+});
+
+test('manifest or hold mismatch fails closed', () => {
+  assert.throws(
+    () =>
+      buildAtomicMigrationExecutionPlan({
+        ...validEvidence(),
+        authorityManifest: {
+          ...validEvidence().authorityManifest,
+          revision: 2,
+        },
+      }),
+    /authority_manifest_revision_must_be_1/,
+  );
+
+  assert.throws(
+    () =>
+      buildAtomicMigrationExecutionPlan({
+        ...validEvidence(),
+        migrationHold: {
+          ...validEvidence().migrationHold,
+          migrationHoldActive: false,
+        },
+      }),
+    /migration_hold_must_be_active/,
+  );
+});
+
+test('role collision and rollout progression fail closed', () => {
+  const collisionRoles =
+    structuredClone(validEvidence().currentRoles);
+
+  collisionRoles[0].roleId =
+    'security_incident_agent';
+
+  assert.throws(
+    () =>
+      buildAtomicMigrationExecutionPlan({
+        ...validEvidence(),
+        currentRoles: collisionRoles,
+      }),
+    /exact_current_22_role_inventory_invalid/,
+  );
+
+  assert.throws(
+    () =>
+      buildAtomicMigrationExecutionPlan({
+        ...validEvidence(),
+        rolloutStage: 'SUGGEST_ONLY',
+      }),
+    /rollout_must_remain_monitor_only/,
+  );
+});
+
+test('migration never enables role or releases hold in same transaction', () => {
+  const plan =
+    buildAtomicMigrationExecutionPlan(validEvidence());
+
+  assert.equal(
+    plan.transaction.write2CreateDisabledRole.enabled,
+    false,
+  );
+
+  assert.equal(
+    plan.transaction.write4MigrationHoldPatch.migrationHoldActive,
+    true,
+  );
+
+  assert.equal(
+    plan.postconditions.postMigrationSnapshotRequired,
+    true,
+  );
+
+  assert.equal(
+    plan.postconditions.postMigrationGuardRebindRequired,
+    true,
+  );
+
+  assert.equal(
+    plan.postconditions.freshPostMigrationArmingTokenRequired,
+    true,
+  );
+
+  assert.equal(
+    plan.postconditions.migrationReceiptRequired,
+    true,
+  );
+
+  assert.equal(
+    plan.postconditions.oldArmingTokenReuseAllowed,
+    false,
+  );
+});

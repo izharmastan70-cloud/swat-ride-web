@@ -1,0 +1,385 @@
+import 'package:flutter_test/flutter_test.dart';
+
+import 'package:swat_ride/ai_agent/constants/agent_guardian_security_constants.dart';
+import 'package:swat_ride/ai_agent/constants/agent_incident_response_constants.dart';
+import 'package:swat_ride/ai_agent/models/agent_guardian_risk_aggregate.dart';
+import 'package:swat_ride/ai_agent/models/agent_guardian_risk_decision.dart';
+import 'package:swat_ride/ai_agent/models/agent_security_incident_record.dart';
+import 'package:swat_ride/ai_agent/models/agent_security_incident_triage_decision.dart';
+import 'package:swat_ride/ai_agent/services/agent_security_incident_triage_service.dart';
+
+void main() {
+  const AgentSecurityIncidentTriageService service =
+      AgentSecurityIncidentTriageService();
+
+  AgentGuardianRiskAggregate aggregate({
+    String status = AgentGuardianRiskAggregateStatus.ready,
+    String severity = AgentGuardianSeverity.medium,
+    String confidence = AgentGuardianEvidenceConfidence.high,
+    String disposition = AgentGuardianRecommendedDisposition.review,
+  }) {
+    return AgentGuardianRiskAggregate(
+      status: status,
+      correlationId: 'guardian_corr_001',
+      pseudonymousSubjectRef: 'subject_hash_001',
+      severity: severity,
+      evidenceConfidence: confidence,
+      recommendedDisposition: disposition,
+      acceptedDecisions: const <AgentGuardianRiskDecision>[],
+      rejectedReasonByEventId: const <String, String>{},
+      reasonCodes: const <String>['guardian_triage_source'],
+      duplicateEventCount: 0,
+      replayDuplicateSignalCount: 0,
+      crossSubjectRejectedCount: 0,
+      invalidSignalRejectedCount: 0,
+      outsideWindowRejectedCount: 0,
+      distinctCategoryCount: 1,
+      distinctSourceComponentCount: 1,
+      elevatedByCorrelation: false,
+    );
+  }
+
+  AgentSecurityIncidentRecord recordFor(AgentGuardianRiskAggregate source) {
+    return service.createRecordFromGuardian(
+      incidentId: 'incident_001',
+      aggregate: source,
+      createdAt: DateTime.utc(2026, 8, 19, 10),
+      evidenceReferenceCodes: const <String>[
+        'guardian_corr_001',
+        'safe_reason_reference',
+      ],
+    );
+  }
+
+  group('Phase 54 Step 1B incident record/lifecycle/triage', () {
+    test('Guardian aggregate creates privacy-safe OPEN incident', () {
+      final AgentSecurityIncidentRecord record = recordFor(aggregate());
+
+      expect(record.status, AgentSecurityIncidentStatus.open);
+      expect(record.source, AgentSecurityIncidentSource.guardian);
+      expect(record.privacyMinimizedEvidenceOnly, isTrue);
+      expect(record.persistsRecord, isFalse);
+    });
+
+    test('incident record rejects raw/private evidence flags', () {
+      final AgentSecurityIncidentRecord unsafe = AgentSecurityIncidentRecord(
+        incidentId: 'incident_unsafe',
+        source: AgentSecurityIncidentSource.guardian,
+        sourceReferenceId: 'guardian_corr_unsafe',
+        pseudonymousSubjectRef: 'subject_hash_unsafe',
+        status: AgentSecurityIncidentStatus.open,
+        severity: AgentGuardianSeverity.high,
+        evidenceConfidence: AgentGuardianEvidenceConfidence.high,
+        createdAt: DateTime.utc(2026, 8, 19, 10),
+        updatedAt: DateTime.utc(2026, 8, 19, 10),
+        evidenceReferenceCodes: const <String>['safe_ref_001'],
+        containsRawSecret: true,
+      );
+
+      expect(
+        () => unsafe.validateStructure(),
+        throwsA(isA<AgentSecurityIncidentRecordException>()),
+      );
+    });
+
+    test('incident evidence references are bounded 1 to 12', () {
+      final AgentSecurityIncidentRecord empty = AgentSecurityIncidentRecord(
+        incidentId: 'incident_empty',
+        source: AgentSecurityIncidentSource.guardian,
+        sourceReferenceId: 'guardian_corr_empty',
+        pseudonymousSubjectRef: 'subject_hash_empty',
+        status: AgentSecurityIncidentStatus.open,
+        severity: AgentGuardianSeverity.low,
+        evidenceConfidence: AgentGuardianEvidenceConfidence.low,
+        createdAt: DateTime.utc(2026, 8, 19, 10),
+        updatedAt: DateTime.utc(2026, 8, 19, 10),
+        evidenceReferenceCodes: const <String>[],
+      );
+
+      expect(
+        () => empty.validateStructure(),
+        throwsA(isA<AgentSecurityIncidentRecordException>()),
+      );
+    });
+
+    test('acknowledged incident requires responder and timestamp', () {
+      final AgentSecurityIncidentRecord invalid = AgentSecurityIncidentRecord(
+        incidentId: 'incident_ack',
+        source: AgentSecurityIncidentSource.guardian,
+        sourceReferenceId: 'guardian_corr_ack',
+        pseudonymousSubjectRef: 'subject_hash_ack',
+        status: AgentSecurityIncidentStatus.acknowledged,
+        severity: AgentGuardianSeverity.high,
+        evidenceConfidence: AgentGuardianEvidenceConfidence.high,
+        createdAt: DateTime.utc(2026, 8, 19, 10),
+        updatedAt: DateTime.utc(2026, 8, 19, 10, 1),
+        evidenceReferenceCodes: const <String>['safe_ref_001'],
+      );
+
+      expect(
+        () => invalid.validateStructure(),
+        throwsA(isA<AgentSecurityIncidentRecordException>()),
+      );
+    });
+
+    test('valid acknowledged incident keeps human responder metadata', () {
+      final AgentSecurityIncidentRecord valid = AgentSecurityIncidentRecord(
+        incidentId: 'incident_ack_valid',
+        source: AgentSecurityIncidentSource.guardian,
+        sourceReferenceId: 'guardian_corr_ack_valid',
+        pseudonymousSubjectRef: 'subject_hash_ack_valid',
+        status: AgentSecurityIncidentStatus.acknowledged,
+        severity: AgentGuardianSeverity.high,
+        evidenceConfidence: AgentGuardianEvidenceConfidence.high,
+        createdAt: DateTime.utc(2026, 8, 19, 10),
+        updatedAt: DateTime.utc(2026, 8, 19, 10, 2),
+        evidenceReferenceCodes: const <String>['safe_ref_001'],
+        assignedResponderRef: 'responder_hash_001',
+        acknowledgedAt: DateTime.utc(2026, 8, 19, 10, 1),
+      );
+
+      expect(() => valid.validateStructure(), returnsNormally);
+    });
+
+    test('MEDIUM Guardian severity is inherited without downgrade', () {
+      final AgentGuardianRiskAggregate source = aggregate();
+      final AgentSecurityIncidentRecord record = recordFor(source);
+
+      final AgentSecurityIncidentTriageDecision decision = service
+          .triageFromGuardian(
+            record: record,
+            aggregate: source,
+            generatedAt: DateTime.utc(2026, 8, 19, 10, 2),
+          );
+
+      expect(decision.inheritedGuardianSeverity, AgentGuardianSeverity.medium);
+      expect(decision.incidentSeverity, AgentGuardianSeverity.medium);
+      expect(decision.guardianSeverityCanBeDowngraded, isFalse);
+    });
+
+    test('HIGH Guardian risk requires human responder assignment', () {
+      final AgentGuardianRiskAggregate source = aggregate(
+        severity: AgentGuardianSeverity.high,
+      );
+
+      final AgentSecurityIncidentTriageDecision decision = service
+          .triageFromGuardian(
+            record: recordFor(source),
+            aggregate: source,
+            generatedAt: DateTime.utc(2026, 8, 19, 10, 2),
+          );
+
+      expect(decision.humanReviewRequired, isTrue);
+      expect(decision.responderAssignmentRequired, isTrue);
+    });
+
+    test('CRITICAL risk recommends fail-closed human review', () {
+      final AgentGuardianRiskAggregate source = aggregate(
+        severity: AgentGuardianSeverity.critical,
+        disposition:
+            AgentGuardianRecommendedDisposition.blockAndEscalateRecommended,
+      );
+
+      final AgentSecurityIncidentTriageDecision decision = service
+          .triageFromGuardian(
+            record: recordFor(source),
+            aggregate: source,
+            generatedAt: DateTime.utc(2026, 8, 19, 10, 2),
+          );
+
+      expect(decision.humanReviewRequired, isTrue);
+      expect(decision.failClosedRecommended, isTrue);
+      expect(
+        decision.status,
+        AgentSecurityIncidentTriageStatus.humanReviewRequired,
+      );
+    });
+
+    test('blocked Guardian aggregate fails closed', () {
+      final AgentGuardianRiskAggregate source = aggregate(
+        status: AgentGuardianRiskAggregateStatus.blocked,
+        severity: AgentGuardianSeverity.medium,
+      );
+
+      final AgentSecurityIncidentRecord record = recordFor(source);
+
+      expect(record.severity, AgentGuardianSeverity.high);
+
+      final AgentSecurityIncidentTriageDecision decision = service
+          .triageFromGuardian(
+            record: record,
+            aggregate: source,
+            generatedAt: DateTime.utc(2026, 8, 19, 10, 2),
+          );
+
+      expect(
+        decision.status,
+        AgentSecurityIncidentTriageStatus.failClosedReviewRequired,
+      );
+      expect(decision.failClosedRecommended, isTrue);
+      expect(decision.responsePlanningAllowed, isFalse);
+    });
+
+    test('block-like Guardian disposition requires human review', () {
+      final AgentGuardianRiskAggregate source = aggregate(
+        severity: AgentGuardianSeverity.high,
+        disposition: AgentGuardianRecommendedDisposition.blockRecommended,
+      );
+
+      final AgentSecurityIncidentTriageDecision decision = service
+          .triageFromGuardian(
+            record: recordFor(source),
+            aggregate: source,
+            generatedAt: DateTime.utc(2026, 8, 19, 10, 2),
+          );
+
+      expect(decision.humanReviewRequired, isTrue);
+      expect(decision.failClosedRecommended, isTrue);
+    });
+
+    test('record/aggregate binding mismatch is rejected', () {
+      final AgentGuardianRiskAggregate source = aggregate();
+      final AgentSecurityIncidentRecord record = AgentSecurityIncidentRecord(
+        incidentId: 'incident_mismatch',
+        source: AgentSecurityIncidentSource.guardian,
+        sourceReferenceId: 'different_corr',
+        pseudonymousSubjectRef: 'subject_hash_001',
+        status: AgentSecurityIncidentStatus.open,
+        severity: AgentGuardianSeverity.medium,
+        evidenceConfidence: AgentGuardianEvidenceConfidence.high,
+        createdAt: DateTime.utc(2026, 8, 19, 10),
+        updatedAt: DateTime.utc(2026, 8, 19, 10),
+        evidenceReferenceCodes: const <String>['safe_ref_001'],
+      );
+
+      expect(
+        () => service.triageFromGuardian(
+          record: record,
+          aggregate: source,
+          generatedAt: DateTime.utc(2026, 8, 19, 10, 2),
+        ),
+        throwsA(isA<AgentSecurityIncidentTriageServiceException>()),
+      );
+    });
+
+    test('lifecycle allows DETECTED -> OPEN', () {
+      expect(
+        service.canTransition(
+          currentStatus: AgentSecurityIncidentStatus.detected,
+          nextStatus: AgentSecurityIncidentStatus.open,
+        ),
+        isTrue,
+      );
+    });
+
+    test('lifecycle allows OPEN -> ACKNOWLEDGED -> TRIAGED', () {
+      expect(
+        service.canTransition(
+          currentStatus: AgentSecurityIncidentStatus.open,
+          nextStatus: AgentSecurityIncidentStatus.acknowledged,
+        ),
+        isTrue,
+      );
+
+      expect(
+        service.canTransition(
+          currentStatus: AgentSecurityIncidentStatus.acknowledged,
+          nextStatus: AgentSecurityIncidentStatus.triaged,
+        ),
+        isTrue,
+      );
+    });
+
+    test('lifecycle prevents CLOSED from reopening itself', () {
+      expect(
+        service.canTransition(
+          currentStatus: AgentSecurityIncidentStatus.closed,
+          nextStatus: AgentSecurityIncidentStatus.open,
+        ),
+        isFalse,
+      );
+    });
+
+    test('lifecycle blocks direct OPEN -> CLOSED skip', () {
+      expect(
+        service.canTransition(
+          currentStatus: AgentSecurityIncidentStatus.open,
+          nextStatus: AgentSecurityIncidentStatus.closed,
+        ),
+        isFalse,
+      );
+    });
+
+    test('triage always keeps authoritative checks required', () {
+      final AgentGuardianRiskAggregate source = aggregate();
+
+      final AgentSecurityIncidentTriageDecision decision = service
+          .triageFromGuardian(
+            record: recordFor(source),
+            aggregate: source,
+            generatedAt: DateTime.utc(2026, 8, 19, 10, 2),
+          );
+
+      expect(decision.authoritativeChecksStillRequired, isTrue);
+      expect(decision.finalEnforcer, isFalse);
+    });
+
+    test('safe record map contains no raw evidence or execution', () {
+      final Map<String, dynamic> map = recordFor(aggregate()).toSafeMap();
+
+      expect(map['rawPromptIncluded'], isFalse);
+      expect(map['rawMessageHistoryIncluded'], isFalse);
+      expect(map['rawSecretIncluded'], isFalse);
+      expect(map['paymentCredentialIncluded'], isFalse);
+      expect(map['authTokenIncluded'], isFalse);
+      expect(map['privatePayloadIncluded'], isFalse);
+      expect(map['executesContainment'], isFalse);
+      expect(map['executesRemediation'], isFalse);
+      expect(map['writesBusinessData'], isFalse);
+      expect(map['persistsRecord'], isFalse);
+    });
+
+    test('safe triage map is planning-only and non-authoritative', () {
+      final AgentGuardianRiskAggregate source = aggregate(
+        severity: AgentGuardianSeverity.high,
+      );
+
+      final Map<String, dynamic> map = service
+          .triageFromGuardian(
+            record: recordFor(source),
+            aggregate: source,
+            generatedAt: DateTime.utc(2026, 8, 19, 10, 2),
+          )
+          .toSafeMap();
+
+      expect(map['triageOnly'], isTrue);
+      expect(map['guardianSeverityCanBeDowngraded'], isFalse);
+      expect(map['grantsPermission'], isFalse);
+      expect(map['consumesApproval'], isFalse);
+      expect(map['marksRuntimeAllowed'], isFalse);
+      expect(map['executesContainment'], isFalse);
+      expect(map['executesRemediation'], isFalse);
+      expect(map['persistsDecision'], isFalse);
+    });
+
+    test('service cannot duplicate Guardian or security authority', () {
+      expect(service.triageAndLifecycleOnly, isTrue);
+      expect(service.guardianDetectionDuplicated, isFalse);
+      expect(service.guardianSeverityCanBeDowngraded, isFalse);
+      expect(service.finalEnforcer, isFalse);
+      expect(service.invokesPermissionEngine, isFalse);
+      expect(service.invokesApprovalEngine, isFalse);
+      expect(service.invokesRuntimeGate, isFalse);
+      expect(service.invokesEmergencyStop, isFalse);
+      expect(service.bypassesAuthoritativeControls, isFalse);
+      expect(service.executesContainment, isFalse);
+      expect(service.executesRemediation, isFalse);
+      expect(service.executesRecoveryAction, isFalse);
+      expect(service.createsProviderAction, isFalse);
+      expect(service.invokesTargetAgent, isFalse);
+      expect(service.writesBusinessData, isFalse);
+      expect(service.persistsIncident, isFalse);
+      expect(service.implementsPhase63PrivacyUi, isFalse);
+    });
+  });
+}

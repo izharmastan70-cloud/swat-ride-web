@@ -1,0 +1,618 @@
+﻿import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+
+import '../models/referral_model.dart';
+import '../services/referral_service.dart';
+
+class ReferralScreen extends StatefulWidget {
+  const ReferralScreen({
+    super.key,
+    required this.userId,
+    this.referralCode,
+    this.phoneVerified = false,
+    this.identityVerified = false,
+    this.referralService,
+  });
+
+  final String userId;
+  final String? referralCode;
+  final bool phoneVerified;
+  final bool identityVerified;
+  final ReferralService? referralService;
+
+  @override
+  State<ReferralScreen> createState() => _ReferralScreenState();
+}
+
+class _ReferralScreenState extends State<ReferralScreen> {
+  static const Color _navy = Color(0xFF09233F);
+  static const Color _background = Color(0xFFF5F7FB);
+
+  late final ReferralService _service;
+  final TextEditingController _codeController = TextEditingController();
+
+  List<ReferralModel> _invitedFriends = [];
+  ReferralModel? _usedReferral;
+  bool _isLoading = true;
+  bool _isSubmitting = false;
+  bool _featureEnabled = true;
+  String? _errorMessage;
+
+  @override
+  void initState() {
+    super.initState();
+    _service = widget.referralService ?? ReferralService();
+    _loadData();
+  }
+
+  @override
+  void dispose() {
+    _codeController.dispose();
+    super.dispose();
+  }
+
+  String get _displayCode {
+    final supplied = widget.referralCode?.trim().toUpperCase() ?? '';
+    if (supplied.isNotEmpty) return supplied;
+    if (_invitedFriends.isNotEmpty) {
+      return _invitedFriends.first.normalizedReferralCode;
+    }
+    return '';
+  }
+
+  Future<void> _loadData() async {
+    if (widget.userId.trim().isEmpty) {
+      setState(() {
+        _isLoading = false;
+        _errorMessage = 'User ID is required to open referrals.';
+      });
+      return;
+    }
+
+    setState(() {
+      _isLoading = true;
+      _errorMessage = null;
+    });
+
+    try {
+      final enabled = await _service.isReferralEnabled();
+      if (!enabled) {
+        if (!mounted) return;
+        setState(() {
+          _featureEnabled = false;
+          _isLoading = false;
+        });
+        return;
+      }
+
+      final results = await Future.wait<dynamic>([
+        _service.getInviterReferrals(widget.userId),
+        _service.getInvitedUserReferral(widget.userId),
+      ]);
+
+      if (!mounted) return;
+      setState(() {
+        _featureEnabled = true;
+        _invitedFriends = results[0] as List<ReferralModel>;
+        _usedReferral = results[1] as ReferralModel?;
+        _isLoading = false;
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _isLoading = false;
+        _errorMessage = error.toString().replaceFirst('Exception: ', '');
+      });
+    }
+  }
+
+  Future<void> _copyInvite() async {
+    if (_displayCode.isEmpty) return;
+    final text = 'Join SWAT RIDE with my referral code: $_displayCode';
+    await Clipboard.setData(ClipboardData(text: text));
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(const SnackBar(content: Text('Invite text copied')));
+  }
+
+  Future<void> _registerCode() async {
+    final code = _codeController.text.trim();
+    if (code.isEmpty) {
+      _showMessage('Enter a referral code.');
+      return;
+    }
+    if (!widget.phoneVerified) {
+      _showMessage('Phone verification is required before using a referral code.');
+      return;
+    }
+
+    setState(() => _isSubmitting = true);
+    try {
+      final result = await _service.registerInvitedUser(
+        referralCode: code,
+        invitedUserId: widget.userId,
+        phoneVerified: widget.phoneVerified,
+        identityVerified: widget.identityVerified,
+      );
+      if (!mounted) return;
+      _showMessage(result.message);
+      if (result.success) {
+        _codeController.clear();
+        await _loadData();
+      }
+    } catch (error) {
+      if (!mounted) return;
+      _showMessage(error.toString().replaceFirst('Exception: ', ''));
+    } finally {
+      if (mounted) setState(() => _isSubmitting = false);
+    }
+  }
+
+  void _showMessage(String message) {
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: _background,
+      appBar: AppBar(
+        backgroundColor: Colors.white,
+        foregroundColor: _navy,
+        elevation: 0,
+        title: const Text('Invite & Earn',
+            style: TextStyle(fontWeight: FontWeight.w800)),
+        actions: [
+          IconButton(
+            tooltip: 'Refresh',
+            onPressed: _isLoading ? null : _loadData,
+            icon: const Icon(Icons.refresh_rounded),
+          ),
+        ],
+      ),
+      body: SafeArea(child: _buildBody()),
+    );
+  }
+
+  Widget _buildBody() {
+    if (_isLoading) return const Center(child: CircularProgressIndicator());
+
+    if (_errorMessage != null) {
+      return _StateMessage(
+        icon: Icons.cloud_off_rounded,
+        title: 'Referrals unavailable',
+        message: _errorMessage!.isEmpty
+            ? 'Referral information could not be loaded.'
+            : _errorMessage!,
+        onRetry: _loadData,
+      );
+    }
+
+    if (!_featureEnabled) {
+      return const _StateMessage(
+        icon: Icons.pause_circle_outline_rounded,
+        title: 'Referrals are turned off',
+        message: 'The referral program is currently disabled by Admin.',
+      );
+    }
+
+    return RefreshIndicator(
+      onRefresh: _loadData,
+      child: ListView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
+        children: [
+          _InviteCard(code: _displayCode, onCopy: _copyInvite),
+          const SizedBox(height: 18),
+          _StatsRow(referrals: _invitedFriends),
+          const SizedBox(height: 24),
+          if (_usedReferral == null) ...[
+            const _SectionTitle('Have a referral code?'),
+            const SizedBox(height: 10),
+            _CodeEntryCard(
+              controller: _codeController,
+              enabled: !_isSubmitting,
+              phoneVerified: widget.phoneVerified,
+              onSubmit: _registerCode,
+            ),
+            const SizedBox(height: 24),
+          ] else ...[
+            const _SectionTitle('Referral used by you'),
+            const SizedBox(height: 10),
+            _ReferralStatusCard(referral: _usedReferral!),
+            const SizedBox(height: 24),
+          ],
+          const _SectionTitle('Your invited friends'),
+          const SizedBox(height: 10),
+          if (_invitedFriends.isEmpty)
+            const _EmptyInvites()
+          else
+            for (final referral in _invitedFriends) ...[
+              _ReferralStatusCard(referral: referral),
+              const SizedBox(height: 10),
+            ],
+          const SizedBox(height: 14),
+          const _SafetyNote(),
+        ],
+      ),
+    );
+  }
+}
+
+class _InviteCard extends StatelessWidget {
+  const _InviteCard({required this.code, required this.onCopy});
+  final String code;
+  final VoidCallback onCopy;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(21),
+      decoration: BoxDecoration(
+        gradient: const LinearGradient(
+          colors: [Color(0xFF09233F), Color(0xFF1264E5)],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        borderRadius: BorderRadius.circular(24),
+        boxShadow: const [
+          BoxShadow(color: Color(0x291264E5), blurRadius: 22, offset: Offset(0, 11)),
+        ],
+      ),
+      child: Column(
+        children: [
+          const Icon(Icons.group_add_rounded, size: 46, color: Color(0xFFFFD166)),
+          const SizedBox(height: 10),
+          const Text('Invite friends to SWAT RIDE',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: Colors.white, fontSize: 21, fontWeight: FontWeight.w900)),
+          const SizedBox(height: 6),
+          const Text(
+            'Eligible rewards are issued only after verification and Admin rules.',
+            textAlign: TextAlign.center,
+            style: TextStyle(color: Colors.white70, height: 1.35),
+          ),
+          const SizedBox(height: 18),
+          if (code.isEmpty)
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(13),
+              decoration: BoxDecoration(
+                color: const Color(0x1FFFFFFF),
+                borderRadius: BorderRadius.circular(14),
+              ),
+              child: const Text(
+                'Your referral code will appear after it is created.',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: Colors.white70),
+              ),
+            )
+          else
+            InkWell(
+              onTap: onCopy,
+              borderRadius: BorderRadius.circular(14),
+              child: Container(
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 13),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Flexible(
+                      child: Text(code,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                              color: Color(0xFF09233F),
+                              fontSize: 18,
+                              fontWeight: FontWeight.w900,
+                              letterSpacing: 1.4)),
+                    ),
+                    const SizedBox(width: 9),
+                    const Icon(Icons.copy_rounded, color: Color(0xFF1264E5)),
+                  ],
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _StatsRow extends StatelessWidget {
+  const _StatsRow({required this.referrals});
+  final List<ReferralModel> referrals;
+
+  @override
+  Widget build(BuildContext context) {
+    final qualified = referrals.where((item) =>
+        item.status == ReferralStatus.qualified ||
+        item.status == ReferralStatus.rewarded).length;
+    final rewarded = referrals.where((item) => item.status == ReferralStatus.rewarded).length;
+    return Row(
+      children: [
+        Expanded(child: _StatCard(label: 'Invited', value: referrals.length, icon: Icons.people_alt_rounded)),
+        const SizedBox(width: 9),
+        Expanded(child: _StatCard(label: 'Qualified', value: qualified, icon: Icons.verified_rounded)),
+        const SizedBox(width: 9),
+        Expanded(child: _StatCard(label: 'Rewarded', value: rewarded, icon: Icons.stars_rounded)),
+      ],
+    );
+  }
+}
+
+class _StatCard extends StatelessWidget {
+  const _StatCard({required this.label, required this.value, required this.icon});
+  final String label;
+  final int value;
+  final IconData icon;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 14),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(17),
+        border: Border.all(color: const Color(0xFFE5EAF2)),
+      ),
+      child: Column(
+        children: [
+          Icon(icon, color: const Color(0xFF1264E5), size: 21),
+          const SizedBox(height: 5),
+          Text('$value', style: const TextStyle(fontSize: 19, fontWeight: FontWeight.w900)),
+          Text(label, style: const TextStyle(color: Color(0xFF6A7890), fontSize: 11)),
+        ],
+      ),
+    );
+  }
+}
+
+class _CodeEntryCard extends StatelessWidget {
+  const _CodeEntryCard({
+    required this.controller,
+    required this.enabled,
+    required this.phoneVerified,
+    required this.onSubmit,
+  });
+  final TextEditingController controller;
+  final bool enabled;
+  final bool phoneVerified;
+  final VoidCallback onSubmit;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(15),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: const Color(0xFFE5EAF2)),
+      ),
+      child: Column(
+        children: [
+          TextField(
+            controller: controller,
+            enabled: enabled,
+            textCapitalization: TextCapitalization.characters,
+            decoration: InputDecoration(
+              hintText: 'Enter referral code',
+              prefixIcon: const Icon(Icons.key_rounded),
+              border: OutlineInputBorder(borderRadius: BorderRadius.circular(14)),
+            ),
+          ),
+          if (!phoneVerified) ...[
+            const SizedBox(height: 9),
+            const Row(
+              children: [
+                Icon(Icons.info_outline_rounded, size: 17, color: Color(0xFFE07A24)),
+                SizedBox(width: 7),
+                Expanded(child: Text('Verify your phone before using a code.',
+                    style: TextStyle(color: Color(0xFF9A5A15), fontSize: 12))),
+              ],
+            ),
+          ],
+          const SizedBox(height: 12),
+          SizedBox(
+            width: double.infinity,
+            child: FilledButton(
+              onPressed: enabled ? onSubmit : null,
+              child: enabled
+                  ? const Text('Use referral code')
+                  : const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2)),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ReferralStatusCard extends StatelessWidget {
+  const _ReferralStatusCard({required this.referral});
+  final ReferralModel referral;
+
+  @override
+  Widget build(BuildContext context) {
+    final statusColor = _statusColor(referral.status);
+    return Container(
+      padding: const EdgeInsets.all(15),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: const Color(0xFFE5EAF2)),
+      ),
+      child: Row(
+        children: [
+          CircleAvatar(
+            radius: 22,
+            backgroundColor: statusColor.withValues(alpha: 0.10),
+            child: Icon(_statusIcon(referral.status), color: statusColor),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(referral.normalizedReferralCode,
+                    style: const TextStyle(color: Color(0xFF09233F), fontWeight: FontWeight.w900)),
+                const SizedBox(height: 4),
+                Text(
+                  '${referral.completedQualifyingBookings}/${referral.requiredCompletedBookings} qualifying bookings',
+                  style: const TextStyle(color: Color(0xFF6A7890), fontSize: 12),
+                ),
+                if (referral.requiresManualReview || referral.isFraudSuspected) ...[
+                  const SizedBox(height: 4),
+                  const Text('Waiting for Admin review',
+                      style: TextStyle(color: Color(0xFFE07A24), fontSize: 12)),
+                ],
+              ],
+            ),
+          ),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+            decoration: BoxDecoration(
+              color: statusColor.withValues(alpha: 0.10),
+              borderRadius: BorderRadius.circular(20),
+            ),
+            child: Text(_label(referral.status.name),
+                style: TextStyle(color: statusColor, fontSize: 10, fontWeight: FontWeight.w800)),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _SectionTitle extends StatelessWidget {
+  const _SectionTitle(this.text);
+  final String text;
+  @override
+  Widget build(BuildContext context) => Text(text,
+      style: const TextStyle(color: Color(0xFF09233F), fontSize: 18, fontWeight: FontWeight.w800));
+}
+
+class _EmptyInvites extends StatelessWidget {
+  const _EmptyInvites();
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(28),
+      decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(18)),
+      child: const Column(
+        children: [
+          Icon(Icons.group_outlined, size: 52, color: Color(0xFF9AA5B5)),
+          SizedBox(height: 10),
+          Text('No invited friends yet', style: TextStyle(fontWeight: FontWeight.w800)),
+          SizedBox(height: 5),
+          Text('Copy your invite code and share it with friends.',
+              textAlign: TextAlign.center, style: TextStyle(color: Color(0xFF6A7890))),
+        ],
+      ),
+    );
+  }
+}
+
+class _SafetyNote extends StatelessWidget {
+  const _SafetyNote();
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(13),
+      decoration: BoxDecoration(color: const Color(0xFFEAF3FF), borderRadius: BorderRadius.circular(14)),
+      child: const Row(
+        children: [
+          Icon(Icons.verified_user_outlined, color: Color(0xFF1264E5)),
+          SizedBox(width: 10),
+          Expanded(child: Text(
+            'Rewards are issued only after booking qualification, verification and fraud checks.',
+            style: TextStyle(color: Color(0xFF315D91), fontSize: 12),
+          )),
+        ],
+      ),
+    );
+  }
+}
+
+class _StateMessage extends StatelessWidget {
+  const _StateMessage({required this.icon, required this.title, required this.message, this.onRetry});
+  final IconData icon;
+  final String title;
+  final String message;
+  final VoidCallback? onRetry;
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.all(28),
+        child: Column(
+          children: [
+            Icon(icon, size: 62, color: const Color(0xFF9AA5B5)),
+            const SizedBox(height: 15),
+            Text(title, textAlign: TextAlign.center,
+                style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w800)),
+            const SizedBox(height: 8),
+            Text(message, textAlign: TextAlign.center),
+            if (onRetry != null) ...[
+              const SizedBox(height: 20),
+              FilledButton(onPressed: onRetry, child: const Text('Try again')),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+Color _statusColor(ReferralStatus status) {
+  switch (status) {
+    case ReferralStatus.pending:
+    case ReferralStatus.registered:
+      return const Color(0xFFE07A24);
+    case ReferralStatus.qualified:
+    case ReferralStatus.rewarded:
+      return const Color(0xFF159B6C);
+    case ReferralStatus.rejected:
+    case ReferralStatus.cancelled:
+      return const Color(0xFFD1495B);
+    case ReferralStatus.expired:
+      return const Color(0xFF6A7890);
+  }
+}
+
+IconData _statusIcon(ReferralStatus status) {
+  switch (status) {
+    case ReferralStatus.pending:
+    case ReferralStatus.registered:
+      return Icons.schedule_rounded;
+    case ReferralStatus.qualified:
+      return Icons.verified_rounded;
+    case ReferralStatus.rewarded:
+      return Icons.stars_rounded;
+    case ReferralStatus.rejected:
+    case ReferralStatus.cancelled:
+      return Icons.cancel_outlined;
+    case ReferralStatus.expired:
+      return Icons.timer_off_outlined;
+  }
+}
+
+String _label(String value) {
+  final spaced = value
+      .replaceAllMapped(RegExp(r'([a-z])([A-Z])'), (match) => '${match[1]} ${match[2]}')
+      .replaceAll('_', ' ')
+      .trim();
+  if (spaced.isEmpty) return 'Other';
+  return spaced.split(' ').map((word) {
+    if (word.isEmpty) return word;
+    return '${word[0].toUpperCase()}${word.substring(1)}';
+  }).join(' ');
+}
+

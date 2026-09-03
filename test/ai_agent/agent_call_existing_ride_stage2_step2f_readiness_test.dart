@@ -1,0 +1,202 @@
+import 'package:flutter_test/flutter_test.dart';
+
+import 'package:swat_ride/ai_agent/constants/agent_action_ids.dart';
+import 'package:swat_ride/ai_agent/constants/agent_enums.dart';
+import 'package:swat_ride/ai_agent/data/initial_agent_roles_seed.dart';
+import 'package:swat_ride/ai_agent/models/agent_action_definition.dart';
+import 'package:swat_ride/ai_agent/models/agent_call_existing_ride_stage2_readiness.dart';
+import 'package:swat_ride/ai_agent/models/agent_role.dart';
+import 'package:swat_ride/ai_agent/services/agent_action_registry.dart';
+
+AgentRole _callRole() {
+  return buildInitialAgentRoles().firstWhere(
+    (AgentRole role) => role.roleId == 'call_agent',
+  );
+}
+
+void main() {
+  group('Phase 49 Stage 2 Step 2F readiness closeout', () {
+    test('Stage 2 foundation is ready but production support is not live', () {
+      expect(
+        AgentCallExistingRideStage2Readiness.stage2FoundationReady,
+        isTrue,
+      );
+      expect(
+        AgentCallExistingRideStage2Readiness
+            .productionExistingRideCallSupportLive,
+        isFalse,
+      );
+      expect(
+        AgentCallExistingRideStage2Readiness.mayClaimStage2FoundationComplete,
+        isTrue,
+      );
+    });
+
+    test('production blockers remain explicitly disconnected', () {
+      expect(
+        AgentCallExistingRideStage2Readiness
+            .trustedBackendResolverImplementationConnected,
+        isFalse,
+      );
+      expect(
+        AgentCallExistingRideStage2Readiness
+            .trustedCallerContactBindingSourceConnected,
+        isFalse,
+      );
+      expect(
+        AgentCallExistingRideStage2Readiness
+            .actualHumanTransferExecutionConnected,
+        isFalse,
+      );
+      expect(
+        AgentCallExistingRideStage2Readiness.productionTelephonyConnected,
+        isFalse,
+      );
+      expect(
+        AgentCallExistingRideStage2Readiness.productionSttConnected,
+        isFalse,
+      );
+      expect(
+        AgentCallExistingRideStage2Readiness.productionTtsConnected,
+        isFalse,
+      );
+      expect(
+        AgentCallExistingRideStage2Readiness.productionSmsConnected,
+        isFalse,
+      );
+    });
+
+    test('dedicated existing-Ride action remains call/read-only/low-risk', () {
+      expect(
+        AgentCallExistingRideStage2Readiness.dedicatedActionId,
+        AgentActionId.readCallExistingRide,
+      );
+
+      final AgentActionDefinition definition = AgentActionRegistry.get(
+        AgentActionId.readCallExistingRide,
+      )!;
+
+      expect(definition.actionId, AgentActionId.readCallExistingRide);
+      expect(definition.module, 'call');
+      expect(definition.readOnly, isTrue);
+      expect(definition.risk, AgentActionRisk.low);
+      expect(definition.alwaysRequiresApproval, isFalse);
+    });
+
+    test(
+      'call_agent remains AUTO with exactly two least-privilege actions',
+      () {
+        final AgentRole role = _callRole();
+
+        expect(role.mode, AgentMode.auto);
+        expect(role.allowedActions, <String>[
+          AgentActionId.createCallRideBooking,
+          AgentActionId.readCallExistingRide,
+          AgentActionId.readCallFoodOrderStatus,
+          AgentActionId.readCallTourBookingStatus,
+        ]);
+
+        expect(role.allowedActions, isNot(contains(AgentActionId.readRide)));
+        expect(
+          role.allowedActions,
+          isNot(contains(AgentActionId.readRideStatus)),
+        );
+        expect(role.allowedActions, isNot(contains(AgentActionId.cancelRide)));
+        expect(
+          role.allowedActions,
+          isNot(contains(AgentActionId.transferCallToHuman)),
+        );
+        expect(
+          role.allowedActions,
+          isNot(contains(AgentActionId.transferCallToManager)),
+        );
+        expect(
+          role.allowedActions,
+          isNot(contains(AgentActionId.transferCallToOwner)),
+        );
+      },
+    );
+
+    test('exact trusted binding requirements remain locked', () {
+      expect(
+        AgentCallExistingRideStage2Readiness.exactSessionBindingRequired,
+        isTrue,
+      );
+      expect(
+        AgentCallExistingRideStage2Readiness.exactRequestedByBindingRequired,
+        isTrue,
+      );
+      expect(
+        AgentCallExistingRideStage2Readiness.exactCallerBindingRequired,
+        isTrue,
+      );
+      expect(
+        AgentCallExistingRideStage2Readiness.exactContactBindingRequired,
+        isTrue,
+      );
+      expect(
+        AgentCallExistingRideStage2Readiness.exactRideReferenceBindingRequired,
+        isTrue,
+      );
+      expect(
+        AgentCallExistingRideStage2Readiness
+            .backendRideAccessVerificationRequired,
+        isTrue,
+      );
+      expect(
+        AgentCallExistingRideStage2Readiness.trustedServerStateRequired,
+        isTrue,
+      );
+    });
+
+    test('messages and client identity never become Ride authority', () {
+      expect(
+        AgentCallExistingRideStage2Readiness.rawPhoneCanAuthorize,
+        isFalse,
+      );
+      expect(
+        AgentCallExistingRideStage2Readiness.transcriptCanAuthorize,
+        isFalse,
+      );
+      expect(AgentCallExistingRideStage2Readiness.voiceCanAuthorize, isFalse);
+      expect(
+        AgentCallExistingRideStage2Readiness.currentFirebaseUserCanAuthorize,
+        isFalse,
+      );
+      expect(
+        AgentCallExistingRideStage2Readiness.rideReferenceAloneCanAuthorize,
+        isFalse,
+      );
+    });
+
+    test('Stage 2 grants no Ride/business mutation authority', () {
+      expect(AgentCallExistingRideStage2Readiness.rideWriteAllowed, isFalse);
+      expect(AgentCallExistingRideStage2Readiness.rideCancelAllowed, isFalse);
+      expect(
+        AgentCallExistingRideStage2Readiness.driverReassignmentAllowed,
+        isFalse,
+      );
+      expect(
+        AgentCallExistingRideStage2Readiness.paymentChangeAllowed,
+        isFalse,
+      );
+      expect(AgentCallExistingRideStage2Readiness.refundAllowed, isFalse);
+      expect(AgentCallExistingRideStage2Readiness.fareChangeAllowed, isFalse);
+      expect(
+        AgentCallExistingRideStage2Readiness.transferExecutionIncluded,
+        isFalse,
+      );
+    });
+
+    test('safe readiness map cannot overclaim production live', () {
+      final Map<String, dynamic> map =
+          AgentCallExistingRideStage2Readiness.toSafeMap();
+
+      expect(map['stage2FoundationReady'], isTrue);
+      expect(map['productionExistingRideCallSupportLive'], isFalse);
+      expect(map['trustedBackendResolverImplementationConnected'], isFalse);
+      expect(map['rideWriteAllowed'], isFalse);
+      expect(map['rawPhoneCanAuthorize'], isFalse);
+    });
+  });
+}

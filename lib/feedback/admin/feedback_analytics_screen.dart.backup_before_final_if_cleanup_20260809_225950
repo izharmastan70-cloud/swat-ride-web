@@ -1,0 +1,905 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:flutter/material.dart';
+
+import '../models/complaint_model.dart';
+import '../models/feedback_model.dart';
+import '../services/complaint_service.dart';
+import '../services/feedback_service.dart';
+
+class FeedbackAnalyticsScreen extends StatefulWidget {
+  final FirebaseFirestore? firestore;
+
+  const FeedbackAnalyticsScreen({super.key, this.firestore});
+
+  @override
+  State<FeedbackAnalyticsScreen> createState() =>
+      _FeedbackAnalyticsScreenState();
+}
+
+class _FeedbackAnalyticsScreenState extends State<FeedbackAnalyticsScreen> {
+  late final FirebaseFirestore _firestore;
+  FeedbackServiceType? _serviceType;
+  _AnalyticsRange _range = _AnalyticsRange.thirtyDays;
+
+  @override
+  void initState() {
+    super.initState();
+    _firestore = widget.firestore ?? FirebaseFirestore.instance;
+  }
+
+  Stream<List<FeedbackModel>> _watchReviews() {
+    return _firestore
+        .collection(FeedbackService.reviewsCollectionName)
+        .orderBy('createdAt', descending: true)
+        .limit(1000)
+        .snapshots()
+        .map(
+          (snapshot) => snapshot.docs
+              .map(
+                (document) => FeedbackModel.fromMap(
+                  document.data(),
+                  documentId: document.id,
+                ),
+              )
+              .toList(growable: false),
+        );
+  }
+
+  Stream<List<ComplaintModel>> _watchComplaints() {
+    return _firestore
+        .collection(ComplaintService.complaintsCollectionName)
+        .orderBy('createdAt', descending: true)
+        .limit(1000)
+        .snapshots()
+        .map(
+          (snapshot) => snapshot.docs
+              .map(
+                (document) => ComplaintModel.fromMap(
+                  document.data(),
+                  documentId: document.id,
+                ),
+              )
+              .toList(growable: false),
+        );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFFF4F5F7),
+      appBar: AppBar(
+        backgroundColor: Colors.white,
+        surfaceTintColor: Colors.white,
+        title: const Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Feedback Analytics',
+              style: TextStyle(fontWeight: FontWeight.w900),
+            ),
+            Text(
+              'Service quality and complaint trends',
+              style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500),
+            ),
+          ],
+        ),
+      ),
+      body: StreamBuilder<List<FeedbackModel>>(
+        stream: _watchReviews(),
+        builder: (context, reviewSnapshot) {
+          return StreamBuilder<List<ComplaintModel>>(
+            stream: _watchComplaints(),
+            builder: (context, complaintSnapshot) {
+              if (reviewSnapshot.hasError || complaintSnapshot.hasError) {
+                return _ErrorView(
+                  message: (reviewSnapshot.error ?? complaintSnapshot.error)
+                      .toString(),
+                );
+              }
+              if (!reviewSnapshot.hasData || !complaintSnapshot.hasData) {
+                return const Center(child: CircularProgressIndicator());
+              }
+              final data = _AnalyticsData.build(
+                reviews: reviewSnapshot.data!,
+                complaints: complaintSnapshot.data!,
+                serviceType: _serviceType,
+                range: _range,
+              );
+              return RefreshIndicator(
+                onRefresh: () async => setState(() {}),
+                child: ListView(
+                  physics: const AlwaysScrollableScrollPhysics(),
+                  padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
+                  children: [
+                    _filters(),
+                    const SizedBox(height: 14),
+                    _summary(data),
+                    const SizedBox(height: 20),
+                    const _SectionTitle(
+                      title: 'Rating distribution',
+                      subtitle: 'Breakdown of verified, visible review data',
+                    ),
+                    const SizedBox(height: 10),
+                    _RatingBreakdown(data: data),
+                    const SizedBox(height: 20),
+                    const _SectionTitle(
+                      title: 'Rating trend',
+                      subtitle: 'Daily average rating in the selected period',
+                    ),
+                    const SizedBox(height: 10),
+                    _TrendCard(points: data.trend),
+                    const SizedBox(height: 20),
+                    const _SectionTitle(
+                      title: 'Service comparison',
+                      subtitle: 'Module-wise quality and review volume',
+                    ),
+                    const SizedBox(height: 10),
+                    _ServiceComparison(rows: data.services),
+                    const SizedBox(height: 20),
+                    const _SectionTitle(
+                      title: 'Complaint insights',
+                      subtitle: 'Human-reviewed ticket performance',
+                    ),
+                    const SizedBox(height: 10),
+                    _complaintSection(data),
+                    const SizedBox(height: 20),
+                    const _AnalyticsNotice(),
+                  ],
+                ),
+              );
+            },
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _filters() {
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: _decoration(),
+      child: Wrap(
+        spacing: 10,
+        runSpacing: 10,
+        children: [
+          SizedBox(
+            width: 190,
+            child: DropdownButtonFormField<FeedbackServiceType?>(
+              initialValue: _serviceType,
+              isExpanded: true,
+              decoration: _input('Service', Icons.apps_rounded),
+              items: [
+                const DropdownMenuItem(
+                  value: null,
+                  child: Text('All services'),
+                ),
+                ...FeedbackServiceType.values.map(
+                  (item) => DropdownMenuItem(
+                    value: item,
+                    child: Text(item.displayName),
+                  ),
+                ),
+              ],
+              onChanged: (value) => setState(() => _serviceType = value),
+            ),
+          ),
+          SizedBox(
+            width: 180,
+            child: DropdownButtonFormField<_AnalyticsRange>(
+              initialValue: _range,
+              isExpanded: true,
+              decoration: _input('Period', Icons.date_range_rounded),
+              items: _AnalyticsRange.values
+                  .map(
+                    (item) =>
+                        DropdownMenuItem(value: item, child: Text(item.label)),
+                  )
+                  .toList(),
+              onChanged: (value) {
+                if (value != null) setState(() => _range = value);
+              },
+            ),
+          ),
+          TextButton.icon(
+            onPressed: () => setState(() {
+              _serviceType = null;
+              _range = _AnalyticsRange.thirtyDays;
+            }),
+            icon: const Icon(Icons.restart_alt_rounded),
+            label: const Text('Reset'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _summary(_AnalyticsData data) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final columns = constraints.maxWidth >= 900 ? 4 : 2;
+        return GridView.count(
+          crossAxisCount: columns,
+          shrinkWrap: true,
+          physics: const NeverScrollableScrollPhysics(),
+          crossAxisSpacing: 11,
+          mainAxisSpacing: 11,
+          childAspectRatio: constraints.maxWidth >= 900 ? 1.9 : 1.4,
+          children: [
+            _MetricCard(
+              title: 'Overall rating',
+              value: data.averageRating.toStringAsFixed(1),
+              suffix: '/5',
+              icon: Icons.star_rounded,
+              color: const Color(0xFFF59E0B),
+            ),
+            _MetricCard(
+              title: 'Reviews',
+              value: '${data.reviewCount}',
+              icon: Icons.rate_review_rounded,
+              color: const Color(0xFF2563EB),
+            ),
+            _MetricCard(
+              title: 'Low ratings',
+              value: '${data.lowRatingPercent.toStringAsFixed(0)}%',
+              icon: Icons.trending_down_rounded,
+              color: const Color(0xFFDC2626),
+            ),
+            _MetricCard(
+              title: 'Partner response',
+              value: '${data.responsePercent.toStringAsFixed(0)}%',
+              icon: Icons.reply_all_rounded,
+              color: const Color(0xFF15803D),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  Widget _complaintSection(_AnalyticsData data) {
+    return Column(
+      children: [
+        LayoutBuilder(
+          builder: (context, constraints) {
+            final columns = constraints.maxWidth >= 720 ? 3 : 1;
+            return GridView.count(
+              crossAxisCount: columns,
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              crossAxisSpacing: 10,
+              mainAxisSpacing: 10,
+              childAspectRatio: constraints.maxWidth >= 720 ? 2.2 : 3.4,
+              children: [
+                _CompactMetric(
+                  'Total complaints',
+                  data.complaintCount,
+                  Icons.support_agent_rounded,
+                  const Color(0xFF2563EB),
+                ),
+                _CompactMetric(
+                  'Open complaints',
+                  data.openComplaints,
+                  Icons.pending_actions_rounded,
+                  const Color(0xFFEA580C),
+                ),
+                _CompactMetric(
+                  'Resolved/closed',
+                  data.resolvedComplaints,
+                  Icons.task_alt_rounded,
+                  const Color(0xFF15803D),
+                ),
+              ],
+            );
+          },
+        ),
+        const SizedBox(height: 10),
+        Container(
+          padding: const EdgeInsets.all(16),
+          decoration: _decoration(),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  const Expanded(
+                    child: Text(
+                      'Top complaint categories',
+                      style: TextStyle(fontWeight: FontWeight.w900),
+                    ),
+                  ),
+                  Text(
+                    '${data.resolutionPercent.toStringAsFixed(0)}% resolved',
+                    style: const TextStyle(
+                      color: Color(0xFF15803D),
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 14),
+              if (data.topCategories.isEmpty)
+                const Text('No complaint data in this period.')
+              else
+                ...data.topCategories.map(
+                  (item) => _HorizontalBar(
+                    label: item.label,
+                    value: item.count.toDouble(),
+                    maximum: data.topCategories.first.count.toDouble(),
+                    displayValue: '${item.count}',
+                    color: const Color(0xFF7C3AED),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _AnalyticsData {
+  final List<FeedbackModel> reviews;
+  final List<ComplaintModel> complaints;
+  final double averageRating;
+  final Map<int, int> distribution;
+  final double lowRatingPercent;
+  final double responsePercent;
+  final List<_TrendPoint> trend;
+  final List<_ServiceRow> services;
+  final List<_CategoryCount> topCategories;
+  final int openComplaints;
+  final int resolvedComplaints;
+
+  const _AnalyticsData({
+    required this.reviews,
+    required this.complaints,
+    required this.averageRating,
+    required this.distribution,
+    required this.lowRatingPercent,
+    required this.responsePercent,
+    required this.trend,
+    required this.services,
+    required this.topCategories,
+    required this.openComplaints,
+    required this.resolvedComplaints,
+  });
+
+  int get reviewCount => reviews.length;
+  int get complaintCount => complaints.length;
+  double get resolutionPercent =>
+      complaintCount == 0 ? 0 : resolvedComplaints * 100 / complaintCount;
+
+  factory _AnalyticsData.build({
+    required List<FeedbackModel> reviews,
+    required List<ComplaintModel> complaints,
+    required FeedbackServiceType? serviceType,
+    required _AnalyticsRange range,
+  }) {
+    final cutoff = range.days == null
+        ? null
+        : DateTime.now().subtract(Duration(days: range.days!));
+    final cleanReviews = reviews
+        .where((item) {
+          if (item.isDeleted) return false;
+          if (serviceType != null && item.serviceType != serviceType)
+            return false;
+          if (cutoff != null && item.createdAt.isBefore(cutoff)) return false;
+          return true;
+        })
+        .toList(growable: false);
+    final cleanComplaints = complaints
+        .where((item) {
+          if (serviceType != null && item.serviceType != serviceType)
+            return false;
+          if (cutoff != null && item.createdAt.isBefore(cutoff)) return false;
+          return true;
+        })
+        .toList(growable: false);
+
+    final distribution = <int, int>{
+      for (var star = 1; star <= 5; star++) star: 0,
+    };
+    var ratingTotal = 0;
+    var low = 0;
+    var responses = 0;
+    for (final review in cleanReviews) {
+      distribution[review.rating] = (distribution[review.rating] ?? 0) + 1;
+      ratingTotal += review.rating;
+      if (review.rating <= 2) {
+        low++;
+      }
+      if (review.hasPartnerReply) {
+        responses++;
+      }
+    }
+
+    final categoryMap = <ComplaintCategory, int>{};
+    for (final complaint in cleanComplaints) {
+      categoryMap[complaint.category] =
+          (categoryMap[complaint.category] ?? 0) + 1;
+    }
+    final categories =
+        categoryMap.entries
+            .map((entry) => _CategoryCount(entry.key.displayName, entry.value))
+            .toList()
+          ..sort((a, b) => b.count.compareTo(a.count));
+
+    final serviceRows =
+        FeedbackServiceType.values
+            .map((type) {
+              final items = cleanReviews
+                  .where((item) => item.serviceType == type)
+                  .toList();
+              final total = items.fold<int>(
+                0,
+                (total, item) => total + item.rating,
+              );
+              return _ServiceRow(
+                type: type,
+                count: items.length,
+                average: items.isEmpty ? 0 : total / items.length,
+              );
+            })
+            .where((row) => row.count > 0)
+            .toList()
+          ..sort((a, b) => b.count.compareTo(a.count));
+
+    final resolved = cleanComplaints
+        .where(
+          (item) =>
+              item.status == ComplaintStatus.resolved ||
+              item.status == ComplaintStatus.closed,
+        )
+        .length;
+
+    return _AnalyticsData(
+      reviews: cleanReviews,
+      complaints: cleanComplaints,
+      averageRating: cleanReviews.isEmpty
+          ? 0
+          : ratingTotal / cleanReviews.length,
+      distribution: distribution,
+      lowRatingPercent: cleanReviews.isEmpty
+          ? 0
+          : low * 100 / cleanReviews.length,
+      responsePercent: cleanReviews.isEmpty
+          ? 0
+          : responses * 100 / cleanReviews.length,
+      trend: _buildTrend(cleanReviews, range),
+      services: serviceRows,
+      topCategories: categories.take(5).toList(growable: false),
+      openComplaints: cleanComplaints.where((item) => item.isOpen).length,
+      resolvedComplaints: resolved,
+    );
+  }
+
+  static List<_TrendPoint> _buildTrend(
+    List<FeedbackModel> reviews,
+    _AnalyticsRange range,
+  ) {
+    final grouped = <DateTime, List<int>>{};
+    for (final review in reviews) {
+      final date = DateTime(
+        review.createdAt.year,
+        review.createdAt.month,
+        review.createdAt.day,
+      );
+      grouped.putIfAbsent(date, () => <int>[]).add(review.rating);
+    }
+    final dates = grouped.keys.toList()..sort();
+    final maximumPoints = range == _AnalyticsRange.sevenDays ? 7 : 14;
+    return dates.reversed
+        .take(maximumPoints)
+        .toList()
+        .reversed
+        .map((date) {
+          final values = grouped[date]!;
+          final total = values.fold<int>(0, (total, item) => total + item);
+          return _TrendPoint(date, total / values.length);
+        })
+        .toList(growable: false);
+  }
+}
+
+class _RatingBreakdown extends StatelessWidget {
+  final _AnalyticsData data;
+  const _RatingBreakdown({required this.data});
+
+  @override
+  Widget build(BuildContext context) => Container(
+    padding: const EdgeInsets.all(16),
+    decoration: _decoration(),
+    child: Column(
+      children: [
+        for (var star = 5; star >= 1; star--)
+          _HorizontalBar(
+            label: '$star star',
+            value: (data.distribution[star] ?? 0).toDouble(),
+            maximum: data.reviewCount.toDouble(),
+            displayValue:
+                '${data.distribution[star] ?? 0} (${_percent(data.distribution[star] ?? 0, data.reviewCount).toStringAsFixed(0)}%)',
+            color: _starColor(star),
+          ),
+      ],
+    ),
+  );
+}
+
+class _TrendCard extends StatelessWidget {
+  final List<_TrendPoint> points;
+  const _TrendCard({required this.points});
+
+  @override
+  Widget build(BuildContext context) => Container(
+    height: 250,
+    padding: const EdgeInsets.fromLTRB(16, 22, 16, 14),
+    decoration: _decoration(),
+    child: points.isEmpty
+        ? const Center(child: Text('No rating trend data available.'))
+        : Row(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: points.map((point) {
+              return Expanded(
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 3),
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.end,
+                    children: [
+                      Text(
+                        point.average.toStringAsFixed(1),
+                        style: const TextStyle(
+                          fontSize: 10,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Flexible(
+                        child: FractionallySizedBox(
+                          heightFactor: point.average / 5,
+                          child: Container(
+                            decoration: BoxDecoration(
+                              color: _starColor(point.average.round()),
+                              borderRadius: const BorderRadius.vertical(
+                                top: Radius.circular(7),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 5),
+                      Text(
+                        '${point.date.day}/${point.date.month}',
+                        style: const TextStyle(
+                          fontSize: 9,
+                          color: Color(0xFF6B7280),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              );
+            }).toList(),
+          ),
+  );
+}
+
+class _ServiceComparison extends StatelessWidget {
+  final List<_ServiceRow> rows;
+  const _ServiceComparison({required this.rows});
+
+  @override
+  Widget build(BuildContext context) => Container(
+    padding: const EdgeInsets.all(16),
+    decoration: _decoration(),
+    child: rows.isEmpty
+        ? const Text('No service comparison data available.')
+        : Column(
+            children: rows
+                .map(
+                  (row) => Padding(
+                    padding: const EdgeInsets.only(bottom: 14),
+                    child: Row(
+                      children: [
+                        SizedBox(
+                          width: 95,
+                          child: Text(
+                            row.type.displayName,
+                            style: const TextStyle(fontWeight: FontWeight.w800),
+                          ),
+                        ),
+                        Expanded(
+                          child: ClipRRect(
+                            borderRadius: BorderRadius.circular(20),
+                            child: LinearProgressIndicator(
+                              value: row.average / 5,
+                              minHeight: 12,
+                              backgroundColor: const Color(0xFFE5E7EB),
+                              color: _starColor(row.average.round()),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        SizedBox(
+                          width: 82,
+                          child: Text(
+                            '${row.average.toStringAsFixed(1)} â€¢ ${row.count}',
+                            textAlign: TextAlign.end,
+                            style: const TextStyle(fontWeight: FontWeight.w800),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                )
+                .toList(),
+          ),
+  );
+}
+
+class _HorizontalBar extends StatelessWidget {
+  final String label;
+  final double value;
+  final double maximum;
+  final String displayValue;
+  final Color color;
+  const _HorizontalBar({
+    required this.label,
+    required this.value,
+    required this.maximum,
+    required this.displayValue,
+    required this.color,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final progress = maximum <= 0 ? 0.0 : (value / maximum).clamp(0.0, 1.0);
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Row(
+        children: [
+          SizedBox(width: 80, child: Text(label)),
+          Expanded(
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(20),
+              child: LinearProgressIndicator(
+                value: progress,
+                minHeight: 11,
+                backgroundColor: const Color(0xFFE5E7EB),
+                color: color,
+              ),
+            ),
+          ),
+          const SizedBox(width: 10),
+          SizedBox(
+            width: 75,
+            child: Text(
+              displayValue,
+              textAlign: TextAlign.end,
+              style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w800),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _MetricCard extends StatelessWidget {
+  final String title;
+  final String value;
+  final String suffix;
+  final IconData icon;
+  final Color color;
+  const _MetricCard({
+    required this.title,
+    required this.value,
+    required this.icon,
+    required this.color,
+    this.suffix = '',
+  });
+
+  @override
+  Widget build(BuildContext context) => Container(
+    padding: const EdgeInsets.all(16),
+    decoration: _decoration(),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Icon(icon, color: color),
+        const Spacer(),
+        Text.rich(
+          TextSpan(
+            children: [
+              TextSpan(
+                text: value,
+                style: const TextStyle(
+                  fontSize: 25,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+              TextSpan(
+                text: suffix,
+                style: const TextStyle(color: Color(0xFF6B7280)),
+              ),
+            ],
+          ),
+        ),
+        Text(title, style: const TextStyle(color: Color(0xFF6B7280))),
+      ],
+    ),
+  );
+}
+
+class _CompactMetric extends StatelessWidget {
+  final String title;
+  final int value;
+  final IconData icon;
+  final Color color;
+  const _CompactMetric(this.title, this.value, this.icon, this.color);
+
+  @override
+  Widget build(BuildContext context) => Container(
+    padding: const EdgeInsets.all(15),
+    decoration: _decoration(),
+    child: Row(
+      children: [
+        CircleAvatar(
+          backgroundColor: color.withValues(alpha: .1),
+          foregroundColor: color,
+          child: Icon(icon),
+        ),
+        const SizedBox(width: 11),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Text(
+                '$value',
+                style: const TextStyle(
+                  fontSize: 21,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+              Text(
+                title,
+                style: const TextStyle(fontSize: 12, color: Color(0xFF6B7280)),
+              ),
+            ],
+          ),
+        ),
+      ],
+    ),
+  );
+}
+
+class _SectionTitle extends StatelessWidget {
+  final String title;
+  final String subtitle;
+  const _SectionTitle({required this.title, required this.subtitle});
+  @override
+  Widget build(BuildContext context) => Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      Text(
+        title,
+        style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w900),
+      ),
+      Text(subtitle, style: const TextStyle(color: Color(0xFF6B7280))),
+    ],
+  );
+}
+
+class _AnalyticsNotice extends StatelessWidget {
+  const _AnalyticsNotice();
+  @override
+  Widget build(BuildContext context) => Container(
+    padding: const EdgeInsets.all(15),
+    decoration: BoxDecoration(
+      color: const Color(0xFFEFF6FF),
+      borderRadius: BorderRadius.circular(16),
+      border: Border.all(color: const Color(0xFFBFDBFE)),
+    ),
+    child: const Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Icon(Icons.info_outline_rounded, color: Color(0xFF1D4ED8)),
+        SizedBox(width: 10),
+        Expanded(
+          child: Text(
+            'Analytics are decision support only. Low scores and complaint patterns create admin review signals; they never suspend a partner, issue a refund or change payment automatically.',
+            style: TextStyle(color: Color(0xFF1E40AF), height: 1.4),
+          ),
+        ),
+      ],
+    ),
+  );
+}
+
+class _ErrorView extends StatelessWidget {
+  final String message;
+  const _ErrorView({required this.message});
+  @override
+  Widget build(BuildContext context) => Center(
+    child: Padding(
+      padding: const EdgeInsets.all(28),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(
+            Icons.error_outline_rounded,
+            size: 52,
+            color: Color(0xFFB91C1C),
+          ),
+          const SizedBox(height: 12),
+          const Text(
+            'Analytics could not be loaded',
+            style: TextStyle(fontSize: 19, fontWeight: FontWeight.w900),
+          ),
+          const SizedBox(height: 6),
+          Text(message, textAlign: TextAlign.center),
+        ],
+      ),
+    ),
+  );
+}
+
+class _TrendPoint {
+  final DateTime date;
+  final double average;
+  const _TrendPoint(this.date, this.average);
+}
+
+class _ServiceRow {
+  final FeedbackServiceType type;
+  final int count;
+  final double average;
+  const _ServiceRow({
+    required this.type,
+    required this.count,
+    required this.average,
+  });
+}
+
+class _CategoryCount {
+  final String label;
+  final int count;
+  const _CategoryCount(this.label, this.count);
+}
+
+enum _AnalyticsRange {
+  sevenDays(7, 'Last 7 days'),
+  thirtyDays(30, 'Last 30 days'),
+  ninetyDays(90, 'Last 90 days'),
+  allTime(null, 'All time');
+
+  final int? days;
+  final String label;
+  const _AnalyticsRange(this.days, this.label);
+}
+
+InputDecoration _input(String label, IconData icon) => InputDecoration(
+  labelText: label,
+  prefixIcon: Icon(icon),
+  filled: true,
+  fillColor: const Color(0xFFF5F6F7),
+  isDense: true,
+  border: OutlineInputBorder(
+    borderRadius: BorderRadius.circular(13),
+    borderSide: BorderSide.none,
+  ),
+);
+
+BoxDecoration _decoration() => BoxDecoration(
+  color: Colors.white,
+  borderRadius: BorderRadius.circular(18),
+  border: Border.all(color: const Color(0xFFE5E7EB)),
+);
+
+double _percent(int value, int total) => total == 0 ? 0 : value * 100 / total;
+
+Color _starColor(int rating) {
+  if (rating <= 2) return const Color(0xFFDC2626);
+  if (rating == 3) return const Color(0xFFEA580C);
+  return const Color(0xFF15803D);
+}

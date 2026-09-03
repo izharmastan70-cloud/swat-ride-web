@@ -1,0 +1,432 @@
+import 'package:flutter/material.dart';
+
+import '../../ride_admin/screens/ride_admin_dashboard_screen.dart';
+import 'super_admin_hotel_selector_screen.dart';
+import '../../food/admin/screens/food_admin_dashboard_screen.dart';
+import '../../tourism_admin/screens/tourism_admin_dashboard.dart';
+import '../../feedback/admin/feedback_admin_dashboard_screen.dart';
+import '../../admin_rewards/screens/reward_dashboard_screen.dart';
+import '../../cargo/admin/screens/cargo_admin_dashboard_screen.dart';
+import '../../student_ride/admin/screens/student_ride_admin_dashboard_screen.dart';
+
+import '../../ai_agent/screens/agent_master_control_screen.dart';
+import 'super_admin_safety_control_screen.dart';
+import 'super_admin_video_tutorial_management_screen.dart';
+
+// =========================================================
+// SWAT RIDE — SUPER ADMIN DASHBOARD
+// =========================================================
+//
+// Global platform control center.
+//
+// IMPORTANT:
+// - This screen does NOT replace existing module admins.
+// - Ride/Food/Hotel/Tour admins remain separate.
+// - Module navigation will be connected later.
+// - AI Master Control will also be connected later.
+// - No production action is executed from this foundation screen.
+
+class SuperAdminDashboardScreen extends StatelessWidget {
+  const SuperAdminDashboardScreen({
+    super.key,
+    required this.adminId,
+    required this.adminName,
+  });
+
+  final String adminId;
+  final String adminName;
+
+  static const Color _background = Color(0xFF090909);
+  static const Color _card = Color(0xFF181818);
+  static const Color _yellow = Color(0xFFFFD400);
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: _background,
+      appBar: AppBar(
+        backgroundColor: _background,
+        foregroundColor: Colors.white,
+        elevation: 0,
+        title: const Text(
+          'SWAT RIDE Super Admin',
+          style: TextStyle(fontWeight: FontWeight.w900),
+        ),
+      ),
+      body: SafeArea(
+        child: ListView(
+          padding: const EdgeInsets.all(18),
+          children: <Widget>[
+            _buildHeader(),
+            const SizedBox(height: 22),
+
+            const Text(
+              'Platform Control',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 20,
+                fontWeight: FontWeight.w900,
+              ),
+            ),
+            const SizedBox(height: 12),
+
+            _SuperAdminModuleCard(
+              icon: Icons.local_taxi_outlined,
+              title: 'Ride + Driver Admin',
+              subtitle: 'Existing Ride and Driver administration.',
+              onTap: () {
+                Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => RideAdminDashboardScreen(
+                      adminId: adminId,
+                      adminName: adminName,
+                    ),
+                  ),
+                );
+              },
+            ),
+
+            _SuperAdminModuleCard(
+              icon: Icons.restaurant_outlined,
+              title: 'Food Admin',
+              subtitle: 'Existing Food platform administration.',
+              onTap: () {
+                Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => const FoodAdminDashboardScreen(),
+                  ),
+                );
+              },
+            ),
+
+            _SuperAdminModuleCard(
+              icon: Icons.hotel_outlined,
+              title: 'Hotel Admin',
+              subtitle: 'Existing Hotel platform administration.',
+              onTap: () {
+                Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) =>
+                        SuperAdminHotelSelectorScreen(adminId: adminId),
+                  ),
+                );
+              },
+            ),
+
+            _SuperAdminModuleCard(
+              icon: Icons.tour_outlined,
+              title: 'Tourism Admin',
+              subtitle: 'Existing Tours and Tourism administration.',
+              onTap: () {
+                Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => TourismAdminDashboard(adminName: adminName),
+                  ),
+                );
+              },
+            ),
+
+            _SuperAdminModuleCard(
+              icon: Icons.feedback_outlined,
+              title: 'Feedback Admin',
+              subtitle:
+                  'Reviews, complaints, moderation and feedback analytics.',
+              onTap: () {
+                Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) =>
+                        FeedbackAdminDashboardScreen(adminId: adminId),
+                  ),
+                );
+              },
+            ),
+
+            _SuperAdminModuleCard(
+              icon: Icons.card_giftcard_outlined,
+              title: 'Rewards Admin',
+              subtitle: 'Rewards, loyalty and promotion controls.',
+              onTap: () {
+                Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => const RewardDashboardScreen(),
+                  ),
+                );
+              },
+            ),
+
+            _SuperAdminModuleCard(
+              icon: Icons.health_and_safety_outlined,
+              title: 'Safety Control',
+              subtitle: 'Platform-wide safety and emergency oversight.',
+              onTap: () {
+                Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) =>
+                        SuperAdminSafetyControlScreen(currentAdminId: adminId),
+                  ),
+                );
+              },
+            ),
+
+            const SizedBox(height: 22),
+
+            const Text(
+              'AI & Automation',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 20,
+                fontWeight: FontWeight.w900,
+              ),
+            ),
+            const SizedBox(height: 12),
+
+            _SuperAdminModuleCard(
+              icon: Icons.smart_toy_outlined,
+              title: 'AI Master Control',
+              subtitle:
+                  'Agents, permissions, approvals, audit, providers and emergency controls.',
+              highlighted: true,
+              onTap: () {
+                Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) =>
+                        AgentMasterControlScreen(currentAdminId: adminId),
+                  ),
+                );
+              },
+            ),
+
+            const SizedBox(height: 22),
+
+            const Text(
+              'Future Modules',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 20,
+                fontWeight: FontWeight.w900,
+              ),
+            ),
+            const SizedBox(height: 12),
+
+            _SuperAdminModuleCard(
+              icon: Icons.video_library_rounded,
+              title: 'Video Tutorials',
+              subtitle: 'Add, edit, order and enable customer help videos.',
+              onTap: () {
+                Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => SuperAdminVideoTutorialManagementScreen(
+                      adminId: adminId,
+                    ),
+                  ),
+                );
+              },
+            ),
+            _SuperAdminModuleCard(
+              icon: Icons.local_shipping_outlined,
+              title: 'Cargo Admin',
+              subtitle:
+                  'Cargo orders, drivers, pricing, payments and controls.',
+              enabled: true,
+              onTap: () {
+                Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => const CargoAdminDashboardScreen(),
+                  ),
+                );
+              },
+            ),
+
+            _SuperAdminModuleCard(
+              icon: Icons.school_outlined,
+              title: 'Student Ride Admin',
+              subtitle: 'Student Ride settings, drivers, routes and packages.',
+              enabled: true,
+              onTap: () {
+                Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => const StudentRideAdminDashboardScreen(),
+                  ),
+                );
+              },
+            ),
+
+            const SizedBox(height: 30),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildHeader() {
+    final String displayName = adminName.trim().isEmpty
+        ? 'Super Admin'
+        : adminName.trim();
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        color: _card,
+        borderRadius: BorderRadius.circular(22),
+        border: Border.all(color: Colors.white10),
+      ),
+      child: Row(
+        children: <Widget>[
+          Container(
+            width: 58,
+            height: 58,
+            decoration: const BoxDecoration(
+              color: _yellow,
+              shape: BoxShape.circle,
+            ),
+            child: const Icon(
+              Icons.admin_panel_settings_rounded,
+              color: Colors.black,
+              size: 30,
+            ),
+          ),
+          const SizedBox(width: 15),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                Text(
+                  displayName,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 19,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                const Text(
+                  'Global Super Admin',
+                  style: TextStyle(color: _yellow, fontWeight: FontWeight.w700),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  'ID: ${_shortId(adminId)}',
+                  style: const TextStyle(color: Colors.white38, fontSize: 11),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  static String _shortId(String value) {
+    final String id = value.trim();
+
+    if (id.length <= 12) {
+      return id;
+    }
+
+    return '${id.substring(0, 6)}...${id.substring(id.length - 4)}';
+  }
+}
+
+// =========================================================
+// MODULE CARD
+// =========================================================
+
+class _SuperAdminModuleCard extends StatelessWidget {
+  const _SuperAdminModuleCard({
+    required this.icon,
+    required this.title,
+    required this.subtitle,
+    this.onTap,
+    this.enabled = true,
+    this.highlighted = false,
+  });
+
+  final IconData icon;
+  final String title;
+  final String subtitle;
+  final VoidCallback? onTap;
+  final bool enabled;
+  final bool highlighted;
+
+  @override
+  Widget build(BuildContext context) {
+    final Color borderColor = highlighted
+        ? SuperAdminDashboardScreen._yellow.withValues(alpha: 0.55)
+        : Colors.white10;
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Material(
+        color: enabled
+            ? SuperAdminDashboardScreen._card
+            : const Color(0xFF121212),
+        borderRadius: BorderRadius.circular(18),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(18),
+          onTap: enabled ? onTap : null,
+          child: Container(
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(18),
+              border: Border.all(color: borderColor),
+            ),
+            child: Row(
+              children: <Widget>[
+                Container(
+                  width: 48,
+                  height: 48,
+                  decoration: BoxDecoration(
+                    color: highlighted
+                        ? SuperAdminDashboardScreen._yellow.withValues(
+                            alpha: 0.14,
+                          )
+                        : Colors.white.withValues(alpha: 0.06),
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                  child: Icon(
+                    icon,
+                    color: enabled
+                        ? highlighted
+                              ? SuperAdminDashboardScreen._yellow
+                              : Colors.white
+                        : Colors.white24,
+                  ),
+                ),
+                const SizedBox(width: 14),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: <Widget>[
+                      Text(
+                        title,
+                        style: TextStyle(
+                          color: enabled ? Colors.white : Colors.white38,
+                          fontSize: 16,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                      const SizedBox(height: 5),
+                      Text(
+                        subtitle,
+                        style: TextStyle(
+                          color: enabled ? Colors.white54 : Colors.white24,
+                          height: 1.3,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 8),
+                if (enabled)
+                  const Icon(Icons.chevron_right_rounded, color: Colors.white38)
+                else
+                  const Chip(label: Text('OFF')),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}

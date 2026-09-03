@@ -1,0 +1,561 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+
+import { FirebaseAdminIdTokenVerifier } from
+  '../src/security/firebase_admin_id_token_verifier.js';
+import { FirebaseAdminSuperAdminAuthorizer } from
+  '../src/security/firebase_admin_super_admin_authorizer.js';
+import { FirebaseAdminConsumedApprovalRechecker } from
+  '../src/security/firebase_admin_consumed_approval_rechecker.js';
+import { FirebaseAdminVerifiedSenderIdentityVerifier } from
+  '../src/security/firebase_admin_verified_sender_identity_verifier.js';
+import { FirebaseAdminEmailReplayGuard } from
+  '../src/security/firebase_admin_email_replay_guard.js';
+
+class FakeSnapshot {
+  constructor(data) {
+    this._data = data;
+    this.exists = data !== undefined;
+  }
+
+  data() {
+    return this._data;
+  }
+}
+
+class FakeDocumentReference {
+  constructor(firestore, collectionName, id) {
+    this.firestore = firestore;
+    this.collectionName = collectionName;
+    this.id = id;
+  }
+
+  async get() {
+    return new FakeSnapshot(
+        this.firestore.getData(
+            this.collectionName,
+            this.id));
+  }
+
+  async update(patch) {
+    this.firestore.updateData(
+        this.collectionName,
+        this.id,
+        patch);
+  }
+}
+
+class FakeCollectionReference {
+  constructor(firestore, name) {
+    this.firestore = firestore;
+    this.name = name;
+  }
+
+  doc(id) {
+    return new FakeDocumentReference(
+        this.firestore,
+        this.name,
+        id);
+  }
+}
+
+class FakeTransaction {
+  constructor(firestore) {
+    this.firestore = firestore;
+  }
+
+  async get(ref) {
+    return ref.get();
+  }
+
+  set(ref, data) {
+    this.firestore.setData(
+        ref.collectionName,
+        ref.id,
+        data);
+  }
+
+  update(ref, patch) {
+    this.firestore.updateData(
+        ref.collectionName,
+        ref.id,
+        patch);
+  }
+}
+
+class FakeFirestore {
+  constructor(seed = {}) {
+    this.store = new Map();
+
+    for (const [key, value] of Object.entries(seed)) {
+      this.store.set(key, structuredClone(value));
+    }
+  }
+
+  collection(name) {
+    return new FakeCollectionReference(this, name);
+  }
+
+  async runTransaction(callback) {
+    return callback(new FakeTransaction(this));
+  }
+
+  key(collectionName, id) {
+    return `${collectionName}/${id}`;
+  }
+
+  getData(collectionName, id) {
+    const value =
+        this.store.get(this.key(collectionName, id));
+
+    return value === undefined
+        ? undefined
+        : structuredClone(value);
+  }
+
+  setData(collectionName, id, data) {
+    this.store.set(
+        this.key(collectionName, id),
+        structuredClone(data));
+  }
+
+  updateData(collectionName, id, patch) {
+    const key = this.key(collectionName, id);
+    const current = this.store.get(key);
+
+    if (current === undefined) {
+      throw new Error('Fake update target does not exist.');
+    }
+
+    this.store.set(
+        key,
+        structuredClone({
+          ...current,
+          ...patch,
+        }));
+  }
+}
+
+function timestamp(ms) {
+  return new Date(ms);
+}
+
+test('ID token verifier uses Firebase verifyIdToken with revoked-session check', async () => {
+  let receivedToken = '';
+  let receivedCheckRevoked = null;
+
+  const verifier = new FirebaseAdminIdTokenVerifier({
+    auth: {
+      async verifyIdToken(token, checkRevoked) {
+        receivedToken = token;
+        receivedCheckRevoked = checkRevoked;
+
+        return {
+          uid: 'owner_uid',
+          role: 'super_admin',
+          superAdmin: false,
+        };
+      },
+    },
+  });
+
+  const result =
+      await verifier.verifyIdToken(
+          ' synthetic.firebase.token ');
+
+  assert.equal(result.ok, true);
+  assert.equal(result.uid, 'owner_uid');
+  assert.equal(result.claims.role, 'super_admin');
+  assert.equal(receivedToken, 'synthetic.firebase.token');
+  assert.equal(receivedCheckRevoked, true);
+  assert.equal(
+      JSON.stringify(result).includes(
+          'synthetic.firebase.token'),
+      false);
+});
+
+test('Super Admin authorizer accepts exact custom claim', async () => {
+  const authorizer =
+      new FirebaseAdminSuperAdminAuthorizer({
+        firestore: new FakeFirestore(),
+      });
+
+  const result = await authorizer.authorize({
+    uid: 'owner_uid',
+    claims: {
+      role: 'super_admin',
+      superAdmin: false,
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.authorized, true);
+  assert.equal(result.source, 'CUSTOM_CLAIM');
+});
+
+test('Super Admin authorizer supports existing active admins/{uid} fallback', async () => {
+  const firestore = new FakeFirestore({
+    'admins/owner_uid': {
+      isActive: true,
+      role: 'super_admin',
+    },
+  });
+
+  const authorizer =
+      new FirebaseAdminSuperAdminAuthorizer({
+        firestore,
+      });
+
+  const result = await authorizer.authorize({
+    uid: 'owner_uid',
+    claims: {
+      role: '',
+      superAdmin: false,
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.authorized, true);
+  assert.equal(result.source, 'FIRESTORE_ADMIN_RECORD');
+});
+
+test('consumed approval rechecker requires exact caller and Email binding scope', async () => {
+  const firestore = new FakeFirestore({
+    'agent_approvals/approval_1': {
+      approvalId: 'approval_1',
+      roleId: 'email_agent',
+      actionId: 'email.send',
+      module: 'email',
+      requestedBy: 'owner_uid',
+      actionScope: {
+        authorizationRequestId: 'authorization_1',
+        draftId: 'draft_1',
+        binding: {
+          algorithm: 'CANONICAL_JSON_SHA256_BASE64URL_V2',
+          fingerprint: 'binding_1',
+          draftId: 'draft_1',
+          exactDraftMatchRequired: true,
+        },
+        exactDraftMatchRequired: true,
+        oneActionOnly: true,
+        oneTimeConsumptionRequired: true,
+      },
+      status: 'CONSUMED',
+      createdAt: timestamp(1000),
+      expiresAt: timestamp(5000),
+      consumedAt: timestamp(4000),
+    },
+  });
+
+  const rechecker =
+      new FirebaseAdminConsumedApprovalRechecker({
+        firestore,
+      });
+
+  const result =
+      await rechecker.recheckConsumedApproval({
+        callerUid: 'owner_uid',
+        approvalId: 'approval_1',
+        authorizationRequestId: 'authorization_1',
+        draftId: 'draft_1',
+        bindingFingerprint: 'binding_1',
+        roleId: 'email_agent',
+        actionId: 'email.send',
+        module: 'email',
+      });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.consumed, true);
+  assert.equal(result.handoffBindingExact, true);
+
+  const wrongCaller =
+      await rechecker.recheckConsumedApproval({
+        callerUid: 'attacker_uid',
+        approvalId: 'approval_1',
+        authorizationRequestId: 'authorization_1',
+        draftId: 'draft_1',
+        bindingFingerprint: 'binding_1',
+        roleId: 'email_agent',
+        actionId: 'email.send',
+        module: 'email',
+      });
+
+  assert.equal(wrongCaller.ok, false);
+});
+
+
+test('consumed approval rechecker rejects extra Email actionScope fields', async () => {
+  const firestore = new FakeFirestore({
+    'agent_approvals/approval_extra_scope': {
+      approvalId: 'approval_extra_scope',
+      roleId: 'email_agent',
+      actionId: 'email.send',
+      module: 'email',
+      requestedBy: 'owner_uid',
+      actionScope: {
+        authorizationRequestId: 'authorization_1',
+        draftId: 'draft_1',
+        binding: {
+          algorithm: 'CANONICAL_JSON_SHA256_BASE64URL_V2',
+          fingerprint: 'binding_1',
+          draftId: 'draft_1',
+          exactDraftMatchRequired: true,
+        },
+        exactDraftMatchRequired: true,
+        oneActionOnly: true,
+        oneTimeConsumptionRequired: true,
+        subject: 'must-not-be-in-authoritative-scope',
+      },
+      status: 'CONSUMED',
+      expiresAt: timestamp(5000),
+      consumedAt: timestamp(4000),
+    },
+  });
+
+  const rechecker =
+      new FirebaseAdminConsumedApprovalRechecker({
+        firestore,
+      });
+
+  const result =
+      await rechecker.recheckConsumedApproval({
+        callerUid: 'owner_uid',
+        approvalId: 'approval_extra_scope',
+        authorizationRequestId: 'authorization_1',
+        draftId: 'draft_1',
+        bindingFingerprint: 'binding_1',
+        roleId: 'email_agent',
+        actionId: 'email.send',
+        module: 'email',
+      });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.exactActionScopeValidated, false);
+  assert.equal(
+      result.reason,
+      'CONSUMED_APPROVAL_EXACT_SCOPE_MISMATCH');
+});
+test('consumed approval timestamp corruption fails closed', async () => {
+  const firestore = new FakeFirestore({
+    'agent_approvals/approval_bad_time': {
+      approvalId: 'approval_bad_time',
+      roleId: 'email_agent',
+      actionId: 'email.send',
+      module: 'email',
+      requestedBy: 'owner_uid',
+      actionScope: {
+        authorizationRequestId: 'authorization_1',
+        draftId: 'draft_1',
+        binding: {
+          algorithm: 'CANONICAL_JSON_SHA256_BASE64URL_V2',
+          fingerprint: 'binding_1',
+          draftId: 'draft_1',
+          exactDraftMatchRequired: true,
+        },
+        exactDraftMatchRequired: true,
+        oneActionOnly: true,
+        oneTimeConsumptionRequired: true,
+      },
+      status: 'CONSUMED',
+      expiresAt: timestamp(3000),
+      consumedAt: timestamp(4000),
+    },
+  });
+
+  const rechecker =
+      new FirebaseAdminConsumedApprovalRechecker({
+        firestore,
+      });
+
+  const result =
+      await rechecker.recheckConsumedApproval({
+        callerUid: 'owner_uid',
+        approvalId: 'approval_bad_time',
+        authorizationRequestId: 'authorization_1',
+        draftId: 'draft_1',
+        bindingFingerprint: 'binding_1',
+        roleId: 'email_agent',
+        actionId: 'email.send',
+        module: 'email',
+      });
+
+  assert.equal(result.ok, false);
+  assert.equal(
+      result.reason,
+      'CONSUMED_APPROVAL_TIMESTAMP_CORRUPT');
+});
+
+test('verified sender rechecker requires server provider verification evidence', async () => {
+  const firestore = new FakeFirestore({
+    'agent_email_sender_identities/sender_primary': {
+      senderIdentityId: 'sender_primary',
+      providerId: 'brevo',
+      fromAddress: 'synthetic@example.com',
+      displayName: 'Synthetic Sender',
+      enabled: true,
+      verifiedAt: timestamp(2000),
+      verificationSource: 'SERVER_PROVIDER_VERIFIED',
+      createdAt: timestamp(1000),
+      updatedAt: timestamp(2000),
+    },
+  });
+
+  const verifier =
+      new FirebaseAdminVerifiedSenderIdentityVerifier({
+        firestore,
+      });
+
+  const result =
+      await verifier.verifySenderIdentity({
+        senderIdentityId: 'sender_primary',
+        providerId: 'brevo',
+        fromAddress: 'SYNTHETIC@example.com',
+      });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.verified, true);
+  assert.equal(result.enabled, true);
+
+  firestore.updateData(
+      'agent_email_sender_identities',
+      'sender_primary',
+      {
+        verificationSource: 'CLIENT_ASSERTED',
+      });
+
+  const rejected =
+      await verifier.verifySenderIdentity({
+        senderIdentityId: 'sender_primary',
+        providerId: 'brevo',
+        fromAddress: 'synthetic@example.com',
+      });
+
+  assert.equal(rejected.ok, false);
+});
+
+test('transactional idempotency guard rejects duplicate RESERVED claim', async () => {
+  const firestore = new FakeFirestore();
+  let timestampCounter = 0;
+
+  const guard = new FirebaseAdminEmailReplayGuard({
+    firestore,
+    serverTimestamp: () => ({
+      syntheticServerTimestamp: ++timestampCounter,
+    }),
+  });
+
+  const request = {
+    approvalId: 'approval_1',
+    handoffId: 'handoff_1',
+    authorizationRequestId: 'authorization_1',
+    bindingFingerprint: 'binding_1',
+    providerId: 'brevo',
+  };
+
+  const first = await guard.claim(request);
+  const second = await guard.claim(request);
+
+  assert.equal(first.ok, true);
+  assert.equal(first.claimed, true);
+  assert.equal(first.retry, false);
+
+  assert.equal(second.ok, false);
+  assert.equal(second.claimed, false);
+  assert.equal(
+      second.reason,
+      'EMAIL_IDEMPOTENCY_REPLAY_REJECTED');
+});
+
+test('FAILED_RETRYABLE may be atomically reserved again for exact same scope', async () => {
+  const firestore = new FakeFirestore();
+
+  const guard = new FirebaseAdminEmailReplayGuard({
+    firestore,
+    serverTimestamp: () => ({
+      syntheticServerTimestamp: true,
+    }),
+  });
+
+  const request = {
+    approvalId: 'approval_retry',
+    handoffId: 'handoff_retry',
+    authorizationRequestId: 'authorization_retry',
+    bindingFingerprint: 'binding_retry',
+    providerId: 'brevo',
+  };
+
+  const first = await guard.claim(request);
+
+  assert.equal(first.ok, true);
+
+  await guard.markFailedRetryable({
+    approvalId: request.approvalId,
+    handoffId: request.handoffId,
+  });
+
+  const retry = await guard.claim(request);
+
+  assert.equal(retry.ok, true);
+  assert.equal(retry.claimed, true);
+  assert.equal(retry.retry, true);
+});
+
+test('ACCEPTED or DELIVERY_UNKNOWN cannot be reclaimed', async () => {
+  const firestore = new FakeFirestore();
+
+  const guard = new FirebaseAdminEmailReplayGuard({
+    firestore,
+    serverTimestamp: () => ({
+      syntheticServerTimestamp: true,
+    }),
+  });
+
+  const request = {
+    approvalId: 'approval_final',
+    handoffId: 'handoff_final',
+    authorizationRequestId: 'authorization_final',
+    bindingFingerprint: 'binding_final',
+    providerId: 'brevo',
+  };
+
+  await guard.claim(request);
+
+  await guard.markAccepted({
+    approvalId: request.approvalId,
+    handoffId: request.handoffId,
+    providerMessageId: 'synthetic_message',
+  });
+
+  const acceptedReplay =
+      await guard.claim(request);
+
+  assert.equal(acceptedReplay.ok, false);
+
+  const unknownRequest = {
+    ...request,
+    approvalId: 'approval_unknown',
+    handoffId: 'handoff_unknown',
+  };
+
+  await guard.claim(unknownRequest);
+
+  await guard.markDeliveryUnknown({
+    approvalId: unknownRequest.approvalId,
+    handoffId: unknownRequest.handoffId,
+  });
+
+  const unknownReplay =
+      await guard.claim(unknownRequest);
+
+  assert.equal(unknownReplay.ok, false);
+});
+
+test('trusted adapter classes are dependency-injected and tests require no Firebase app initialization', () => {
+  assert.equal(typeof FirebaseAdminIdTokenVerifier, 'function');
+  assert.equal(typeof FirebaseAdminSuperAdminAuthorizer, 'function');
+  assert.equal(typeof FirebaseAdminConsumedApprovalRechecker, 'function');
+  assert.equal(
+      typeof FirebaseAdminVerifiedSenderIdentityVerifier,
+      'function');
+  assert.equal(typeof FirebaseAdminEmailReplayGuard, 'function');
+});
