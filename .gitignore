@@ -25,3 +25,6 @@ windows/flutter/ephemeral/
 *.iml
 *.log
 node_modules/
+.env.local
+.next/
+out/
