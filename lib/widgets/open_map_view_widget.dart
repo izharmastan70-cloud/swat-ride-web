@@ -1,8 +1,9 @@
-// Reusable OpenStreetMap map widget with marker and selection support.
+// Reusable Mapbox map widget with marker and selection support.
 
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
+import '../config/mapbox_config.dart';
 import '../models/map_location_model.dart';
 
 class OpenMapViewWidget extends StatefulWidget {
@@ -127,9 +128,9 @@ class _OpenMapViewWidgetState extends State<OpenMapViewWidget> {
               },
             ),
             children: [
-              // Base layer: OpenStreetMap tiles
+              // Base layer: Mapbox Streets raster tiles.
               TileLayer(
-                urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+                urlTemplate: MapboxConfig.rasterTilesUrl,
                 userAgentPackageName: 'com.swatride.app',
                 maxNativeZoom: 19,
               ),

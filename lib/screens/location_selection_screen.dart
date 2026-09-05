@@ -765,7 +765,7 @@ class _LocationSelectionScreenState extends State<LocationSelectionScreen> {
                   // =================================================
                   const Center(
                     child: Text(
-                      'OpenStreetMap selection with OSRM fare estimates',
+                      'Mapbox selection with live route fare estimates',
 
                       textAlign: TextAlign.center,
 

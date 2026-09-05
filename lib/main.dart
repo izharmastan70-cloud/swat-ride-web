@@ -6,6 +6,7 @@ import 'screens/login_screen.dart';
 import 'screens/home_screen.dart';
 import 'screens/tourism_hotels_screen.dart';
 import 'ride_admin/screens/ride_admin_access_guard_screen.dart';
+import 'services/app_integrity_service.dart';
 import 'widgets/floating_social_media_bar.dart';
 
 // ===============================
@@ -18,6 +19,7 @@ Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
   await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
+  await AppIntegrityService.activate();
 
   runApp(const SwatRideApp());
 }

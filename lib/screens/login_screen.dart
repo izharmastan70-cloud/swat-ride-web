@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:http/http.dart' as http;
 import 'package:url_launcher/url_launcher.dart';
+
+import 'dart:convert';
 
 import 'otp_verification_screen.dart';
 
@@ -39,6 +42,9 @@ class _LoginScreenState
   static const String _tiktokUrl = 'https://www.tiktok.com/@swatride';
   static const String _tiktokLoginUrl = String.fromEnvironment(
     'TIKTOK_LOGIN_URL',
+  );
+  static const String _otpBackendUrl = String.fromEnvironment(
+    'OTP_BACKEND_URL',
   );
 
   // =========================================================
@@ -166,7 +172,36 @@ class _LoginScreenState
   // SEND TEST OTP
   // =========================================================
 
-  Future<void> _sendTestOtp() async {
+  Future<void> _chooseOtpDeliveryMethod() async {
+    final String? method = await showModalBottomSheet<String>(
+      context: context,
+      builder: (context) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.chat_outlined),
+              title: const Text('WhatsApp Message'),
+              onTap: () => Navigator.pop(context, 'whatsapp'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.sms_outlined),
+              title: const Text('Standard SMS'),
+              onTap: () => Navigator.pop(context, 'sms'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.phone_in_talk_outlined),
+              title: const Text('Phone Call / Voice OTP'),
+              onTap: () => Navigator.pop(context, 'call'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (method != null) await _sendOtp(method);
+  }
+
+  Future<void> _sendOtp(String method) async {
     String phoneNumber =
         phoneController.text.trim();
 
@@ -208,184 +243,35 @@ class _LoginScreenState
     final String fullPhoneNumber =
         '$selectedCountryCode$phoneNumber';
 
-    // =======================================================
-    // TEST NUMBER CHECK
-    // =======================================================
-
-    if (fullPhoneNumber !=
-        testPhoneNumber) {
-      _showError(
-        'For testing, please use +92 3414188770.',
-      );
+    if (_otpBackendUrl.isEmpty) {
+      _showError('Phone verification is not configured.');
       return;
     }
-
-    // =======================================================
-    // LOADING
-    // =======================================================
 
     setState(() {
       isLoading = true;
     });
 
     try {
-      // =====================================================
-      // FIREBASE TEST PHONE AUTH
-      // =====================================================
-      //
-      // Firebase Console ke Phone Numbers for testing mein
-      // add kiya hua number use ho raha hai.
-      //
-      // Firebase test number par real SMS send nahi hota.
-      //
-      // =====================================================
-
-      await _auth.verifyPhoneNumber(
-        phoneNumber:
-            testPhoneNumber,
-
-        // ===================================================
-        // ANDROID AUTO VERIFICATION
-        // ===================================================
-
-        verificationCompleted:
-            (PhoneAuthCredential
-                credential) async {
-          try {
-            await _auth
-                .signInWithCredential(
-              credential,
-            );
-          } catch (e) {
-            debugPrint(
-              'Auto verification error: $e',
-            );
-          }
-        },
-
-        // ===================================================
-        // VERIFICATION FAILED
-        // ===================================================
-
-        verificationFailed:
-            (FirebaseAuthException e) {
-          debugPrint(
-            '================================',
-          );
-
-          debugPrint(
-            'TEST PHONE AUTH ERROR',
-          );
-
-          debugPrint(
-            'Code: ${e.code}',
-          );
-
-          debugPrint(
-            'Message: ${e.message}',
-          );
-
-          debugPrint(
-            '================================',
-          );
-
-          if (!mounted) {
-            return;
-          }
-
-          setState(() {
-            isLoading = false;
-          });
-
-          _showError(
-            e.message ??
-                'Phone verification failed.',
-          );
-        },
-
-        // ===================================================
-        // CODE SENT
-        // ===================================================
-
-        codeSent: (
-          String verificationId,
-          int? resendToken,
-        ) {
-          if (!mounted) {
-            return;
-          }
-
-          setState(() {
-            isLoading = false;
-          });
-
-          // =================================================
-          // OPEN OTP SCREEN
-          // =================================================
-
-          Navigator.push(
-            context,
-            MaterialPageRoute(
-              builder:
-                  (context) =>
-                      OtpVerificationScreen(
-                verificationId:
-                    verificationId,
-
-                phoneNumber:
-                    testPhoneNumber,
-              ),
-            ),
-          );
-        },
-
-        // ===================================================
-        // AUTO RETRIEVAL TIMEOUT
-        // ===================================================
-
-        codeAutoRetrievalTimeout:
-            (String verificationId) {
-          debugPrint(
-            'OTP auto retrieval timeout.',
-          );
-
-          debugPrint(
-            'Verification ID: $verificationId',
-          );
-        },
+      final response = await http.post(
+        Uri.parse('$_otpBackendUrl/api/auth/otp/request'),
+        headers: const {'content-type': 'application/json'},
+        body: jsonEncode({'phoneNumber': fullPhoneNumber, 'method': method}),
       );
-    } on FirebaseAuthException catch (e) {
-      debugPrint(
-        '================================',
-      );
-
-      debugPrint(
-        'TEST OTP FIREBASE ERROR',
-      );
-
-      debugPrint(
-        'Code: ${e.code}',
-      );
-
-      debugPrint(
-        'Message: ${e.message}',
-      );
-
-      debugPrint(
-        '================================',
-      );
-
-      if (!mounted) {
-        return;
+      final body = jsonDecode(response.body) as Map<String, dynamic>;
+      if (response.statusCode != 202 || body['ok'] != true) {
+        throw StateError(body['code'] ?? 'Unable to send verification code.');
       }
-
-      setState(() {
-        isLoading = false;
-      });
-
-      _showError(
-        e.message ??
-            'Unable to send verification code.',
+      if (!mounted) return;
+      Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (context) => OtpVerificationScreen(
+            verificationId: body['sessionId'] as String,
+            phoneNumber: fullPhoneNumber,
+            backendUrl: _otpBackendUrl,
+          ),
+        ),
       );
     } catch (e) {
       debugPrint(
@@ -677,14 +563,13 @@ class _LoginScreenState
                 SizedBox(
                   width:
                       double.infinity,
-                  height:
-                      55,
+                    height: 55,
                   child:
                       ElevatedButton(
                     onPressed:
                         isLoading
                             ? null
-                            : _sendTestOtp,
+                            : _chooseOtpDeliveryMethod,
                     style:
                         ElevatedButton
                             .styleFrom(
@@ -762,41 +647,6 @@ class _LoginScreenState
                 const SizedBox(
                   height:
                       20,
-                ),
-
-                // =====================================================
-                // TEST LOGIN NOTICE
-                // =====================================================
-
-                Text(
-                  'Testing Mode: Use +92 3414188770 and OTP 414188.',
-                  textAlign:
-                      TextAlign.center,
-                  style:
-                      TextStyle(
-                    color:
-                        Colors.grey.shade500,
-                    fontSize:
-                        12,
-                  ),
-                ),
-
-                const SizedBox(
-                  height:
-                      8,
-                ),
-
-                Text(
-                  'Real Phone OTP code is temporarily kept disabled until Firebase Billing is enabled.',
-                  textAlign:
-                      TextAlign.center,
-                  style:
-                      TextStyle(
-                    color:
-                        Colors.grey.shade600,
-                    fontSize:
-                        11,
-                  ),
                 ),
 
                 const SizedBox(

@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "test": "node --test",
-    "check": "node --check api/email/send.js && node --check src/core/email_send_handler.js"
+    "check": "node --check api/email/send.js && node --check src/core/email_send_handler.js && node --check api/calls/start.js && node --check api/calls/turn.js && node --check api/calls/heartbeat.js && node --check api/calls/dispatch.js && node --check api/calls/end.js && node --check api/billing/daily.js"
   },
   "dependencies": {
     "firebase-admin": "14.2.0",

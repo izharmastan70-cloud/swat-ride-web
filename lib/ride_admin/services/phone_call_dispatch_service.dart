@@ -4,6 +4,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:http/http.dart' as http;
 
 import '../../models/location_model.dart';
+import '../../services/app_integrity_service.dart';
 import '../../super_admin/services/super_admin_operational_control_service.dart';
 
 class PhoneCallDispatchResult {
@@ -23,23 +24,28 @@ class PhoneCallDispatchService {
     FirebaseAuth? auth,
     http.Client? client,
     String? endpoint,
+     AppIntegrityService? appIntegrity,
     SuperAdminOperationalControlService? operationalControls,
   }) : _auth = auth ?? FirebaseAuth.instance,
        _client = client ?? http.Client(),
        _endpoint = endpoint ?? _defaultEndpoint,
+       _appIntegrity = appIntegrity ?? AppIntegrityService(),
        _operationalControls =
            operationalControls ?? SuperAdminOperationalControlService();
 
   static const String _defaultEndpoint = String.fromEnvironment(
     'CALL_RIDE_DISPATCH_URL',
+    defaultValue: 'https://swat-ride-backend.onrender.com/api/call-rides/dispatch',
   );
   static const String _defaultCancellationEndpoint = String.fromEnvironment(
     'CALL_RIDE_CANCELLATION_URL',
+    defaultValue: 'https://swat-ride-backend.onrender.com/api/call-rides/cancel',
   );
 
   final FirebaseAuth _auth;
   final http.Client _client;
   final String _endpoint;
+  final AppIntegrityService _appIntegrity;
   final SuperAdminOperationalControlService _operationalControls;
 
   Future<void> cancel({
@@ -53,11 +59,13 @@ class PhoneCallDispatchService {
     if (token == null || token.isEmpty) {
       throw StateError('Sign in before cancelling a phone-call ride.');
     }
+    final String appCheckToken = await _appIntegrity.token();
     final http.Response response = await _client.post(
       Uri.parse(_defaultCancellationEndpoint),
       headers: <String, String>{
         'Authorization': 'Bearer $token',
         'Content-Type': 'application/json',
+        'X-Firebase-AppCheck': appCheckToken,
       },
       body: jsonEncode(<String, String>{
         'rideId': rideId.trim(),
@@ -101,12 +109,14 @@ class PhoneCallDispatchService {
     if (token == null || token.isEmpty) {
       throw StateError('Sign in before dispatching a phone-call ride.');
     }
+    final String appCheckToken = await _appIntegrity.token();
 
     final http.Response response = await _client.post(
       Uri.parse(_endpoint),
       headers: <String, String>{
         'Authorization': 'Bearer $token',
         'Content-Type': 'application/json',
+        'X-Firebase-AppCheck': appCheckToken,
       },
       body: jsonEncode(<String, dynamic>{
         'callSessionId': callSessionId.trim(),

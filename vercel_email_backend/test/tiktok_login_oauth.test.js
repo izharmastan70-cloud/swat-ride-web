@@ -15,7 +15,7 @@ test('TikTok OAuth authorization request targets the official endpoint with sign
   assert.equal(url.origin + url.pathname, 'https://www.tiktok.com/v2/auth/authorize/');
   assert.equal(url.searchParams.get('client_key'), 'client-key');
   assert.equal(url.searchParams.get('redirect_uri'), environment.TIKTOK_OAUTH_REDIRECT_URI);
-  assert.equal(url.searchParams.get('scope'), 'user.info.basic');
+  assert.equal(url.searchParams.get('scope'), 'user.info.basic,video.publish');
   assert.equal(verifyTikTokAuthorizationState({ state: request.state, signedState: request.signedState, stateSecret: environment.TIKTOK_OAUTH_STATE_SECRET }), true);
   assert.equal(verifyTikTokAuthorizationState({ state: 'tampered', signedState: request.signedState, stateSecret: environment.TIKTOK_OAUTH_STATE_SECRET }), false);
 });

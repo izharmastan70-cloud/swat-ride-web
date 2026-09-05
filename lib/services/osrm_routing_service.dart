@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:http/http.dart' as http;
 
+import '../config/mapbox_config.dart';
 import '../models/location_model.dart';
 import '../models/osrm_route_model.dart';
 
@@ -17,7 +18,8 @@ class OsrmRoutingException implements Exception {
 class OsrmRoutingService {
   OsrmRoutingService({http.Client? client}) : _client = client ?? http.Client();
 
-  static const String _host = 'router.project-osrm.org';
+  static const String _mapboxHost = 'api.mapbox.com';
+  static const String _osrmHost = 'router.project-osrm.org';
   static const Duration _requestTimeout = Duration(seconds: 15);
 
   final http.Client _client;
@@ -29,8 +31,36 @@ class OsrmRoutingService {
     _validateLocation(pickup, 'pickup');
     _validateLocation(destination, 'destination');
 
+    try {
+      final Uri mapboxUri = Uri.https(
+        _mapboxHost,
+        '/directions/v5/mapbox/driving/${pickup.longitude},${pickup.latitude};'
+            '${destination.longitude},${destination.latitude}',
+        <String, String>{
+          'access_token': MapboxConfig.accessToken,
+          'overview': 'full',
+          'geometries': 'geojson',
+          'steps': 'false',
+        },
+      );
+      final http.Response mapboxResponse = await _client
+          .get(mapboxUri, headers: const <String, String>{'User-Agent': 'SWAT-Ride/1.0'})
+          .timeout(_requestTimeout);
+      if (mapboxResponse.statusCode == 200) {
+        return _parseRoute(jsonDecode(mapboxResponse.body));
+      }
+      return _getOsrmFallbackRoute(pickup, destination);
+    } catch (_) {
+      return _getOsrmFallbackRoute(pickup, destination);
+    }
+  }
+
+  Future<OsrmRoute> _getOsrmFallbackRoute(
+    LocationModel pickup,
+    LocationModel destination,
+  ) async {
     final Uri uri = Uri.https(
-      _host,
+      _osrmHost,
       '/route/v1/driving/${pickup.longitude},${pickup.latitude};'
           '${destination.longitude},${destination.latitude}',
       const <String, String>{
@@ -39,13 +69,12 @@ class OsrmRoutingService {
         'steps': 'false',
       },
     );
-
     try {
       final http.Response response = await _client
           .get(uri, headers: const <String, String>{'User-Agent': 'SWAT-Ride/1.0'})
           .timeout(_requestTimeout);
       if (response.statusCode != 200) {
-        throw OsrmRoutingException('OSRM returned HTTP ${response.statusCode}.');
+        throw const OsrmRoutingException('No driving route is available.');
       }
       return _parseRoute(jsonDecode(response.body));
     } on OsrmRoutingException {

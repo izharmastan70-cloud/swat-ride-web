@@ -10,8 +10,10 @@
 /// - Telemetry and error reporting
 
 import 'dart:async';
+import 'dart:convert';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:http/http.dart' as http;
 
 /// Result of an agent connection check
 class AgentConnectionStatus {
@@ -105,6 +107,7 @@ class AgentInvocationResult {
 class AiAgentConnectionService {
   final FirebaseFirestore _firestore;
   final FirebaseAuth _auth;
+  final http.Client _client;
   
   static const String _configCollection = 'ai_agent_config';
   static const String _healthCheckCollection = 'agent_health_checks';
@@ -118,8 +121,10 @@ class AiAgentConnectionService {
   AiAgentConnectionService({
     FirebaseFirestore? firestore,
     FirebaseAuth? auth,
+    http.Client? client,
   })  : _firestore = firestore ?? FirebaseFirestore.instance,
-        _auth = auth ?? FirebaseAuth.instance;
+        _auth = auth ?? FirebaseAuth.instance,
+        _client = client ?? http.Client();
 
   /// Get connection status for a specific agent
   /// 
@@ -254,12 +259,14 @@ class AiAgentConnectionService {
         startTime: startTime,
       );
     } catch (e) {
-      final duration = DateTime.now().difference(startTime);
-      return AgentInvocationResult.failure(
-        agentId,
+      return AgentInvocationResult(
+        success: false,
+        agentId: agentId,
         errorCode: 'INVOCATION_EXCEPTION',
         errorMessage: 'Unexpected error: $e',
-      )..executionDuration;
+        invokedAt: DateTime.now(),
+        executionDuration: DateTime.now().difference(startTime),
+      );
     }
   }
 
@@ -273,26 +280,35 @@ class AiAgentConnectionService {
     required DateTime startTime,
   }) async {
     try {
-      // Build full URL
-      final url = Uri.parse('$endpoint/invoke');
+      final http.Response response = await _client
+          .post(
+            _endpointUri(endpoint, 'invoke'),
+            headers: <String, String>{
+              'Authorization': 'Bearer $idToken',
+              'Content-Type': 'application/json',
+            },
+            body: jsonEncode(request),
+          )
+          .timeout(_requestTimeout);
+      final dynamic decoded = jsonDecode(response.body);
+      final Map<String, dynamic>? body = decoded is Map<String, dynamic>
+          ? decoded
+          : null;
+      if (response.statusCode < 200 || response.statusCode >= 300 ||
+          body?['ok'] != true) {
+        throw _AgentHttpException(response.statusCode);
+      }
 
-      // Make HTTP request (in production, use http package)
-      // This is a placeholder - actual implementation would use http.post()
-      final response = await Future.delayed(
-        const Duration(milliseconds: 100),
-        () => throw Exception('HTTP client not implemented in stub'),
-      );
-
-      // Process response
       final duration = DateTime.now().difference(startTime);
-      
-      return AgentInvocationResult.success(
-        agentId,
+      return AgentInvocationResult(
+        success: true,
+        agentId: agentId,
         responseData: {'status': 'pending', 'requestId': request['timestamp']},
+        invokedAt: DateTime.now(),
+        executionDuration: duration,
       );
     } catch (e) {
-      // Retry on transient errors
-      if (attempt < maxRetries) {
+      if (_isTransientFailure(e) && attempt < maxRetries) {
         final backoffMs = 100 * (1 << attempt); // 100ms, 200ms, 400ms
         await Future.delayed(Duration(milliseconds: backoffMs));
         
@@ -308,10 +324,15 @@ class AiAgentConnectionService {
       }
 
       final duration = DateTime.now().difference(startTime);
-      return AgentInvocationResult.failure(
-        agentId,
-        errorCode: 'INVOCATION_FAILED',
-        errorMessage: 'Agent invocation failed: $e',
+      return AgentInvocationResult(
+        success: false,
+        agentId: agentId,
+        errorCode: e is _AgentHttpException
+            ? 'AGENT_HTTP_${e.statusCode}'
+            : 'INVOCATION_FAILED',
+        errorMessage: 'Agent invocation failed.',
+        invokedAt: DateTime.now(),
+        executionDuration: duration,
       );
     }
   }
@@ -319,15 +340,26 @@ class AiAgentConnectionService {
   /// Check if agent endpoint is responding
   Future<bool> _checkAgentHealth(String endpoint) async {
     try {
-      // Health check endpoint
-      final url = Uri.parse('$endpoint/health');
-      
-      // In production, use http package
-      // For now, return true assuming endpoint is valid URL format
-      return Uri.tryParse(endpoint) != null;
+      final response = await _client
+          .get(_endpointUri(endpoint, 'health'))
+          .timeout(_requestTimeout);
+      return response.statusCode >= 200 && response.statusCode < 300;
     } catch (e) {
       return false;
     }
+  }
+
+  Uri _endpointUri(String endpoint, String route) {
+    final Uri base = Uri.parse(endpoint.endsWith('/') ? endpoint : '$endpoint/');
+    if (!base.hasScheme || !base.hasAuthority) {
+      throw const FormatException('Agent endpoint must be an absolute URL.');
+    }
+    return base.resolve(route);
+  }
+
+  bool _isTransientFailure(Object error) {
+    if (error is TimeoutException || error is http.ClientException) return true;
+    return error is _AgentHttpException && error.statusCode >= 500;
   }
 
   /// Clear connection cache to force fresh checks
@@ -376,4 +408,10 @@ class AiAgentConnectionService {
       // Silently fail telemetry reporting
     }
   }
+}
+
+class _AgentHttpException implements Exception {
+  const _AgentHttpException(this.statusCode);
+
+  final int statusCode;
 }

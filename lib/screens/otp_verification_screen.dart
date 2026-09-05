@@ -1,14 +1,19 @@
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
+
+import 'dart:convert';
 
 class OtpVerificationScreen extends StatefulWidget {
   final String verificationId;
   final String phoneNumber;
+  final String backendUrl;
 
   const OtpVerificationScreen({
     super.key,
     required this.verificationId,
     required this.phoneNumber,
+    required this.backendUrl,
   });
 
   @override
@@ -51,22 +56,17 @@ class _OtpVerificationScreenState
     });
 
     try {
-      // =======================================================
-      // CREATE PHONE AUTH CREDENTIAL
-      // =======================================================
-
-      final PhoneAuthCredential credential =
-          PhoneAuthProvider.credential(
-        verificationId: widget.verificationId,
-        smsCode: otp,
+      final response = await http.post(
+        Uri.parse('${widget.backendUrl}/api/auth/otp/verify'),
+        headers: const {'content-type': 'application/json'},
+        body: jsonEncode({'sessionId': widget.verificationId, 'code': otp}),
       );
-
-      // =======================================================
-      // SIGN IN WITH PHONE OTP
-      // =======================================================
-
-      await FirebaseAuth.instance.signInWithCredential(
-        credential,
+      final body = jsonDecode(response.body) as Map<String, dynamic>;
+      if (response.statusCode != 200 || body['ok'] != true) {
+        throw StateError(body['code'] ?? 'OTP verification failed.');
+      }
+      await FirebaseAuth.instance.signInWithCustomToken(
+        body['customToken'] as String,
       );
 
       if (!mounted) return;
@@ -127,6 +127,9 @@ class _OtpVerificationScreenState
       }
 
       _showError(message);
+    } on StateError catch (e) {
+      if (!mounted) return;
+      _showError(e.message ?? 'OTP verification failed. Please try again.');
     } catch (e) {
       if (!mounted) return;
 

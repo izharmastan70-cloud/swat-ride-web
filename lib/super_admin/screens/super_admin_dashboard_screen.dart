@@ -16,6 +16,7 @@ import '../../ai_agent/screens/agent_evaluation_results_screen.dart';
 import '../../ai_agent/screens/agent_owner_attention_inbox_screen.dart';
 import 'super_admin_safety_control_screen.dart';
 import 'super_admin_video_tutorial_management_screen.dart';
+import 'super_admin_billing_subscriptions_screen.dart';
 import '../services/super_admin_operational_control_service.dart';
 
 // =========================================================
@@ -81,6 +82,19 @@ class _SuperAdminDashboardScreenState extends State<SuperAdminDashboardScreen> {
               controls: _operationalControls,
             ),
             const SizedBox(height: 22),
+
+            _SuperAdminModuleCard(
+              icon: Icons.receipt_long_outlined,
+              title: 'Billing & Subscriptions',
+              subtitle: 'Review detected services, costs and renewal alerts.',
+              onTap: () {
+                Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => const SuperAdminBillingSubscriptionsScreen(),
+                  ),
+                );
+              },
+            ),
 
             const Text(
               'Platform Control',
@@ -431,6 +445,8 @@ class _SuperAdminOperationalControlsPanel extends StatelessWidget {
             const SuperAdminOperationalControls(
               phoneCallBookingEnabled: true,
               localMessagingRelayEnabled: true,
+              billingAutoDiscoveryEnabled: true,
+              billingWhatsAppAlertsEnabled: true,
             );
         return Container(
           padding: const EdgeInsets.all(16),
@@ -464,6 +480,26 @@ class _SuperAdminOperationalControlsPanel extends StatelessWidget {
                 onChanged: (bool enabled) =>
                     controls.setLocalMessagingRelayEnabled(enabled),
               ),
+                SwitchListTile.adaptive(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('Billing Auto-Discovery',
+                  style: TextStyle(color: Colors.white)),
+                subtitle: const Text('OFF pauses daily service scanning.',
+                  style: TextStyle(color: Colors.white54)),
+                value: values.billingAutoDiscoveryEnabled,
+                onChanged: (bool enabled) =>
+                  controls.setBillingAutoDiscoveryEnabled(enabled),
+                ),
+                SwitchListTile.adaptive(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('Billing WhatsApp Alerts',
+                  style: TextStyle(color: Colors.white)),
+                subtitle: const Text('OFF suppresses billing expiry alerts.',
+                  style: TextStyle(color: Colors.white54)),
+                value: values.billingWhatsAppAlertsEnabled,
+                onChanged: (bool enabled) =>
+                  controls.setBillingWhatsAppAlertsEnabled(enabled),
+                ),
             ],
           ),
         );

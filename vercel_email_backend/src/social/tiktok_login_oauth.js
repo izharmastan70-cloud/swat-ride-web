@@ -21,7 +21,7 @@ export function createTikTokAuthorizationRequest(environment = process.env) {
   url.search = new URLSearchParams({
     client_key: clientKey,
     response_type: 'code',
-    scope: 'user.info.basic',
+    scope: 'user.info.basic,video.publish',
     redirect_uri: redirectUri,
     state,
   }).toString();

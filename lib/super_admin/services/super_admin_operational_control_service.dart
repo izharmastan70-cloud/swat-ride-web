@@ -4,15 +4,22 @@ class SuperAdminOperationalControls {
   const SuperAdminOperationalControls({
     required this.phoneCallBookingEnabled,
     required this.localMessagingRelayEnabled,
+    required this.billingAutoDiscoveryEnabled,
+    required this.billingWhatsAppAlertsEnabled,
   });
 
   final bool phoneCallBookingEnabled;
   final bool localMessagingRelayEnabled;
+  final bool billingAutoDiscoveryEnabled;
+  final bool billingWhatsAppAlertsEnabled;
 
   factory SuperAdminOperationalControls.fromMap(Map<String, dynamic>? data) {
     return SuperAdminOperationalControls(
       phoneCallBookingEnabled: data?['phoneCallBookingEnabled'] != false,
       localMessagingRelayEnabled: data?['localMessagingRelayEnabled'] != false,
+        billingAutoDiscoveryEnabled: data?['billingAutoDiscoveryEnabled'] != false,
+        billingWhatsAppAlertsEnabled:
+          data?['billingWhatsAppAlertsEnabled'] != false,
     );
   }
 }
@@ -47,6 +54,22 @@ class SuperAdminOperationalControlService {
   Future<void> setLocalMessagingRelayEnabled(bool enabled) => _document.set(
         <String, dynamic>{
           'localMessagingRelayEnabled': enabled,
+          'updatedAt': FieldValue.serverTimestamp(),
+        },
+        SetOptions(merge: true),
+      );
+
+  Future<void> setBillingAutoDiscoveryEnabled(bool enabled) => _document.set(
+        <String, dynamic>{
+          'billingAutoDiscoveryEnabled': enabled,
+          'updatedAt': FieldValue.serverTimestamp(),
+        },
+        SetOptions(merge: true),
+      );
+
+  Future<void> setBillingWhatsAppAlertsEnabled(bool enabled) => _document.set(
+        <String, dynamic>{
+          'billingWhatsAppAlertsEnabled': enabled,
           'updatedAt': FieldValue.serverTimestamp(),
         },
         SetOptions(merge: true),
